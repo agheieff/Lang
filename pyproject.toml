@@ -17,6 +17,11 @@
   "jieba>=0.42.1",
   "pypinyin>=0.50.0",
   "opencc-python-reimplemented>=0.1.7",
+  # OpenRouter client from local libs for production LLM integration
+  "openrouter @ file:///home/agheieff/Arcadia/libs/openrouter",
+  # UI libraries (core widgets/JS and personal style), local editable references for dev
+  "arcadia-ui-core @ file:///home/agheieff/Arcadia/libs/arcadia_ui_core",
+  "arcadia-ui-style @ file:///home/agheieff/Arcadia/libs/arcadia_ui_style",
  ]
 
  [project.optional-dependencies]
@@ -40,3 +45,10 @@ zh = [
 
 [tool.setuptools]
 packages = { find = { include = ["Lang*", "server*" ] } }
+
+[tool.uv]
+managed = true
+[tool.uv.scripts]
+serve = "uvicorn server.main:app --reload --port 8000"
+
+

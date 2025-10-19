@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+import os
+
+try:
+    # Local OpenRouter client from libs/
+    from openrouter import complete as _or_complete  # type: ignore
+except Exception:  # pragma: no cover - optional during dev
+    _or_complete = None  # type: ignore
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select
@@ -55,22 +62,49 @@ def _strip_thinking_blocks(text: str) -> str:
     return text.strip()
 
 
-def chat_complete(base_url: str, model: Optional[str], messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: Optional[int] = None) -> str:
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload: Dict[str, Any] = {
-        "model": resolve_model(base_url, model),
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-    try:
-        # Avoid using stop sequences that can prematurely cut output (e.g., when model starts with <think>)
-        data = _http_json(url, method="POST", data=payload, timeout=120)
-        content = data["choices"][0]["message"]["content"].strip()
-        return _strip_thinking_blocks(content)
-    except Exception as e:
-        raise RuntimeError(f"LLM request failed: {e}")
+def chat_complete(
+    messages: List[Dict[str, str]],
+    *,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    temperature: float = 0.7,
+    max_tokens: Optional[int] = None,
+    base_url: str = "http://localhost:1234/v1",
+) -> str:
+    """Completion wrapper with provider switch.
+
+    provider: "openrouter" | "lmstudio" (default inferred from env)
+    """
+    prov = (provider or os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if not prov:
+        # Default to LM Studio for dev unless explicitly configured for OpenRouter
+        prov = "openrouter" if os.getenv("OPENROUTER_API_KEY") and os.getenv("PREFER_OPENROUTER", "").strip() else "lmstudio"
+    if prov == "openrouter":
+        if _or_complete is None:
+            raise RuntimeError("openrouter client not available; install libs/openrouter or set LLM_PROVIDER=lmstudio")
+        use_model = model or os.getenv("OPENROUTER_MODEL", "openrouter/auto")
+        try:
+            data = _or_complete(messages=messages, model=use_model, max_tokens=(max_tokens or 4096), temperature=temperature)
+            content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            return _strip_thinking_blocks(content)
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(f"LLM request (openrouter) failed: {e}")
+    else:
+        # LM Studio / OpenAI-compatible local endpoint
+        url = base_url.rstrip("/") + "/chat/completions"
+        payload: Dict[str, Any] = {
+            "model": resolve_model(base_url, model),
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        try:
+            data = _http_json(url, method="POST", data=payload, timeout=120)
+            content = data["choices"][0]["message"]["content"].strip()
+            return _strip_thinking_blocks(content)
+        except Exception as e:
+            raise RuntimeError(f"LLM request (lmstudio) failed: {e}")
 
 
 @dataclass
@@ -84,25 +118,46 @@ class PromptSpec:
 
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
+    def _lang_display(code: str) -> str:
+        if code.startswith("zh"):
+            return "Chinese"
+        if code.startswith("es"):
+            return "Spanish"
+        return code
+
     sys = (
-        "You are a writing assistant. Output ONLY the final passage text. "
-        "Do not include meta commentary, analysis, or <think> sections."
+        f"You are a tutor of {_lang_display(spec.lang)}. "
+        "Please generate a text for learning and comprehensible input practice, given the following parameters."
     )
-    lines = []
-    lines.append(f"Language: {spec.lang}")
-    if spec.script:
-        lines.append(f"Script: {spec.script}")
-    lines.append(f"Length: ~{spec.approx_len} {spec.unit}")
+
+    lines: List[str] = []
+    # Natural language guidance
+    lines.append(f"Write in {_lang_display(spec.lang)}.")
+    if spec.script and spec.lang.startswith("zh"):
+        if spec.script == "Hans":
+            lines.append("Use simplified Chinese characters.")
+        elif spec.script == "Hant":
+            lines.append("Use traditional Chinese characters.")
+    # Level hint phrased naturally
     if spec.user_level_hint:
-        lines.append(f"UserLevel: {spec.user_level_hint}")
+        lines.append(f"The student is around {spec.user_level_hint}; please use appropriate language for this level.")
+    # Explicit length phrasing
+    if spec.unit == "chars":
+        lines.append(f"The text should be around {spec.approx_len} characters long.")
+    else:
+        lines.append(f"The text should be around {spec.approx_len} words long.")
+    # Target words
     if spec.include_words:
         words = ", ".join(spec.include_words)
-        lines.append(f"TargetWords (must appear naturally): {words}")
+        lines.append(f"Please include these words naturally: {words}.")
+    # Constraints
     lines.append("Constraints:")
     lines.append("- Do not include translations or vocabulary lists.")
     lines.append("- Avoid English unless the target language is English.")
-    lines.append("- Keep the vocabulary consistent with the stated level; gently reinforce target words in context.")
-    lines.append("- Output ONLY the passage text; no headings, no bullet points, no analysis.")
+    lines.append("- Gently reinforce the target words in context and keep the language natural and engaging.")
+    # No mention of <think> sections; meta commentary discouraged
+    lines.append("- Do not include meta commentary.")
+
     content = "\n".join(lines)
     return [
         {"role": "system", "content": sys},

@@ -515,6 +515,98 @@ def get_me(user: User = Depends(_get_current_user)):
     return MeOut(id=user.id, email=user.email, subscription_tier=user.subscription_tier)
 
 
+# ---- UI Theme and Prefs (minimal) ----
+class ThemeIn(BaseModel):
+    name: Optional[str] = None
+    vars: Optional[Dict[str, Any]] = None
+    clear: Optional[bool] = None
+
+
+class UIPrefsIn(BaseModel):
+    motion: Optional[bool] = None
+    density: Optional[str] = None  # 'comfortable' | 'compact'
+    scale: Optional[float] = None  # 0.9–1.2
+    clear: Optional[bool] = None
+
+
+def _get_or_create_profile(db: Session, user: User, lang: str) -> Profile:
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if prof:
+        return prof
+    prof = Profile(user_id=user.id, lang=lang)
+    db.add(prof)
+    db.commit()
+    db.refresh(prof)
+    return prof
+
+
+def _get_pref_row(db: Session, profile_id: int) -> ProfilePref:
+    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == profile_id).first()
+    if not pref:
+        pref = ProfilePref(profile_id=profile_id, data={})
+        db.add(pref)
+        db.commit()
+        db.refresh(pref)
+    return pref
+
+
+@app.get("/theme")
+def get_theme(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    prof = _get_or_create_profile(db, user, lang)
+    pref = _get_pref_row(db, prof.id)
+    data = dict(pref.data or {})
+    theme = data.get("theme") or {}
+    return {"name": theme.get("name"), "vars": theme.get("vars") or {}}
+
+
+@app.post("/theme")
+def set_theme(payload: ThemeIn, lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    prof = _get_or_create_profile(db, user, lang)
+    pref = _get_pref_row(db, prof.id)
+    data = dict(pref.data or {})
+    if payload.clear:
+        data.pop("theme", None)
+    else:
+        cur = data.get("theme") or {}
+        if payload.name is not None:
+            cur["name"] = payload.name
+        if payload.vars is not None:
+            cur["vars"] = payload.vars
+        data["theme"] = cur
+    pref.data = data
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/prefs")
+def get_ui_prefs(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    prof = _get_or_create_profile(db, user, lang)
+    pref = _get_pref_row(db, prof.id)
+    data = dict(pref.data or {})
+    return data.get("ui_prefs") or {}
+
+
+@app.post("/prefs")
+def set_ui_prefs(payload: UIPrefsIn, lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    prof = _get_or_create_profile(db, user, lang)
+    pref = _get_pref_row(db, prof.id)
+    data = dict(pref.data or {})
+    if payload.clear:
+        data.pop("ui_prefs", None)
+    else:
+        cur = data.get("ui_prefs") or {}
+        if payload.motion is not None:
+            cur["motion"] = bool(payload.motion)
+        if payload.density:
+            cur["density"] = payload.density
+        if payload.scale is not None:
+            cur["scale"] = float(payload.scale)
+        data["ui_prefs"] = cur
+    pref.data = data
+    db.commit()
+    return {"ok": True}
+
+
 class ParseRequest(BaseModel):
     lang: str
     text: str
@@ -579,6 +671,7 @@ class GenRequest(BaseModel):
     length: Optional[int] = None  # UI length hint; unit is decided per-language
     include_words: Optional[List[str]] = None
     model: Optional[str] = None
+    provider: Optional[str] = None  # openrouter|lmstudio
     base_url: str = "http://localhost:1234/v1"
 
 
@@ -595,7 +688,12 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script)
     messages = build_reading_prompt(spec)
     try:
-        text = chat_complete(req.base_url, req.model, messages)
+        text = chat_complete(
+            messages,
+            provider=req.provider,
+            model=req.model,
+            base_url=req.base_url,
+        )
     except Exception as e:
         # Log details for debugging
         import logging
@@ -606,7 +704,7 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     db.add(rt)
     db.flush()
     pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == req.lang).scalar()
-    gl = GenerationLog(user_id=user.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
+    gl = GenerationLog(user_id=user.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages, "provider": (req.provider or None)}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
     db.add(gl)
     db.commit()
     return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words, "text_id": rt.id}
@@ -902,7 +1000,21 @@ def get_srs_stats(lang: str, db: Session = Depends(get_db), user: User = Depends
     return SrsStatsOut(total=len(rows), by_p=by_p, by_S=by_S, by_D=by_D)
 
 
-# Static site (frontend build output). We mount after API routes so they take priority.
+# ---- UI shell mounting (header/footer/templates) ----
+try:
+    # Optional UI libraries from libs/
+    from arcadia_ui_style import ensure_templates  # type: ignore
+    from arcadia_ui_core import router as ui_router, mount_templates as ui_mount  # type: ignore
+    tdir = ensure_templates(Path(__file__).resolve().parent)
+    from fastapi.templating import Jinja2Templates
+    templates = Jinja2Templates(directory=tdir)
+    ui_mount(templates)
+    app.include_router(ui_router)
+except Exception:
+    # non-fatal during dev
+    pass
+
+# Static site (frontend build output). Mount after templates setup so CSS exists.
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 if STATIC_DIR.exists():
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

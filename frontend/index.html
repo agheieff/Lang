@@ -23,6 +23,9 @@
     <script type="module" src="/main.ts"></script>
   </head>
   <body>
+    <link rel="stylesheet" href="/arcadia.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <div id="ui-header"></div>
     <header style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px">
       <h1 style="margin:0">Arcadia Lang</h1>
       <div id="userbar" style="display:flex; align-items:center; gap:8px"></div>
@@ -119,5 +122,11 @@
     </div>
     <div id="popover" class="popover" style="display:none"></div>
     <div id="hover-tip" style="display:none; position:absolute; background:#333; color:#fff; font-size:12px; padding:2px 6px; border-radius:4px; pointer-events:none; z-index:20"></div>
+    <div id="ui-footer"></div>
+    <script>
+      // Fetch shared header/footer from server UI router (arcadia-ui-core)
+      fetch('/ui/header').then(r=>r.text()).then(html=>{ document.getElementById('ui-header').innerHTML = html; }).catch(()=>{});
+      fetch('/ui/footer').then(r=>r.text()).then(html=>{ document.getElementById('ui-footer').innerHTML = html; }).catch(()=>{});
+    </script>
   </body>
 </html>

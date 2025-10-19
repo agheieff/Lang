@@ -11,6 +11,9 @@ beautifulsoup4>=4.12.3
 jieba>=0.42.1
 pypinyin>=0.50.0
 opencc-python-reimplemented>=0.1.7
+openrouter@ file:///home/agheieff/Arcadia/libs/openrouter
+arcadia-ui-core@ file:///home/agheieff/Arcadia/libs/arcadia_ui_core
+arcadia-ui-style@ file:///home/agheieff/Arcadia/libs/arcadia_ui_style
 
 [dicts]
 pystardict>=0.3.1

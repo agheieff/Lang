@@ -40,8 +40,8 @@ const urgentList = document.getElementById('urgent-list') as HTMLDivElement;
 const urgentCount = document.getElementById('urgent-count') as HTMLInputElement;
 const urgentNew = document.getElementById('urgent-new') as HTMLInputElement;
 const urgentRefresh = document.getElementById('refresh-urgent') as HTMLButtonElement;
-const userbar = document.getElementById('userbar') as HTMLDivElement;
-const authDlg = document.getElementById('authdlg') as HTMLDialogElement;
+const userbar = document.getElementById('userbar') as HTMLDivElement | null;
+const authDlg = document.getElementById('authdlg') as HTMLDialogElement | null;
 
 // Auth tokens (simple localStorage for demo)
 function getAccessToken() { return localStorage.getItem('arcadia_access') || ''; }
@@ -268,8 +268,8 @@ async function auth(path: string) {
   await loadTiers();
   await refreshProfiles();
 }
-loginBtn.onclick = () => auth('/auth/login');
-registerBtn.onclick = () => auth('/auth/register');
+loginBtn && (loginBtn.onclick = () => auth('/auth/login'));
+registerBtn && (registerBtn.onclick = () => auth('/auth/register'));
 // replace inline logout button with header userbar; render button dynamically
 async function whoami() {
   const res = await api('/me');
@@ -379,10 +379,13 @@ genBtn.addEventListener('click', async () => {
   const lang = srcSel.value;
   // Length hint per language; could be expanded later
   const length = lang.startsWith('zh') ? 300 : 180;
+  const provider = (localStorage.getItem('arcadia_llm_provider') || '').toString();
   // Avoid duplicate concurrent generations
   genBtn.disabled = true;
   try {
-    const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length }) });
+    const body: any = { lang, length };
+    if (provider) body.provider = provider;
+    const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify(body) });
     if (!res.ok) { const t = await res.text(); try { const j = JSON.parse(t); showMsg(false, j.detail || 'Generation failed'); } catch { showMsg(false, t || 'Generation failed'); } return; }
     const data = await res.json();
     const text = data.text || '';
@@ -397,6 +400,28 @@ genBtn.addEventListener('click', async () => {
     genBtn.disabled = false;
   }
 });
+
+// Theme submenu mimic (ai-chat style)
+document.addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  if (!t) return;
+  // open/close theme submenu
+  if (t.id === 'theme-menu-trigger') {
+    const sub = document.getElementById('theme-submenu') as HTMLDivElement | null;
+    if (sub) sub.style.display = sub.style.display === 'none' ? 'block' : 'none';
+  }
+  // pick theme
+  const btn = t.closest('.theme-item') as HTMLElement | null;
+  if (btn && btn.dataset.theme) {
+    const theme = btn.dataset.theme;
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('arcadia_theme', theme);
+    const sub = document.getElementById('theme-submenu') as HTMLDivElement | null;
+    if (sub) sub.style.display = 'none';
+  }
+});
+const savedTheme = localStorage.getItem('arcadia_theme');
+if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
 
 // Urgent words panel (server endpoint)
 async function loadUrgent() {
