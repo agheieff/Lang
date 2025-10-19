@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from .models import (
     User,
@@ -191,8 +192,13 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             # map continuous 0..6 to integer 1..6 buckets
             v = max(0.0, min(6.0, float(user_level)))
             hsk_target = int(min(6, max(1, int(round(v))))) or 1
-        subq_known = db.query(UserLexeme.lexeme_id).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid).subquery()
-        pool_q = db.query(Lexeme, LexemeInfo).join(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id).filter(Lexeme.lang == ("zh" if lang.startswith("zh") else lang)).filter(~Lexeme.id.in_(subq_known))
+        subq_known = select(UserLexeme.lexeme_id).where(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
+        pool_q = (
+            db.query(Lexeme, LexemeInfo)
+            .join(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
+            .filter(Lexeme.lang == ("zh" if lang.startswith("zh") else lang))
+            .filter(Lexeme.id.notin_(subq_known))
+        )
         pool = pool_q.limit(5000).all()
         scored_new: List[Tuple[float, Lexeme]] = []
         for lx, li in pool:
