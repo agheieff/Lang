@@ -338,7 +338,10 @@ outEl.addEventListener('mouseout', (e) => {
   if (!target.classList.contains('char')) return;
   hoverTip.style.display = 'none';
 });
-renderText();
+// Only render on explicit click or when text exists
+if ((inputEl.value || '').trim()) {
+  renderText();
+}
 
 async function sendExposures(lang: string, items: { lemma?: string; surface?: string }[]) {
   if (!items.length) return;
@@ -400,5 +403,4 @@ async function loadUrgent() {
   } catch {}
 }
 urgentRefresh?.addEventListener('click', loadUrgent);
-document.addEventListener('DOMContentLoaded', loadUrgent);
 srcSel.addEventListener('change', loadUrgent);
