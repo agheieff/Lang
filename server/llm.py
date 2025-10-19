@@ -119,44 +119,112 @@ def _script_from_lang(lang: str) -> Optional[str]:
     return None
 
 
-def pick_words(db: Session, user: User, lang: str, count: int = 12) -> List[str]:
+def _variant_form_for_lang(db: Session, lx: Lexeme, lang: str) -> str:
+    form = lx.lemma
+    if lx.lang == "zh":
+        script = _script_from_lang(lang)
+        if script:
+            v = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lx.id, LexemeVariant.script == script).first()
+            if v:
+                form = v.form
+    return form
+
+
+def _hsk_numeric(level_code: Optional[str]) -> Optional[int]:
+    if not level_code:
+        return None
+    # Expect codes like HSK1..HSK6
+    try:
+        if level_code.upper().startswith("HSK"):
+            return int(level_code[3:])
+    except Exception:
+        return None
+    return None
+
+
+def urgent_words(db: Session, user: User, lang: str, total: int = 12, new_ratio: float = 0.3) -> List[str]:
     prof = _profile_for_lang(db, user, lang)
     if not prof:
         return []
     pid = prof.id
-    # Join user_lexemes with lexemes and variants
+    total = max(1, int(total))
+    # Known words scoring
     rows = (
-        db.query(UserLexeme, Lexeme)
+        db.query(UserLexeme, Lexeme, LexemeInfo)
         .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
+        .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
         .filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
         .all()
     )
-    scored: List[Tuple[float, float, int, Lexeme]] = []
-    for ul, lx in rows:
+    known_scored: List[Tuple[float, Lexeme]] = []
+    now_score = 0.0
+    for ul, lx, li in rows:
         a = ul.a_click or 0
         b = ul.b_nonclick or 0
         n = a + b
         p = (a / n) if n > 0 else 0.0
         S = float(ul.stability or 0.0)
-        # heuristic: prioritize mid/low stability and higher p_click
-        score = (1.0 - S) * 0.6 + p * 0.4
-        scored.append((score, S, n, lx))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    picked: List[str] = []
-    script = _script_from_lang(lang)
-    for _, S, n, lx in scored:
-        form = lx.lemma
-        if lx.lang == "zh":
-            # choose variant by script if present
-            if script:
-                v = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lx.id, LexemeVariant.script == script).first()
-                if v:
-                    form = v.form
-        if form not in picked:
-            picked.append(form)
-        if len(picked) >= count:
+        # urgency: low stability (review soon) + high click propensity (still confusing)
+        # slight boost for lower frequency ranks (more common words)
+        freq_bonus = 0.0
+        if li and li.freq_rank:
+            freq_bonus = 0.05 * (1.0 / (1.0 + li.freq_rank/5000.0))
+        score = (1.0 - S) * 0.65 + p * 0.35 + freq_bonus
+        known_scored.append((score, lx))
+    known_scored.sort(key=lambda t: t[0], reverse=True)
+
+    target_known = max(0, min(len(known_scored), int(round(total * (1.0 - new_ratio)))))
+    picked_forms: List[str] = []
+    picked_ids = set()
+    for score, lx in known_scored:
+        form = _variant_form_for_lang(db, lx, lang)
+        if form not in picked_forms:
+            picked_forms.append(form)
+            picked_ids.add(lx.id)
+        if len(picked_forms) >= target_known:
             break
-    return picked
+
+    # New word candidates (unknown to user)
+    need_new = total - len(picked_forms)
+    if need_new > 0:
+        # Build pool from LexemeInfo near profile level and decent frequency
+        user_level = getattr(prof, "level_value", 0.0) or 0.0
+        hsk_target = None
+        if lang.startswith("zh"):
+            # map continuous 0..6 to integer 1..6 buckets
+            v = max(0.0, min(6.0, float(user_level)))
+            hsk_target = int(min(6, max(1, int(round(v))))) or 1
+        subq_known = db.query(UserLexeme.lexeme_id).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid).subquery()
+        pool_q = db.query(Lexeme, LexemeInfo).join(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id).filter(Lexeme.lang == ("zh" if lang.startswith("zh") else lang)).filter(~Lexeme.id.in_(subq_known))
+        pool = pool_q.limit(5000).all()
+        scored_new: List[Tuple[float, Lexeme]] = []
+        for lx, li in pool:
+            if not li:
+                continue
+            # prefer close to target level (HSK delta small) and good frequency (low rank)
+            level_num = _hsk_numeric(li.level_code) if lang.startswith("zh") else None
+            level_closeness = 0.0
+            if hsk_target and level_num:
+                delta = abs(level_num - hsk_target)
+                level_closeness = 1.0 / (1.0 + delta)
+            freq = 0.0
+            if li.freq_rank:
+                freq = 1.0 / (1.0 + li.freq_rank)
+            score = 0.6 * level_closeness + 0.4 * freq
+            scored_new.append((score, lx))
+        scored_new.sort(key=lambda t: t[0], reverse=True)
+        for score, lx in scored_new:
+            form = _variant_form_for_lang(db, lx, lang)
+            if form not in picked_forms:
+                picked_forms.append(form)
+            if len(picked_forms) >= total:
+                break
+
+    return picked_forms[:total]
+
+
+def pick_words(db: Session, user: User, lang: str, count: int = 12) -> List[str]:
+    return urgent_words(db, user, lang, total=count)
 
 
 def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:
