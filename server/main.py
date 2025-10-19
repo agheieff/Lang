@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from argon2 import PasswordHasher
 from Lang.tokenize.registry import TOKENIZERS
 from Lang.tokenize.base import Token
+from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, estimate_level
 
 # SRS parameters
 _SRS_ALPHA_CLICK = 0.2
@@ -521,6 +522,29 @@ def parse(req: ParseRequest) -> Dict[str, Any]:
     add_sep(last, len(req.text))
 
     return {"tokens": tokens_out}
+
+
+# -------- LLM reading generation --------
+class GenRequest(BaseModel):
+    lang: str
+    approx_len: int = 250
+    unit: str = "chars"  # or "words"
+    include_words: Optional[List[str]] = None
+    model: Optional[str] = None
+    base_url: str = "http://localhost:1234/v1"
+
+
+@app.post("/gen/reading")
+def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    script = "Hant" if req.lang.endswith("Hant") else ("Hans" if req.lang.startswith("zh") else None)
+    # Auto-pick words if not provided
+    words = req.include_words or pick_words(db, user, req.lang, count=12)
+    level_hint = estimate_level(db, user, req.lang)
+    spec = PromptSpec(lang=req.lang, unit=req.unit, approx_len=req.approx_len, user_level_hint=level_hint, include_words=words, script=script)
+    messages = build_reading_prompt(spec)
+    text = chat_complete(req.base_url, req.model, messages)
+    return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words}
 
 
 # -------- Lexeme Info (freq/levels) --------

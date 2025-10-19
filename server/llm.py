@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+
+from sqlalchemy.orm import Session
+
+from .models import (
+    User,
+    Profile,
+    Lexeme,
+    LexemeInfo,
+    UserLexeme,
+    LexemeVariant,
+)
+
+
+def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, timeout: int = 60) -> Any:
+    body = None
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+    req = Request(url, data=body, headers=hdrs, method=method)
+    with urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def resolve_model(base_url: str, prefer: Optional[str] = None) -> str:
+    if prefer:
+        return prefer
+    try:
+        data = _http_json(base_url.rstrip("/") + "/models")
+        arr = data.get("data") or []
+        if arr:
+            return arr[0].get("id") or "local"
+    except Exception:
+        pass
+    return "local"
+
+
+def chat_complete(base_url: str, model: Optional[str], messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: Optional[int] = None) -> str:
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload: Dict[str, Any] = {
+        "model": resolve_model(base_url, model),
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    try:
+        data = _http_json(url, method="POST", data=payload)
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        raise RuntimeError(f"LLM request failed: {e}")
+
+
+@dataclass
+class PromptSpec:
+    lang: str
+    unit: str  # "chars" or "words"
+    approx_len: int
+    user_level_hint: Optional[str]
+    include_words: List[str]
+    script: Optional[str] = None  # for zh: "Hans" or "Hant"
+
+
+def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
+    sys = (
+        "You are a writing assistant that produces a SINGLE coherent reading passage only, "
+        "no preface or postscript. Keep the language natural, engaging, and appropriate to the proficiency level."
+    )
+    lines = []
+    lines.append(f"Language: {spec.lang}")
+    if spec.script:
+        lines.append(f"Script: {spec.script}")
+    lines.append(f"Length: ~{spec.approx_len} {spec.unit}")
+    if spec.user_level_hint:
+        lines.append(f"UserLevel: {spec.user_level_hint}")
+    if spec.include_words:
+        words = ", ".join(spec.include_words)
+        lines.append(f"TargetWords (must appear naturally): {words}")
+    lines.append("Constraints:")
+    lines.append("- Do not include translations or vocabulary lists.")
+    lines.append("- Avoid English unless the target language is English.")
+    lines.append("- Keep the vocabulary consistent with the stated level; gently reinforce target words in context.")
+    content = "\n".join(lines)
+    return [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": content},
+    ]
+
+
+def _profile_for_lang(db: Session, user: User, lang: str) -> Optional[Profile]:
+    return db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+
+
+def _script_from_lang(lang: str) -> Optional[str]:
+    if lang.startswith("zh"):
+        return "Hant" if lang.endswith("Hant") else "Hans"
+    return None
+
+
+def pick_words(db: Session, user: User, lang: str, count: int = 12) -> List[str]:
+    prof = _profile_for_lang(db, user, lang)
+    if not prof:
+        return []
+    pid = prof.id
+    # Join user_lexemes with lexemes and variants
+    rows = (
+        db.query(UserLexeme, Lexeme)
+        .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
+        .filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
+        .all()
+    )
+    scored: List[Tuple[float, float, int, Lexeme]] = []
+    for ul, lx in rows:
+        a = ul.a_click or 0
+        b = ul.b_nonclick or 0
+        n = a + b
+        p = (a / n) if n > 0 else 0.0
+        S = float(ul.stability or 0.0)
+        # heuristic: prioritize mid/low stability and higher p_click
+        score = (1.0 - S) * 0.6 + p * 0.4
+        scored.append((score, S, n, lx))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    picked: List[str] = []
+    script = _script_from_lang(lang)
+    for _, S, n, lx in scored:
+        form = lx.lemma
+        if lx.lang == "zh":
+            # choose variant by script if present
+            if script:
+                v = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lx.id, LexemeVariant.script == script).first()
+                if v:
+                    form = v.form
+        if form not in picked:
+            picked.append(form)
+        if len(picked) >= count:
+            break
+    return picked
+
+
+def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:
+    # For zh, approximate HSK by taking the most common level among user lexemes with moderate stability
+    if not lang.startswith("zh"):
+        return None
+    prof = _profile_for_lang(db, user, lang)
+    if not prof:
+        return None
+    pid = prof.id
+    rows = (
+        db.query(UserLexeme, Lexeme, LexemeInfo)
+        .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
+        .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
+        .filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
+        .all()
+    )
+    counts: Dict[str, int] = {}
+    for ul, lx, li in rows:
+        if not li or not li.level_code:
+            continue
+        S = float(ul.stability or 0.0)
+        if S >= 0.3:  # seen at least somewhat
+            counts[li.level_code] = counts.get(li.level_code, 0) + 1
+    if not counts:
+        return None
+    top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[0][0]
+    return top
