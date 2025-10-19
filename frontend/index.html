@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Arcadia Lang MVP</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 20px; }
+      .text { line-height: 1.8; }
+      .token { cursor: pointer; padding: 0 1px; border-radius: 2px; display: inline-block; }
+      .token:hover { background: #eef; }
+      .char { border-bottom: 1px dotted #bbb; }
+      .char:hover { background: #f8f8ff; }
+      .popover { position: absolute; background: #fff; border: 1px solid #ccc; padding: 8px 10px; border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.12); z-index: 10; max-width: 320px; }
+      .controls { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
+      textarea { width: 100%; height: 140px; }
+      select, button { padding: 6px 8px; }
+      .label { color: #666; font-size: 12px; margin-top: 2px; }
+    </style>
+    <script type="module" src="/main.ts"></script>
+  </head>
+  <body>
+    <h1>Arcadia Lang</h1>
+    <div class="controls">
+      <label>Source:
+        <select id="src">
+          <option value="es">Spanish (es)</option>
+          <option value="zh">Chinese (auto)</option>
+          <option value="zh-Hans">Chinese Simplified (zh-Hans)</option>
+          <option value="zh-Hant">Chinese Traditional (zh-Hant)</option>
+        </select>
+      </label>
+      <label>Target:
+        <select id="tgt">
+          <option value="en">English (en)</option>
+          <option value="ru">Russian (ru)</option>
+          <option value="de">German (de)</option>
+        </select>
+      </label>
+      <button id="render">Render</button>
+    </div>
+    <textarea id="input" placeholder="Paste text here">Ayer habló con su madre.</textarea>
+    <div id="output" class="text"></div>
+    <div id="popover" class="popover" style="display:none"></div>
+    <div id="hover-tip" style="display:none; position:absolute; background:#333; color:#fff; font-size:12px; padding:2px 6px; border-radius:4px; pointer-events:none; z-index:20"></div>
+  </body>
+</html>

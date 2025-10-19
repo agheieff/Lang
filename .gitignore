@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.*
+htmlcov/
+
+# Virtual envs / local env files
+.venv/
+venv/
+.env
+.env.*
+
+# Node / Vite
+node_modules/
+dist/
+server/static/assets/
+server/static/index.html
+
+# Build & cache
+*.log
+*.tmp
+*.cache
+.parcel-cache/
+
+# Databases & data dumps
+data/**/*.db
+data/**/*.sqlite
+data/**/*.sqlite3
+data/app.db
+
+# Dictionaries (place externally or download into data/dicts but do not commit)
+data/dicts/**
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Uvicorn/uv
+.python-version

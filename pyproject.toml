@@ -1,0 +1,37 @@
+ [project]
+ name = "arcadia-lang"
+ version = "0.1.0"
+ description = "Click-to-translate web app (Spanish first) with pluggable language parsing and dictionary providers"
+ requires-python = ">=3.10"
+ dependencies = [
+   "fastapi>=0.110",
+   "uvicorn[standard]>=0.23",
+   "pydantic>=2.5",
+  "pystardict>=0.3.1",
+  "regex>=2024.7.24",
+  "SQLAlchemy>=2.0.32",
+  "PyJWT>=2.9.0",
+  "argon2-cffi>=23.1.0",
+ ]
+
+ [project.optional-dependencies]
+ # Optional heavy deps; not required for minimal MVP run
+ nlp = [
+   "spacy<4",
+   # Spanish model install is a separate step; left to the user/environment
+ ]
+dicts = [
+  "pystardict>=0.3.1"
+]
+zh = [
+  "jieba>=0.42.1",
+  "pypinyin>=0.50.0",
+  "opencc-python-reimplemented>=0.1.7"
+]
+
+ [build-system]
+ requires = ["setuptools>=61.0"]
+ build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = { find = { include = ["Lang*", "server*" ] } }
