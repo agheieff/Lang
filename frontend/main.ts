@@ -7,6 +7,40 @@ const srcSel = document.getElementById('src') as HTMLSelectElement;
 const tgtSel = document.getElementById('tgt') as HTMLSelectElement;
 const popover = document.getElementById('popover') as HTMLDivElement;
 const hoverTip = document.getElementById('hover-tip') as HTMLDivElement;
+const tierSel = document.getElementById('tier') as HTMLSelectElement;
+const emailEl = document.getElementById('email') as HTMLInputElement;
+const pwdEl = document.getElementById('password') as HTMLInputElement;
+const loginBtn = document.getElementById('login') as HTMLButtonElement;
+const registerBtn = document.getElementById('register') as HTMLButtonElement;
+const logoutBtn = document.getElementById('logout') as HTMLButtonElement;
+const pinyinSel = document.getElementById('pinyin-style') as HTMLSelectElement;
+const saveSettingsBtn = document.getElementById('save-settings') as HTMLButtonElement;
+const profileLangInput = document.getElementById('profile-lang') as HTMLInputElement;
+const addProfileBtn = document.getElementById('add-profile') as HTMLButtonElement;
+const profilesDiv = document.getElementById('profiles') as HTMLDivElement;
+
+// Auth tokens (simple localStorage for demo)
+function getAccessToken() { return localStorage.getItem('arcadia_access') || ''; }
+function getRefreshToken() { return localStorage.getItem('arcadia_refresh') || ''; }
+function setTokens(a: string, r: string) { localStorage.setItem('arcadia_access', a); localStorage.setItem('arcadia_refresh', r); }
+
+async function api(path: string, opts: RequestInit = {}) {
+  const headers: any = { 'Content-Type': 'application/json', ...(opts.headers||{}) };
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  let res = await fetch(path, { ...opts, headers });
+  if (res.status === 401 && getRefreshToken()) {
+    // try refresh
+    const rr = await fetch('/auth/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: getRefreshToken() }) });
+    if (rr.ok) {
+      const data = await rr.json();
+      if (data.access_token) setTokens(data.access_token, data.refresh_token || getRefreshToken());
+      headers['Authorization'] = `Bearer ${getAccessToken()}`;
+      res = await fetch(path, { ...opts, headers });
+    }
+  }
+  return res;
+}
 
 function tokenize(text: string): Token[] {
   const re = /([\p{L}\p{M}]+)|([^\p{L}\p{M}]+)/gu;
@@ -16,21 +50,13 @@ function tokenize(text: string): Token[] {
 }
 
 async function lookup(source_lang: string, target_lang: string, surface: string) {
-  const res = await fetch('/api/lookup', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source_lang, target_lang, surface })
-  });
+  const res = await api('/api/lookup', { method: 'POST', body: JSON.stringify({ source_lang, target_lang, surface }) });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 async function parse(lang: string, text: string) {
-  const res = await fetch('/api/parse', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lang, text })
-  });
+  const res = await api('/api/parse', { method: 'POST', body: JSON.stringify({ lang, text }) });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -123,6 +149,70 @@ function renderText() {
 // Init
 inputEl.value = localStorage.getItem('arcadia_text') || inputEl.value;
 renderBtn.addEventListener('click', renderText);
+// Load tiers into selector
+async function loadTiers() {
+  const res = await api('/tiers');
+  if (!res.ok) return;
+  const tiers = await res.json();
+  tierSel.innerHTML = '';
+  for (const t of tiers) {
+    const opt = document.createElement('option');
+    opt.value = t.name; opt.textContent = t.name;
+    tierSel.appendChild(opt);
+  }
+  // Fetch current user's tier if logged in
+  const mt = await api('/me/tier');
+  if (mt.ok) {
+    const cur = await mt.json();
+    tierSel.value = cur.name;
+  }
+}
+tierSel?.addEventListener('change', async () => {
+  const name = tierSel.value;
+  const res = await api('/me/tier', { method: 'POST', body: JSON.stringify({ name }) });
+  if (!res.ok) {
+    alert('Failed to set tier');
+  }
+});
+loadTiers();
+
+async function refreshProfiles() {
+  const res = await api('/me/profiles');
+  if (!res.ok) { profilesDiv.textContent = 'Login to manage profiles'; return; }
+  const items = await res.json();
+  profilesDiv.innerHTML = '<strong>Your profiles:</strong> ' + items.map((p:any)=>`${p.lang}`).join(', ');
+}
+refreshProfiles();
+
+async function auth(path: string) {
+  const body = { email: emailEl.value, password: pwdEl.value };
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) { alert('Auth failed'); return; }
+  const data = await res.json();
+  if (data.access_token) setTokens(data.access_token, data.refresh_token || '');
+  await loadTiers();
+  await refreshProfiles();
+}
+loginBtn.onclick = () => auth('/auth/login');
+registerBtn.onclick = () => auth('/auth/register');
+logoutBtn.onclick = () => { setTokens('', ''); alert('Logged out'); };
+
+saveSettingsBtn.onclick = async () => {
+  const lang = srcSel.value;
+  const style = pinyinSel.value === 'tone' ? 'tone' : 'number';
+  const settings = { zh_pinyin_style: style };
+  const res = await api('/me/profile', { method: 'POST', body: JSON.stringify({ lang, settings }) });
+  if (!res.ok) alert('Save failed');
+};
+
+addProfileBtn.onclick = async () => {
+  const lang = profileLangInput.value.trim();
+  if (!lang) return;
+  const res = await api('/me/profile', { method: 'POST', body: JSON.stringify({ lang }) });
+  if (!res.ok) { alert('Failed'); return; }
+  profileLangInput.value = '';
+  await refreshProfiles();
+};
 // Delegate clicks from container to token spans
 outEl.addEventListener('click', async (e) => {
   const target = e.target as HTMLElement;

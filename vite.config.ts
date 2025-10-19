@@ -14,7 +14,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://localhost:8000',
-      '/health': 'http://localhost:8000'
+      '/health': 'http://localhost:8000',
+      '/auth': 'http://localhost:8000',
+      '/me': 'http://localhost:8000',
+      '/tiers': 'http://localhost:8000'
     }
   }
 })

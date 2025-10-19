@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -45,3 +45,22 @@ class Card(Base):
     head: Mapped[str] = mapped_column(String(256))
     lang: Mapped[str] = mapped_column(String(16), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SubscriptionTier(Base):
+    __tablename__ = "subscription_tiers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    description: Mapped[Optional[str]] = mapped_column(String(255), default=None)
+
+
+class ProfilePref(Base):
+    __tablename__ = "profile_prefs"
+    __table_args__ = (
+        UniqueConstraint("profile_id", name="uq_profile_pref_profile_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)

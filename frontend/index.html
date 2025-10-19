@@ -37,9 +37,29 @@
           <option value="de">German (de)</option>
         </select>
       </label>
+      <label>Tier:
+        <select id="tier"></select>
+      </label>
+      <label>Email: <input id="email" placeholder="you@example.com" style="width:200px"></label>
+      <label>Password: <input id="password" type="password" style="width:140px"></label>
+      <button id="login">Login</button>
+      <button id="register">Register</button>
+      <button id="logout">Logout</button>
       <button id="render">Render</button>
     </div>
     <textarea id="input" placeholder="Paste text here">Ayer habló con su madre.</textarea>
+    <div style="margin:10px 0; display:flex; gap:10px; align-items:center">
+      <label>Pinyin style:
+        <select id="pinyin-style">
+          <option value="tone">Tone marks</option>
+          <option value="number">Tone numbers</option>
+        </select>
+      </label>
+      <button id="save-settings">Save Settings for Source Lang</button>
+      <label>Add profile (lang): <input id="profile-lang" placeholder="es or zh-Hans" style="width:120px"></label>
+      <button id="add-profile">Add</button>
+    </div>
+    <div id="profiles"></div>
     <div id="output" class="text"></div>
     <div id="popover" class="popover" style="display:none"></div>
     <div id="hover-tip" style="display:none; position:absolute; background:#333; color:#fff; font-size:12px; padding:2px 6px; border-radius:4px; pointer-events:none; z-index:20"></div>
