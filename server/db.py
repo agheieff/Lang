@@ -55,6 +55,15 @@ def _run_migrations() -> None:
                 conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN importance REAL DEFAULT 0.5")
             if not has_column("user_lexemes", "importance_var"):
                 conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN importance_var REAL DEFAULT 0.3")
+
+            # word_events: text_id
+            if not has_column("word_events", "text_id"):
+                conn.exec_driver_sql("ALTER TABLE word_events ADD COLUMN text_id INTEGER")
+            
+            # reading_texts table
+            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS reading_texts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, lang VARCHAR(16), content TEXT, created_at DATETIME, source VARCHAR(16))")
+            # generation_logs table
+            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS generation_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, profile_id INTEGER, text_id INTEGER, model VARCHAR(128), base_url VARCHAR(256), prompt JSON, words JSON, level_hint VARCHAR(128), approx_len INTEGER, unit VARCHAR(16), created_at DATETIME)")
     except Exception:
         # Best-effort; avoid crashing app startup
         pass

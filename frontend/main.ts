@@ -335,7 +335,10 @@ renderText();
 async function sendExposures(lang: string, items: { lemma?: string; surface?: string }[]) {
   if (!items.length) return;
   try {
-    const res = await api('/srs/event/exposures', { method: 'POST', body: JSON.stringify({ lang, items }) });
+    const text_id = localStorage.getItem('arcadia_last_text_id');
+    const payload: any = { lang, items };
+    if (text_id) payload.text_id = Number(text_id);
+    const res = await api('/srs/event/exposures', { method: 'POST', body: JSON.stringify(payload) });
     // ignore failures silently for now
   } catch {}
 }
@@ -350,6 +353,7 @@ genBtn.addEventListener('click', async () => {
     if (!res.ok) { const t = await res.text(); try { const j = JSON.parse(t); showMsg(false, j.detail || 'Generation failed'); } catch { showMsg(false, t || 'Generation failed'); } return; }
     const data = await res.json();
     inputEl.value = data.text || '';
+    if (data.text_id) localStorage.setItem('arcadia_last_text_id', String(data.text_id));
     renderText();
     showMsg(true, 'Generated text inserted');
   } catch (e:any) {

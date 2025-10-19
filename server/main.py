@@ -17,7 +17,7 @@ from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
 from .db import get_db, init_db
-from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant
+from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog
 from sqlalchemy.orm import Session
 import jwt
 from datetime import datetime, timedelta
@@ -194,7 +194,7 @@ def _get_or_create_userlexeme(db: Session, user: User, profile: Profile, lexeme:
     return ul
 
 
-def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str]):
+def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     # Pick or create profile for the lang
     prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
     if not prof:
@@ -210,7 +210,7 @@ def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str
     ul.last_clicked_at = datetime.utcnow()
     ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) * (1.0 - _SRS_ALPHA_CLICK))))
     # Event row
-    ev = WordEvent(ts=datetime.utcnow(), user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={})
+    ev = WordEvent(ts=datetime.utcnow(), user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
     db.add(ev)
     db.commit()
 
@@ -588,7 +588,15 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
         text = chat_complete(req.base_url, req.model, messages)
     except Exception as e:
         raise HTTPException(502, f"LLM generation failed: {e}")
-    return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words}
+    # Save text and generation log (unlimited tier check placeholder)
+    rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source="llm")
+    db.add(rt)
+    db.flush()
+    pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == req.lang).scalar()
+    gl = GenerationLog(user_id=user.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
+    db.add(gl)
+    db.commit()
+    return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words, "text_id": rt.id}
 
 
 # -------- Lexeme Info (freq/levels) --------
@@ -655,9 +663,10 @@ class ExposureItem(BaseModel):
 class ExposuresRequest(BaseModel):
     lang: str
     items: List[ExposureItem]
+    text_id: Optional[int] = None
 
 
-def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str]):
+def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
     if not prof:
         prof = Profile(user_id=user.id, lang=lang)
@@ -682,7 +691,7 @@ def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[
             db.add(UserLexemeContext(user_lexeme_id=ul.id, context_hash=context_hash))
             ul.distinct_texts = (ul.distinct_texts or 0) + 1
     # Event
-    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}))
+    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
 
 
 @app.post("/srs/event/exposures")
@@ -700,7 +709,7 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
                 pos = pos or analysis.get("pos")
         if not lemma:
             continue
-        _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context))
+        _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
     db.commit()
     return {"ok": True, "count": count}
@@ -756,6 +765,7 @@ class ClickRequest(BaseModel):
     pos: Optional[str] = None
     surface: Optional[str] = None
     context: Optional[str] = None
+    text_id: Optional[int] = None
 
 
 @app.post("/srs/event/click")
@@ -771,7 +781,7 @@ def srs_click(req: ClickRequest, db: Session = Depends(get_db), user: User = Dep
             pos = pos or analysis.get("pos")
     if not lemma:
         raise HTTPException(400, "lemma or surface required")
-    _srs_click(db, user, req.lang, lemma, pos, req.surface, _hash_context(req.context))
+    _srs_click(db, user, req.lang, lemma, pos, req.surface, _hash_context(req.context), req.text_id)
     # Return derived metrics
     lex = _resolve_lexeme(db, req.lang, lemma, pos)
     prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()

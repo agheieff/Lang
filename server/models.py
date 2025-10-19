@@ -39,6 +39,17 @@ class Profile(Base):
     user: Mapped[User] = relationship("User", back_populates="profiles")
 
 
+class ReadingText(Base):
+    __tablename__ = "reading_texts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    lang: Mapped[str] = mapped_column(String(16), index=True)
+    content: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual
+
+
 # Placeholder for future SRS tables (not implemented yet)
 class Card(Base):
     __tablename__ = "cards"
@@ -139,6 +150,7 @@ class WordEvent(Base):
     context_hash: Mapped[Optional[str]] = mapped_column(String(64), default=None)
     source: Mapped[Optional[str]] = mapped_column(String(16), default=None)  # llm|manual|unknown
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    text_id: Mapped[Optional[int]] = mapped_column(Integer, default=None, index=True)
 
 
 class UserLexemeContext(Base):
@@ -166,4 +178,21 @@ class LexemeInfo(Base):
     level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., HSK1..HSK6
     source: Mapped[Optional[str]] = mapped_column(String(64), default=None)
     tags: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GenerationLog(Base):
+    __tablename__ = "generation_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("profiles.id", ondelete="SET NULL"), index=True, default=None)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    base_url: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    prompt: Mapped[dict] = mapped_column(JSON, default=dict)
+    words: Mapped[dict] = mapped_column(JSON, default=dict)
+    level_hint: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    approx_len: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    unit: Mapped[Optional[str]] = mapped_column(String(16), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
