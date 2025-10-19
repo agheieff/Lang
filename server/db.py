@@ -28,3 +28,33 @@ def get_db() -> Generator[Session, None, None]:
 def init_db() -> None:
     from . import models  # noqa: F401 - ensure models are imported
     Base.metadata.create_all(bind=engine)
+    _run_migrations()
+
+
+def _run_migrations() -> None:
+    """Lightweight, idempotent migrations for SQLite.
+
+    Adds new columns when missing. For complex changes, prefer Alembic in the future.
+    """
+    try:
+        with engine.begin() as conn:
+            def has_column(table: str, name: str) -> bool:
+                rows = conn.exec_driver_sql(f"PRAGMA table_info('{table}')").all()
+                return any(r[1] == name for r in rows)
+
+            # profiles: level_value, level_var, level_code
+            if not has_column("profiles", "level_value"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN level_value REAL DEFAULT 0.0")
+            if not has_column("profiles", "level_var"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN level_var REAL DEFAULT 1.0")
+            if not has_column("profiles", "level_code"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN level_code VARCHAR(32)")
+
+            # user_lexemes: importance, importance_var
+            if not has_column("user_lexemes", "importance"):
+                conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN importance REAL DEFAULT 0.5")
+            if not has_column("user_lexemes", "importance_var"):
+                conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN importance_var REAL DEFAULT 0.3")
+    except Exception:
+        # Best-effort; avoid crashing app startup
+        pass
