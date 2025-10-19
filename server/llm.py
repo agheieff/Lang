@@ -64,8 +64,7 @@ def chat_complete(base_url: str, model: Optional[str], messages: List[Dict[str, 
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     try:
-        # Try to discourage thinking output via stop sequences (best-effort; some backends may ignore)
-        payload.setdefault("stop", ["</think>", "<think>", "<analysis>", "</analysis>"])
+        # Avoid using stop sequences that can prematurely cut output (e.g., when model starts with <think>)
         data = _http_json(url, method="POST", data=payload)
         content = data["choices"][0]["message"]["content"].strip()
         return _strip_thinking_blocks(content)
@@ -85,8 +84,8 @@ class PromptSpec:
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     sys = (
-        "You are a writing assistant that produces a SINGLE coherent reading passage only, "
-        "no preface or postscript. Keep the language natural, engaging, and appropriate to the proficiency level."
+        "You are a writing assistant. Output ONLY the final passage text. "
+        "Do not include meta commentary, analysis, or <think> sections."
     )
     lines = []
     lines.append(f"Language: {spec.lang}")
@@ -102,7 +101,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     lines.append("- Do not include translations or vocabulary lists.")
     lines.append("- Avoid English unless the target language is English.")
     lines.append("- Keep the vocabulary consistent with the stated level; gently reinforce target words in context.")
-    lines.append("- Output ONLY the passage text; no analysis, no <think> or meta commentary.")
+    lines.append("- Output ONLY the passage text; no headings, no bullet points, no analysis.")
     content = "\n".join(lines)
     return [
         {"role": "system", "content": sys},
