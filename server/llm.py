@@ -66,7 +66,7 @@ def chat_complete(base_url: str, model: Optional[str], messages: List[Dict[str, 
         payload["max_tokens"] = max_tokens
     try:
         # Avoid using stop sequences that can prematurely cut output (e.g., when model starts with <think>)
-        data = _http_json(url, method="POST", data=payload)
+        data = _http_json(url, method="POST", data=payload, timeout=120)
         content = data["choices"][0]["message"]["content"].strip()
         return _strip_thinking_blocks(content)
     except Exception as e:

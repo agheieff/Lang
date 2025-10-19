@@ -171,8 +171,16 @@ function renderText() {
 }
 
 // Init
+// Restore persisted language and target BEFORE first render
+const savedSrc = localStorage.getItem('arcadia_src');
+if (savedSrc) srcSel.value = savedSrc;
+const savedTgt = localStorage.getItem('arcadia_tgt');
+if (savedTgt) tgtSel.value = savedTgt;
 inputEl.value = localStorage.getItem('arcadia_text') || inputEl.value;
 renderBtn.addEventListener('click', renderText);
+// Persist changes to lang/target and re-render
+srcSel.addEventListener('change', () => { localStorage.setItem('arcadia_src', srcSel.value); renderText(); });
+tgtSel.addEventListener('change', () => { localStorage.setItem('arcadia_tgt', tgtSel.value); });
 // Load tiers into selector
 async function loadTiers() {
   const res = await api('/tiers');
@@ -348,6 +356,8 @@ genBtn.addEventListener('click', async () => {
   const lang = srcSel.value;
   // Length hint per language; could be expanded later
   const length = lang.startsWith('zh') ? 300 : 180;
+  // Avoid duplicate concurrent generations
+  genBtn.disabled = true;
   try {
     const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length }) });
     if (!res.ok) { const t = await res.text(); try { const j = JSON.parse(t); showMsg(false, j.detail || 'Generation failed'); } catch { showMsg(false, t || 'Generation failed'); } return; }
@@ -357,18 +367,19 @@ genBtn.addEventListener('click', async () => {
     renderText();
     showMsg(true, 'Generated text inserted');
   } catch (e:any) {
-    showMsg(false, String(e));
+    showMsg(false, `Generation error: ${String(e)}`);
+  }
+  finally {
+    genBtn.disabled = false;
   }
 });
 
-// Urgent words panel (client-calculated via server selection inside /gen)
+// Urgent words panel (server endpoint)
 async function loadUrgent() {
-  // We call the backend urgent picker indirectly by requesting a prompt word list
   try {
     const lang = srcSel.value;
     const n = parseInt(urgentCount.value || '12', 10);
-    // Call a lightweight generation to fetch words only: we use /gen/reading but ignore text
-    const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length: lang.startsWith('zh')? 1: 1 }) });
+    const res = await api(`/srs/urgent?lang=${encodeURIComponent(lang)}&total=${n}`);
     if (!res.ok) return;
     const data = await res.json();
     const words: string[] = data.words || [];
@@ -389,4 +400,5 @@ async function loadUrgent() {
   } catch {}
 }
 urgentRefresh?.addEventListener('click', loadUrgent);
-loadUrgent();
+document.addEventListener('DOMContentLoaded', loadUrgent);
+srcSel.addEventListener('change', loadUrgent);

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from argon2 import PasswordHasher
 from Lang.tokenize.registry import TOKENIZERS
 from Lang.tokenize.base import Token
-from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint
+from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint, urgent_words_detailed
 
 # SRS parameters
 _SRS_ALPHA_CLICK = 0.2
@@ -149,7 +149,19 @@ def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> L
         except Exception:
             # fallback: assume provided lemma is simplified
             hans_form = lemma
+    # Try to reuse existing lexeme via variants to avoid duplicates
     lex = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma == canon_lemma, Lexeme.pos == pos).first()
+    if not lex and is_zh:
+        # If a variant already exists globally, adopt its lexeme
+        v = None
+        if hans_form:
+            v = db.query(LexemeVariant).filter(LexemeVariant.script == "Hans", LexemeVariant.form == hans_form).first()
+        if not v and hant_form:
+            v = db.query(LexemeVariant).filter(LexemeVariant.script == "Hant", LexemeVariant.form == hant_form).first()
+        if v:
+            candidate = db.get(Lexeme, v.lexeme_id)
+            if candidate:
+                lex = candidate
     if not lex:
         lex = Lexeme(lang=canon_lang, lemma=canon_lemma, pos=pos)
         db.add(lex)
@@ -157,17 +169,17 @@ def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> L
     if is_zh:
         # Always ensure Hans variant for simplified
         if hans_form:
-            exists_hans = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == "Hans", LexemeVariant.form == hans_form).first()
+            exists_hans = db.query(LexemeVariant).filter(LexemeVariant.script == "Hans", LexemeVariant.form == hans_form).first()
             if not exists_hans:
                 db.add(LexemeVariant(lexeme_id=lex.id, script="Hans", form=hans_form))
         # Ensure Hant variant
         if hant_form:
-            exists_hant = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == "Hant", LexemeVariant.form == hant_form).first()
+            exists_hant = db.query(LexemeVariant).filter(LexemeVariant.script == "Hant", LexemeVariant.form == hant_form).first()
             if not exists_hant:
                 db.add(LexemeVariant(lexeme_id=lex.id, script="Hant", form=hant_form))
         # Also record the original as variant with detected script from lang
         script = "Hant" if lang.endswith("Hant") else "Hans"
-        exists_orig = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == script, LexemeVariant.form == lemma).first()
+        exists_orig = db.query(LexemeVariant).filter(LexemeVariant.script == script, LexemeVariant.form == lemma).first()
         if not exists_orig:
             db.add(LexemeVariant(lexeme_id=lex.id, script=script, form=lemma))
     db.commit()
@@ -587,6 +599,9 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     try:
         text = chat_complete(req.base_url, req.model, messages)
     except Exception as e:
+        # Log details for debugging
+        import logging
+        logging.getLogger("uvicorn.error").exception("LLM generation failed")
         raise HTTPException(502, f"LLM generation failed: {e}")
     # Save text and generation log (unlimited tier check placeholder)
     rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source="llm")
@@ -597,6 +612,14 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     db.add(gl)
     db.commit()
     return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words, "text_id": rt.id}
+
+
+# -------- Urgent words (selection only) --------
+@app.get("/srs/urgent")
+def srs_urgent(lang: str, total: int = 12, new_ratio: float = 0.3, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    items = urgent_words_detailed(db, user, lang, total=total, new_ratio=new_ratio)
+    return {"words": [it["form"] for it in items], "items": items}
 
 
 # -------- Lexeme Info (freq/levels) --------
