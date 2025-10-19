@@ -646,7 +646,7 @@ def get_lexeme_info(lang: str, lemma: str, pos: Optional[str] = None, db: Sessio
 
 # -------- SRS Endpoints --------
 class ExposureItem(BaseModel):
-    lemma: str
+    lemma: Optional[str] = None
     pos: Optional[str] = None
     surface: Optional[str] = None
     context: Optional[str] = None
