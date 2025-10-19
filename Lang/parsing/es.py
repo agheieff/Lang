@@ -1,6 +1,117 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+
+_CLITIC_COMBOS = (
+    "melo","mela","melos","melas",
+    "telo","tela","telos","telas",
+    "selo","sela","selos","selas",
+    "lelo","lela","lelos","lelas",
+)
+_CLITICS = ("nos","os","se","me","te","lo","la","los","las","le","les")
+
+
+def _strip_clitics(word: str) -> Tuple[str, Optional[str]]:
+    w = word.lower()
+    for combo in sorted(_CLITIC_COMBOS, key=len, reverse=True):
+        if w.endswith(combo):
+            return w[: -len(combo)], combo
+    for cl in sorted(_CLITICS, key=len, reverse=True):
+        if w.endswith(cl):
+            return w[: -len(cl)], cl
+    return w, None
+
+
+def _morph_guess(surface: str, lemma: Optional[str]) -> Tuple[Optional[str], Dict[str, str]]:
+    s = surface.lower().strip()
+    base, clitic = _strip_clitics(s)
+    pos: Optional[str] = None
+    morph: Dict[str, str] = {}
+
+    def with_clitic(m: Dict[str, str]) -> Dict[str, str]:
+        if clitic:
+            m = dict(m)
+            m["Clitic"] = clitic
+        return m
+
+    # Non-finite
+    if base.endswith("ando") or base.endswith("iendo") or base.endswith("yendo"):
+        return "VERB", with_clitic({"VerbForm": "Ger"})
+    if base.endswith("ado") or base.endswith("ido") or base.endswith("to") or base.endswith("so") or base.endswith("cho"):
+        return "VERB", with_clitic({"VerbForm": "Part"})
+    if base.endswith("ar") or base.endswith("er") or base.endswith("ir"):
+        return "VERB", with_clitic({"VerbForm": "Inf"})
+
+    # Finite verb patterns (simplified)
+    # Preterite -ar
+    for end, feats in (
+        ("é",  {"Person":"1","Number":"Sing","Mood":"Ind","Tense":"Past"}),
+        ("aste",{"Person":"2","Number":"Sing","Mood":"Ind","Tense":"Past"}),
+        ("ó",  {"Person":"3","Number":"Sing","Mood":"Ind","Tense":"Past"}),
+        ("amos",{"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Past"}),
+        ("asteis",{"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Past"}),
+        ("aron",{"Person":"3","Number":"Plur","Mood":"Ind","Tense":"Past"}),
+    ):
+        if base.endswith(end):
+            return "VERB", with_clitic(feats)
+    # Preterite -er/-ir
+    for end, feats in (
+        ("í",  {"Person":"1","Number":"Sing","Mood":"Ind","Tense":"Past"}),
+        ("iste",{"Person":"2","Number":"Sing","Mood":"Ind","Tense":"Past"}),
+        ("ió", {"Person":"3","Number":"Sing","Mood":"Ind","Tense":"Past"}),
+        ("imos",{"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Past"}),
+        ("isteis",{"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Past"}),
+        ("ieron",{"Person":"3","Number":"Plur","Mood":"Ind","Tense":"Past"}),
+    ):
+        if base.endswith(end):
+            return "VERB", with_clitic(feats)
+    # Imperfect -ar
+    for end, feats in (
+        ("aba", {"Person":"1","Number":"Sing","Mood":"Ind","Tense":"Imp"}),
+        ("abas", {"Person":"2","Number":"Sing","Mood":"Ind","Tense":"Imp"}),
+        ("ábamos", {"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Imp"}),
+        ("abais", {"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Imp"}),
+        ("aban", {"Person":"3","Number":"Plur","Mood":"Ind","Tense":"Imp"}),
+    ):
+        if base.endswith(end):
+            return "VERB", with_clitic(feats)
+    # Imperfect -er/-ir
+    for end, feats in (
+        ("ía", {"Person":"1","Number":"Sing","Mood":"Ind","Tense":"Imp"}),
+        ("ías", {"Person":"2","Number":"Sing","Mood":"Ind","Tense":"Imp"}),
+        ("íamos", {"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Imp"}),
+        ("íais", {"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Imp"}),
+        ("ían", {"Person":"3","Number":"Plur","Mood":"Ind","Tense":"Imp"}),
+    ):
+        if base.endswith(end):
+            return "VERB", with_clitic(feats)
+    # Present endings; only label as VERB if lemma looks verbal
+    is_verbal_lemma = bool(lemma and lemma.endswith(("ar","er","ir")))
+    if is_verbal_lemma:
+        for end, feats in (
+            ("o",   {"Person":"1","Number":"Sing","Mood":"Ind","Tense":"Pres"}),
+            ("as",  {"Person":"2","Number":"Sing","Mood":"Ind","Tense":"Pres"}),
+            ("a",   {"Person":"3","Number":"Sing","Mood":"Ind","Tense":"Pres"}),
+            ("amos",{"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("áis", {"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("an",  {"Person":"3","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("es",  {"Person":"2","Number":"Sing","Mood":"Ind","Tense":"Pres"}),
+            ("e",   {"Person":"3","Number":"Sing","Mood":"Ind","Tense":"Pres"}),
+            ("emos",{"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("éis", {"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("en",  {"Person":"3","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("imos",{"Person":"1","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+            ("ís",  {"Person":"2","Number":"Plur","Mood":"Ind","Tense":"Pres"}),
+        ):
+            if base.endswith(end):
+                return "VERB", with_clitic(feats)
+
+    # Plural noun guess: avoid accented verb endings
+    if any(base.endswith(e) for e in ("es","s")) and not any(ch in base for ch in "áéíóú"):
+        return "NOUN", {"Number": "Plur"}
+
+    return None, {}
 
 
 def _simple_spanish_rules(surface: str) -> Dict[str, Any]:
@@ -88,11 +199,12 @@ def analyze_word_es(surface: str, context: Optional[str] = None) -> Dict[str, An
     except Exception:
         pass
 
-    # 2) Try simplemma dictionary-based lemmatizer
+    # 2) Try simplemma for lemma; enrich with lightweight morph guess
     try:
         from simplemma import lemmatize  # type: ignore
         lemma = lemmatize(surface, lang="es")
-        return {"surface": surface, "lemma": lemma, "pos": None, "morph": {}}
+        pos, morph = _morph_guess(surface, lemma)
+        return {"surface": surface, "lemma": lemma, "pos": pos, "morph": morph}
     except Exception:
         pass
 
