@@ -179,7 +179,15 @@ def _get_or_create_userlexeme(db: Session, user: User, profile: Profile, lexeme:
     ul = db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == profile.id, UserLexeme.lexeme_id == lexeme.id).first()
     if ul:
         return ul
-    ul = UserLexeme(user_id=user.id, profile_id=profile.id, lexeme_id=lexeme.id)
+    # Initialize importance from frequency when available
+    imp = 0.5
+    try:
+        li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lexeme.id).first()
+        if li and li.freq_rank:
+            imp = min(1.0, 1.0 / (1.0 + li.freq_rank / 500.0))
+    except Exception:
+        pass
+    ul = UserLexeme(user_id=user.id, profile_id=profile.id, lexeme_id=lexeme.id, importance=imp)
     db.add(ul)
     db.commit()
     db.refresh(ul)

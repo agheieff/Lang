@@ -110,6 +110,9 @@ class UserLexeme(Base):
     a_click: Mapped[int] = mapped_column(Integer, default=1)
     b_nonclick: Mapped[int] = mapped_column(Integer, default=4)
     stability: Mapped[float] = mapped_column(Float, default=0.2)  # 0..1
+    # Word importance (e.g., based on frequency or curriculum); user-specific so it can evolve
+    importance: Mapped[float] = mapped_column(Float, default=0.5)
+    importance_var: Mapped[float] = mapped_column(Float, default=0.3)
 
     exposures: Mapped[int] = mapped_column(Integer, default=0)
     clicks: Mapped[int] = mapped_column(Integer, default=0)

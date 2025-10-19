@@ -164,12 +164,9 @@ def urgent_words(db: Session, user: User, lang: str, total: int = 12, new_ratio:
         n = a + b
         p = (a / n) if n > 0 else 0.0
         S = float(ul.stability or 0.0)
-        # urgency: low stability (review soon) + high click propensity (still confusing)
-        # slight boost for lower frequency ranks (more common words)
-        freq_bonus = 0.0
-        if li and li.freq_rank:
-            freq_bonus = 0.05 * (1.0 / (1.0 + li.freq_rank/5000.0))
-        score = (1.0 - S) * 0.65 + p * 0.35 + freq_bonus
+        # urgency: low stability (review soon) + high click propensity (still confusing), weighted by importance
+        imp = float(getattr(ul, "importance", 0.5) or 0.5)
+        score = ((1.0 - S) * 0.65 + p * 0.35) * (0.5 + 0.5 * imp)
         known_scored.append((score, lx))
     known_scored.sort(key=lambda t: t[0], reverse=True)
 
