@@ -45,7 +45,7 @@ app.add_middleware(
 )
 
 # Simple per-minute rate limit by IP or user tier for heavy endpoints
-_RATE_LIMITS = {"free": 60, "premium": 300, "pro": 1000}  # requests/minute
+_RATE_LIMITS = {"free": 60, "premium": 300, "pro": 1000}  # requests/minute; admin unlimited via bypass
 _RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
 
 
@@ -77,6 +77,9 @@ async def _rate_limit(request, call_next):
     if not key:
         client = request.client.host if request.client else "unknown"
         key = f"ip:{client}:{path}"
+    # Admin users are unlimited
+    if tier == "admin":
+        return await call_next(request)
     limit = _RATE_LIMITS.get(tier, _RATE_LIMITS["free"])
     now = time.time()
     window = 60.0
@@ -183,6 +186,7 @@ def _ensure_default_tiers(db: Session) -> None:
         ("free", "Free plan"),
         ("premium", "Premium plan"),
         ("pro", "Pro plan"),
+        ("admin", "Administrator (no limits)"),
     ]
     created = False
     for name, desc in defaults:
