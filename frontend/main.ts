@@ -20,6 +20,8 @@ const addProfileBtn = document.getElementById('add-profile') as HTMLButtonElemen
 const profilesDiv = document.getElementById('profiles') as HTMLDivElement;
 const genBtn = document.getElementById('gen') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLDivElement;
+const userbar = document.getElementById('userbar') as HTMLDivElement;
+const authDlg = document.getElementById('authdlg') as HTMLDialogElement;
 
 // Auth tokens (simple localStorage for demo)
 function getAccessToken() { return localStorage.getItem('arcadia_access') || ''; }
@@ -239,7 +241,35 @@ async function auth(path: string) {
 }
 loginBtn.onclick = () => auth('/auth/login');
 registerBtn.onclick = () => auth('/auth/register');
-// replace inline logout button with userbar header; noop here
+// replace inline logout button with header userbar; render button dynamically
+async function whoami() {
+  const res = await api('/me');
+  if (!userbar) return;
+  userbar.innerHTML = '';
+  if (!res.ok) {
+    const btn = document.createElement('button');
+    btn.textContent = 'Login / Sign up';
+    btn.onclick = () => authDlg?.showModal();
+    userbar.appendChild(btn);
+    return;
+  }
+  try {
+    const me = await res.json();
+    const span = document.createElement('span');
+    span.textContent = `${me.email} (${me.subscription_tier})`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Logout';
+    btn.onclick = () => { localStorage.removeItem('arcadia_access'); localStorage.removeItem('arcadia_refresh'); location.reload(); };
+    userbar.appendChild(span);
+    userbar.appendChild(btn);
+  } catch {
+    const btn = document.createElement('button');
+    btn.textContent = 'Login / Sign up';
+    btn.onclick = () => authDlg?.showModal();
+    userbar.appendChild(btn);
+  }
+}
+whoami();
 
 saveSettingsBtn.onclick = async () => {
   const lang = srcSel.value;
