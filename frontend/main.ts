@@ -8,7 +8,21 @@ const srcSel = document.getElementById('src') as HTMLSelectElement;
 const tgtSel = document.getElementById('tgt') as HTMLSelectElement;
 const popover = document.getElementById('popover') as HTMLDivElement;
 const hoverTip = document.getElementById('hover-tip') as HTMLDivElement;
-const tierSel = document.getElementById('tier') as HTMLSelectElement;
+// Settings view elements
+const openSettingsBtn = document.getElementById('open-settings') as HTMLButtonElement;
+const settingsView = document.getElementById('settings-view') as HTMLDivElement;
+const settingsContent = document.getElementById('settings-content') as HTMLDivElement;
+const setTierSel = document.getElementById('set-tier') as HTMLSelectElement;
+const setPinyinSel = document.getElementById('set-pinyin-style') as HTMLSelectElement;
+const setSaveSettingsBtn = document.getElementById('set-save-settings') as HTMLButtonElement;
+const setProfileLangInput = document.getElementById('set-profile-lang') as HTMLInputElement;
+const setAddProfileBtn = document.getElementById('set-add-profile') as HTMLButtonElement;
+const setProfilesDiv = document.getElementById('set-profiles') as HTMLDivElement;
+const setUrgentCount = document.getElementById('set-urgent-count') as HTMLInputElement;
+const setUrgentNew = document.getElementById('set-urgent-new') as HTMLInputElement;
+const setUrgentList = document.getElementById('set-urgent-list') as HTMLDivElement;
+const setUrgentRefresh = document.getElementById('set-refresh-urgent') as HTMLButtonElement;
+const settingsBack = document.getElementById('settings-back') as HTMLButtonElement;
 const emailEl = document.getElementById('email') as HTMLInputElement;
 const pwdEl = document.getElementById('password') as HTMLInputElement;
 const loginBtn = document.getElementById('login') as HTMLButtonElement;
@@ -183,26 +197,26 @@ renderBtn?.addEventListener('click', renderText);
 // Persist changes to lang/target and re-render
 srcSel.addEventListener('change', () => { localStorage.setItem('arcadia_src', srcSel.value); renderText(); });
 tgtSel.addEventListener('change', () => { localStorage.setItem('arcadia_tgt', tgtSel.value); });
-// Load tiers into selector
+// Load tiers into selector (settings page)
 async function loadTiers() {
   const res = await api('/tiers');
   if (!res.ok) return;
   const tiers = await res.json();
-  tierSel.innerHTML = '';
+  setTierSel.innerHTML = '';
   for (const t of tiers) {
     const opt = document.createElement('option');
     opt.value = t.name; opt.textContent = t.name;
-    tierSel.appendChild(opt);
+    setTierSel.appendChild(opt);
   }
   // Fetch current user's tier if logged in
   const mt = await api('/me/tier');
   if (mt.ok) {
     const cur = await mt.json();
-    tierSel.value = cur.name;
+    setTierSel.value = cur.name;
   }
 }
-tierSel?.addEventListener('change', async () => {
-  const name = tierSel.value;
+setTierSel?.addEventListener('change', async () => {
+  const name = setTierSel.value;
   const res = await api('/me/tier', { method: 'POST', body: JSON.stringify({ name }) });
   if (!res.ok) {
     const t = await res.text();
@@ -215,9 +229,9 @@ loadTiers();
 
 async function refreshProfiles() {
   const res = await api('/me/profiles');
-  if (!res.ok) { profilesDiv.textContent = 'Login to manage profiles'; return; }
+  if (!res.ok) { setProfilesDiv.textContent = 'Login to manage profiles'; return; }
   const items = await res.json();
-  profilesDiv.innerHTML = '<strong>Your profiles:</strong> ' + items.map((p:any)=>`${p.lang}`).join(', ');
+  setProfilesDiv.innerHTML = '<strong>Your profiles:</strong> ' + items.map((p:any)=>`${p.lang}`).join(', ');
 }
 refreshProfiles();
 
@@ -288,20 +302,20 @@ async function whoami() {
 }
 whoami();
 
-saveSettingsBtn.onclick = async () => {
+setSaveSettingsBtn.onclick = async () => {
   const lang = srcSel.value;
-  const style = pinyinSel.value === 'tone' ? 'tone' : 'number';
+  const style = setPinyinSel.value === 'tone' ? 'tone' : 'number';
   const settings = { zh_pinyin_style: style };
   const res = await api('/me/profile', { method: 'POST', body: JSON.stringify({ lang, settings }) });
   if (!res.ok) alert('Save failed');
 };
 
-addProfileBtn.onclick = async () => {
-  const lang = profileLangInput.value.trim();
+setAddProfileBtn.onclick = async () => {
+  const lang = setProfileLangInput.value.trim();
   if (!lang) return;
   const res = await api('/me/profile', { method: 'POST', body: JSON.stringify({ lang }) });
   if (!res.ok) { alert('Failed'); return; }
-  profileLangInput.value = '';
+  setProfileLangInput.value = '';
   await refreshProfiles();
 };
 // Delegate clicks from container to token spans
@@ -384,12 +398,12 @@ genBtn.addEventListener('click', async () => {
 async function loadUrgent() {
   try {
     const lang = srcSel.value;
-    const n = parseInt(urgentCount.value || '12', 10);
+    const n = parseInt(setUrgentCount.value || '12', 10);
     const res = await api(`/srs/urgent?lang=${encodeURIComponent(lang)}&total=${n}`);
     if (!res.ok) return;
     const data = await res.json();
     const words: string[] = data.words || [];
-    urgentList.innerHTML = '';
+    setUrgentList.innerHTML = '';
     for (const w of words.slice(0, n)) {
       const badge = document.createElement('button');
       badge.textContent = w;
@@ -401,12 +415,24 @@ async function loadUrgent() {
         const res = await api('/srs/event/nonlookup', { method: 'POST', body: JSON.stringify({ lang, items: [{ surface: w }] }) });
         if (res.ok) { showMsg(true, `Marked known: ${w}`); loadUrgent(); }
       };
-      urgentList.appendChild(badge);
+      setUrgentList.appendChild(badge);
     }
   } catch {}
 }
-urgentRefresh?.addEventListener('click', loadUrgent);
+setUrgentRefresh?.addEventListener('click', loadUrgent);
 srcSel.addEventListener('change', loadUrgent);
+
+// Settings navigation
+openSettingsBtn.onclick = () => { settingsView.style.display = 'block'; };
+settingsBack.onclick = () => { settingsView.style.display = 'none'; };
+document.querySelectorAll('.set-nav').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const sec = (btn as HTMLElement).getAttribute('data-section')!;
+    document.querySelectorAll('.set-section').forEach(s => (s as HTMLElement).style.display = 'none');
+    const cur = document.getElementById(`section-${sec}`) as HTMLElement | null;
+    if (cur) cur.style.display = 'block';
+  });
+});
 
 // Text read button: recompute word scores for current text
 const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;

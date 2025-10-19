@@ -25,7 +25,9 @@
   <body>
     <header style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px">
       <h1 style="margin:0">Arcadia Lang</h1>
-      <div id="userbar" style="display:flex; align-items:center; gap:8px"></div>
+      <div id="userbar" style="display:flex; align-items:center; gap:8px">
+        <button id="open-settings">Profile</button>
+      </div>
     </header>
     <div class="controls">
       <label>Source:
@@ -43,10 +45,6 @@
           <option value="de">German (de)</option>
         </select>
       </label>
-      <label>Tier:
-        <select id="tier"></select>
-      </label>
-      
       <button id="gen">Generate text</button>
       <button id="text-read">Text read</button>
     </div>
@@ -66,26 +64,57 @@
     </dialog>
     <!-- Removed manual input field as requested -->
     <div id="msg" class="msg"></div>
-    <div style="margin:10px 0; display:flex; gap:10px; align-items:center">
-      <label>Pinyin style:
-        <select id="pinyin-style">
-          <option value="tone">Tone marks</option>
-          <option value="number">Tone numbers</option>
-        </select>
-      </label>
-      <button id="save-settings">Save Settings for Source Lang</button>
-      <label>Add profile (lang): <input id="profile-lang" placeholder="es or zh-Hans" style="width:120px"></label>
-      <button id="add-profile">Add</button>
-    </div>
-    <div id="profiles"></div>
-    <div id="urgent" style="margin:12px 0; padding:8px; border:1px solid #ddd; border-radius:6px">
-      <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
-        <strong>Urgent words</strong>
-        <label>count <input id="urgent-count" type="number" min="5" max="50" value="12" style="width:60px"></label>
-        <label>new ratio <input id="urgent-new" type="number" min="0" max="1" step="0.1" value="0.3" style="width:60px"></label>
-        <button id="refresh-urgent">Refresh</button>
+
+    <!-- Settings View -->
+    <div id="settings-view" style="display:none; margin-top:12px">
+      <div style="display:flex; gap:16px">
+        <nav style="min-width:200px; border-right:1px solid #eee; padding-right:12px; display:flex; flex-direction:column; gap:6px">
+          <button class="set-nav" data-section="user">User settings</button>
+          <button class="set-nav" data-section="display">Display settings</button>
+          <button class="set-nav" data-section="lang">Per-language settings</button>
+          <button class="set-nav" data-section="urgent">Urgent words</button>
+          <button id="settings-back">Back</button>
+        </nav>
+        <div id="settings-content" style="flex:1">
+          <section id="section-user" class="set-section">
+            <h3>User settings</h3>
+            <div>
+              <label>Subscription tier:
+                <select id="set-tier"></select>
+              </label>
+            </div>
+          </section>
+          <section id="section-display" class="set-section" style="display:none">
+            <h3>Display settings</h3>
+            <div>
+              <label>Pinyin style:
+                <select id="set-pinyin-style">
+                  <option value="tone">Tone marks</option>
+                  <option value="number">Tone numbers</option>
+                </select>
+              </label>
+              <button id="set-save-settings">Save for current source language</button>
+            </div>
+          </section>
+          <section id="section-lang" class="set-section" style="display:none">
+            <h3>Per-language settings</h3>
+            <div>
+              <label>Add profile (lang): <input id="set-profile-lang" placeholder="es or zh-Hans" style="width:120px"></label>
+              <button id="set-add-profile">Add</button>
+            </div>
+            <div id="set-profiles" style="margin-top:8px"></div>
+          </section>
+          <section id="section-urgent" class="set-section" style="display:none">
+            <h3>Urgent words</h3>
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
+              <label>count <input id="set-urgent-count" type="number" min="5" max="50" value="12" style="width:60px"></label>
+              <label>new ratio <input id="set-urgent-new" type="number" min="0" max="1" step="0.1" value="0.3" style="width:60px"></label>
+              <button id="set-refresh-urgent">Refresh</button>
+            </div>
+            <div id="set-urgent-list" style="display:flex; flex-wrap:wrap; gap:8px"></div>
+          </section>
+        </div>
       </div>
-      <div id="urgent-list" style="display:flex; flex-wrap:wrap; gap:8px"></div>
     </div>
     <div id="output" class="text"></div>
     <div id="popover" class="popover" style="display:none"></div>
