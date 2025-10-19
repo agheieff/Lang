@@ -18,6 +18,7 @@ const saveSettingsBtn = document.getElementById('save-settings') as HTMLButtonEl
 const profileLangInput = document.getElementById('profile-lang') as HTMLInputElement;
 const addProfileBtn = document.getElementById('add-profile') as HTMLButtonElement;
 const profilesDiv = document.getElementById('profiles') as HTMLDivElement;
+const genBtn = document.getElementById('gen') as HTMLButtonElement;
 
 // Auth tokens (simple localStorage for demo)
 function getAccessToken() { return localStorage.getItem('arcadia_access') || ''; }
@@ -267,3 +268,19 @@ async function sendExposures(lang: string, items: { lemma?: string; surface?: st
     // ignore failures silently for now
   } catch {}
 }
+
+// Generate text via LLM and render it immediately
+genBtn.addEventListener('click', async () => {
+  const lang = srcSel.value;
+  // Length hint per language; could be expanded later
+  const length = lang.startsWith('zh') ? 300 : 180;
+  try {
+    const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length }) });
+    if (!res.ok) { alert('Generation failed'); return; }
+    const data = await res.json();
+    inputEl.value = data.text || '';
+    renderText();
+  } catch {
+    alert('Generation failed');
+  }
+});

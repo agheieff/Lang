@@ -527,8 +527,7 @@ def parse(req: ParseRequest) -> Dict[str, Any]:
 # -------- LLM reading generation --------
 class GenRequest(BaseModel):
     lang: str
-    approx_len: int = 250
-    unit: str = "chars"  # or "words"
+    length: Optional[int] = None  # UI length hint; unit is decided per-language
     include_words: Optional[List[str]] = None
     model: Optional[str] = None
     base_url: str = "http://localhost:1234/v1"
@@ -541,7 +540,10 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     # Auto-pick words if not provided
     words = req.include_words or pick_words(db, user, req.lang, count=12)
     level_hint = estimate_level(db, user, req.lang)
-    spec = PromptSpec(lang=req.lang, unit=req.unit, approx_len=req.approx_len, user_level_hint=level_hint, include_words=words, script=script)
+    # Per-language unit and default length
+    unit = "chars" if req.lang.startswith("zh") else "words"
+    approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)
+    spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script)
     messages = build_reading_prompt(spec)
     text = chat_complete(req.base_url, req.model, messages)
     return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words}
