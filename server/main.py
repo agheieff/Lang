@@ -373,6 +373,9 @@ class ProfileRequest(BaseModel):
     lang: str
     subscription_tier: Optional[str] = None  # e.g., free|premium|pro from DB
     settings: Optional[Dict[str, Any]] = None
+    level_value: Optional[float] = None
+    level_var: Optional[float] = None
+    level_code: Optional[str] = None
 
 
 @app.post("/me/profile")
@@ -399,14 +402,24 @@ def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), user: Use
             db.add(pref)
         else:
             pref.data = req.settings
+    # Optional level updates
+    if req.level_value is not None:
+        prof.level_value = float(req.level_value)
+    if req.level_var is not None:
+        prof.level_var = float(req.level_var)
+    if req.level_code is not None:
+        prof.level_code = req.level_code
     db.commit()
-    return {"ok": True, "user_id": user.id, "lang": prof.lang, "subscription_tier": user.subscription_tier}
+    return {"ok": True, "user_id": user.id, "lang": prof.lang, "subscription_tier": user.subscription_tier, "level_value": prof.level_value, "level_var": prof.level_var, "level_code": prof.level_code}
 
 
 class ProfileOut(BaseModel):
     lang: str
     created_at: datetime
     settings: Optional[Dict[str, Any]] = None
+    level_value: float
+    level_var: float
+    level_code: Optional[str] = None
 
 
 @app.get("/me/profiles", response_model=List[ProfileOut])
@@ -416,7 +429,7 @@ def list_profiles(db: Session = Depends(get_db), user: User = Depends(_get_curre
     out: List[ProfileOut] = []
     for p in profiles:
         pref = db.query(ProfilePref).filter(ProfilePref.profile_id == p.id).first()
-        out.append(ProfileOut(lang=p.lang, created_at=p.created_at, settings=(pref.data if pref else None)))
+        out.append(ProfileOut(lang=p.lang, created_at=p.created_at, settings=(pref.data if pref else None), level_value=p.level_value, level_var=p.level_var, level_code=p.level_code))
     return out
 
 
