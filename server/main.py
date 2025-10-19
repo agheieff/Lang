@@ -466,6 +466,17 @@ def set_my_tier(req: TierSetRequest, db: Session = Depends(get_db), user: User =
     return TierOut(name=t.name, description=t.description)
 
 
+class MeOut(BaseModel):
+    id: int
+    email: str
+    subscription_tier: str
+
+
+@app.get("/me", response_model=MeOut)
+def get_me(user: User = Depends(_get_current_user)):
+    return MeOut(id=user.id, email=user.email, subscription_tier=user.subscription_tier)
+
+
 class ParseRequest(BaseModel):
     lang: str
     text: str
@@ -545,7 +556,10 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)
     spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script)
     messages = build_reading_prompt(spec)
-    text = chat_complete(req.base_url, req.model, messages)
+    try:
+        text = chat_complete(req.base_url, req.model, messages)
+    except Exception as e:
+        raise HTTPException(502, f"LLM generation failed: {e}")
     return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words}
 
 

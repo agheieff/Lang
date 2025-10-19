@@ -188,7 +188,10 @@ tierSel?.addEventListener('change', async () => {
   const name = tierSel.value;
   const res = await api('/me/tier', { method: 'POST', body: JSON.stringify({ name }) });
   if (!res.ok) {
-    alert('Failed to set tier');
+    const t = await res.text();
+    try { const j = JSON.parse(t); showMsg(false, j.detail || 'Failed to set tier'); } catch { showMsg(false, t || 'Failed to set tier'); }
+  } else {
+    showMsg(true, `Tier set to ${name}`);
   }
 });
 loadTiers();
@@ -211,12 +214,32 @@ async function auth(path: string) {
     if (data.access_token) setTokens(data.access_token, data.refresh_token || '');
   } catch { /* ignore */ }
   showMsg(true, path.includes('register') ? 'Registered and logged in' : 'Logged in');
+  // refresh header state
+  try {
+    const meRes = await api('/me');
+    if (meRes.ok) {
+      const me = await meRes.json();
+      const userbar = document.getElementById('userbar') as HTMLDivElement;
+      if (userbar) {
+        userbar.innerHTML = '';
+        const span = document.createElement('span');
+        span.textContent = `${me.email} (${me.subscription_tier})`;
+        const btn = document.createElement('button');
+        btn.textContent = 'Logout';
+        btn.onclick = () => { localStorage.removeItem('arcadia_access'); localStorage.removeItem('arcadia_refresh'); location.reload(); };
+        userbar.appendChild(span);
+        userbar.appendChild(btn);
+      }
+      const dlg = document.getElementById('authdlg') as HTMLDialogElement;
+      dlg?.close();
+    }
+  } catch {}
   await loadTiers();
   await refreshProfiles();
 }
 loginBtn.onclick = () => auth('/auth/login');
 registerBtn.onclick = () => auth('/auth/register');
-logoutBtn.onclick = () => { setTokens('', ''); showMsg(true, 'Logged out'); };
+// replace inline logout button with userbar header; noop here
 
 saveSettingsBtn.onclick = async () => {
   const lang = srcSel.value;
@@ -287,12 +310,12 @@ genBtn.addEventListener('click', async () => {
   const length = lang.startsWith('zh') ? 300 : 180;
   try {
     const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length }) });
-    if (!res.ok) { showMsg(false, 'Generation failed'); return; }
+    if (!res.ok) { const t = await res.text(); try { const j = JSON.parse(t); showMsg(false, j.detail || 'Generation failed'); } catch { showMsg(false, t || 'Generation failed'); } return; }
     const data = await res.json();
     inputEl.value = data.text || '';
     renderText();
     showMsg(true, 'Generated text inserted');
-  } catch {
-    showMsg(false, 'Generation failed');
+  } catch (e:any) {
+    showMsg(false, String(e));
   }
 });
