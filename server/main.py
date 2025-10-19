@@ -6,7 +6,7 @@ import os
 import time
 from collections import deque, defaultdict
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -17,13 +17,18 @@ from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
 from .db import get_db, init_db
-from .models import User, Profile, SubscriptionTier, ProfilePref
+from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext
 from sqlalchemy.orm import Session
 import jwt
 from datetime import datetime, timedelta
 from argon2 import PasswordHasher
 from Lang.tokenize.registry import TOKENIZERS
 from Lang.tokenize.base import Token
+
+# SRS parameters
+_SRS_ALPHA_CLICK = 0.2
+_SRS_BETA_EXPOSURE = 0.02
+_DIVERSITY_K = 8.0
 
 
 class LookupRequest(BaseModel):
@@ -112,8 +117,62 @@ def get_dict_chain() -> DictionaryProviderChain:
     return _DICT_CHAIN
 
 
+def _hash_context(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    try:
+        import hashlib
+        h = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        return h[:32]
+    except Exception:
+        return None
+
+
+def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> Lexeme:
+    lex = db.query(Lexeme).filter(Lexeme.lang == lang, Lexeme.lemma == lemma, Lexeme.pos == pos).first()
+    if lex:
+        return lex
+    lex = Lexeme(lang=lang, lemma=lemma, pos=pos)
+    db.add(lex)
+    db.commit()
+    db.refresh(lex)
+    return lex
+
+
+def _get_or_create_userlexeme(db: Session, user: User, profile: Profile, lexeme: Lexeme) -> UserLexeme:
+    ul = db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == profile.id, UserLexeme.lexeme_id == lexeme.id).first()
+    if ul:
+        return ul
+    ul = UserLexeme(user_id=user.id, profile_id=profile.id, lexeme_id=lexeme.id)
+    db.add(ul)
+    db.commit()
+    db.refresh(ul)
+    return ul
+
+
+def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str]):
+    # Pick or create profile for the lang
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        prof = Profile(user_id=user.id, lang=lang)
+        db.add(prof)
+        db.commit()
+        db.refresh(prof)
+    lex = _resolve_lexeme(db, lang, lemma, pos)
+    ul = _get_or_create_userlexeme(db, user, prof, lex)
+    # Update Beta and stability
+    ul.a_click = (ul.a_click or 0) + 1
+    ul.clicks = (ul.clicks or 0) + 1
+    ul.last_clicked_at = datetime.utcnow()
+    ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) * (1.0 - _SRS_ALPHA_CLICK))))
+    # Event row
+    ev = WordEvent(ts=datetime.utcnow(), user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={})
+    db.add(ev)
+    db.commit()
+
+
 @app.post("/api/lookup")
-def lookup(req: LookupRequest) -> Dict[str, Any]:
+def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     engine = _ENGINES.get(req.source_lang)
     if not engine:
         raise HTTPException(status_code=400, detail="language not supported yet")
@@ -130,7 +189,7 @@ def lookup(req: LookupRequest) -> Dict[str, Any]:
 
     mode = "translation" if translations else "analysis"
 
-    return {
+    resp = {
         "mode": mode,
         "surface": req.surface,
         "lemma": lemma,
@@ -141,6 +200,18 @@ def lookup(req: LookupRequest) -> Dict[str, Any]:
         "script": analysis.get("script"),
         "pronunciation": analysis.get("pronunciation"),
     }
+    # Auto-log click event for SRS if authenticated header is present
+    try:
+        auth = request.headers.get("authorization") or request.headers.get("Authorization")
+        if auth and auth.lower().startswith("bearer "):
+            data = jwt.decode(auth.split(" ", 1)[1], _JWT_SECRET, algorithms=["HS256"])  # type: ignore
+            uid = int(data.get("sub"))
+            user = db.get(User, uid)
+            if user:
+                _srs_click(db, user, req.source_lang, lemma=lemma, pos=analysis.get("pos"), surface=req.surface, context_hash=None)
+    except Exception:
+        pass
+    return resp
 class RegisterRequest(BaseModel):
     email: str
     password: str
@@ -417,6 +488,94 @@ def parse(req: ParseRequest) -> Dict[str, Any]:
     add_sep(last, len(req.text))
 
     return {"tokens": tokens_out}
+
+
+# -------- SRS Endpoints --------
+class ExposureItem(BaseModel):
+    lemma: str
+    pos: Optional[str] = None
+    surface: Optional[str] = None
+    context: Optional[str] = None
+
+
+class ExposuresRequest(BaseModel):
+    lang: str
+    items: List[ExposureItem]
+
+
+def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str]):
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        prof = Profile(user_id=user.id, lang=lang)
+        db.add(prof)
+        db.commit()
+        db.refresh(prof)
+    lex = _resolve_lexeme(db, lang, lemma, pos)
+    ul = _get_or_create_userlexeme(db, user, prof, lex)
+    # Beta non-click increment
+    ul.b_nonclick = (ul.b_nonclick or 0) + 1
+    ul.exposures = (ul.exposures or 0) + 1
+    now = datetime.utcnow()
+    if not ul.first_seen_at:
+        ul.first_seen_at = now
+    ul.last_seen_at = now
+    # Stability increase
+    ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) + _SRS_BETA_EXPOSURE * (1.0 - (ul.stability or 0.0)))))
+    # Diversity (distinct contexts)
+    if context_hash:
+        exists = db.query(UserLexemeContext).filter(UserLexemeContext.user_lexeme_id == ul.id, UserLexemeContext.context_hash == context_hash).first()
+        if not exists:
+            db.add(UserLexemeContext(user_lexeme_id=ul.id, context_hash=context_hash))
+            ul.distinct_texts = (ul.distinct_texts or 0) + 1
+    # Event
+    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}))
+
+
+@app.post("/srs/event/exposures")
+def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    count = 0
+    for it in req.items:
+        if not it.lemma:
+            continue
+        _srs_exposure(db, user, req.lang, it.lemma, it.pos, it.surface, _hash_context(it.context))
+        count += 1
+    db.commit()
+    return {"ok": True, "count": count}
+
+
+class ClickRequest(BaseModel):
+    lang: str
+    lemma: Optional[str] = None
+    pos: Optional[str] = None
+    surface: Optional[str] = None
+    context: Optional[str] = None
+
+
+@app.post("/srs/event/click")
+def srs_click(req: ClickRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    lemma = req.lemma
+    pos = req.pos
+    if not lemma and req.surface:
+        engine = _ENGINES.get(req.lang)
+        if engine:
+            analysis = engine.analyze_word(req.surface, context=None)
+            lemma = analysis.get("lemma") or req.surface
+            pos = pos or analysis.get("pos")
+    if not lemma:
+        raise HTTPException(400, "lemma or surface required")
+    _srs_click(db, user, req.lang, lemma, pos, req.surface, _hash_context(req.context))
+    # Return derived metrics
+    lex = _resolve_lexeme(db, req.lang, lemma, pos)
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()
+    ul = db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == (prof.id if prof else -1), UserLexeme.lexeme_id == lex.id).first()
+    if not ul:
+        return {"ok": True}
+    a = ul.a_click or 0
+    b = ul.b_nonclick or 0
+    p_click = a / (a + b) if (a + b) > 0 else 0.0
+    return {"ok": True, "lexeme_id": lex.id, "p_click": p_click, "n": a + b, "stability": ul.stability, "diversity": ul.distinct_texts}
 
 
 # Static site (frontend build output). We mount after API routes so they take priority.

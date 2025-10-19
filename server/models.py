@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON
+from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -64,3 +64,70 @@ class ProfilePref(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Lexeme(Base):
+    __tablename__ = "lexemes"
+    __table_args__ = (
+        UniqueConstraint("lang", "lemma", "pos", name="uq_lexeme_lang_lemma_pos"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lang: Mapped[str] = mapped_column(String(16), index=True)
+    lemma: Mapped[str] = mapped_column(String(256), index=True)
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserLexeme(Base):
+    __tablename__ = "user_lexemes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "profile_id", "lexeme_id", name="uq_user_profile_lexeme"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
+    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
+
+    a_click: Mapped[int] = mapped_column(Integer, default=1)
+    b_nonclick: Mapped[int] = mapped_column(Integer, default=4)
+    stability: Mapped[float] = mapped_column(Float, default=0.2)  # 0..1
+
+    exposures: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    distinct_texts: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    last_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    next_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class WordEvent(Base):
+    __tablename__ = "word_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
+    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String(16))  # exposure|click|assign|hover
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    surface: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    context_hash: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    source: Mapped[Optional[str]] = mapped_column(String(16), default=None)  # llm|manual|unknown
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class UserLexemeContext(Base):
+    __tablename__ = "user_lexeme_contexts"
+    __table_args__ = (
+        UniqueConstraint("user_lexeme_id", "context_hash", name="uq_ul_ctx"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_lexeme_id: Mapped[int] = mapped_column(ForeignKey("user_lexemes.id", ondelete="CASCADE"), index=True)
+    context_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
