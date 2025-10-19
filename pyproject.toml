@@ -14,6 +14,9 @@
   "argon2-cffi>=23.1.0",
   "simplemma>=0.9.1",
   "beautifulsoup4>=4.12.3",
+  "jieba>=0.42.1",
+  "pypinyin>=0.50.0",
+  "opencc-python-reimplemented>=0.1.7",
  ]
 
  [project.optional-dependencies]
