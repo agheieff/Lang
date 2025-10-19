@@ -167,21 +167,19 @@ def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> L
         db.add(lex)
         db.flush()
     if is_zh:
-        # Always ensure Hans variant for simplified
+        # Build unique target pairs to insert (avoid duplicates within same session, no autoflush)
+        to_check: set[tuple[str, str]] = set()
         if hans_form:
-            exists_hans = db.query(LexemeVariant).filter(LexemeVariant.script == "Hans", LexemeVariant.form == hans_form).first()
-            if not exists_hans:
-                db.add(LexemeVariant(lexeme_id=lex.id, script="Hans", form=hans_form))
-        # Ensure Hant variant
+            to_check.add(("Hans", hans_form))
         if hant_form:
-            exists_hant = db.query(LexemeVariant).filter(LexemeVariant.script == "Hant", LexemeVariant.form == hant_form).first()
-            if not exists_hant:
-                db.add(LexemeVariant(lexeme_id=lex.id, script="Hant", form=hant_form))
-        # Also record the original as variant with detected script from lang
-        script = "Hant" if lang.endswith("Hant") else "Hans"
-        exists_orig = db.query(LexemeVariant).filter(LexemeVariant.script == script, LexemeVariant.form == lemma).first()
-        if not exists_orig:
-            db.add(LexemeVariant(lexeme_id=lex.id, script=script, form=lemma))
+            to_check.add(("Hant", hant_form))
+        orig_script = "Hant" if lang.endswith("Hant") else "Hans"
+        if (orig_script, lemma) not in to_check:
+            to_check.add((orig_script, lemma))
+        for sc, fm in to_check:
+            exists = db.query(LexemeVariant).filter(LexemeVariant.script == sc, LexemeVariant.form == fm).first()
+            if not exists:
+                db.add(LexemeVariant(lexeme_id=lex.id, script=sc, form=fm))
     db.commit()
     db.refresh(lex)
     return lex
@@ -741,9 +739,10 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
 class NonLookupRequest(BaseModel):
     lang: str
     items: List[ExposureItem]
+    text_id: Optional[int] = None
 
 
-def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str]):
+def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     # ensure profile and lexeme
     prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
     if not prof:
@@ -758,7 +757,7 @@ def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional
     now = datetime.utcnow()
     ul.last_seen_at = now
     ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) + _SRS_GAMMA_NONLOOKUP * (1.0 - (ul.stability or 0.0)))))
-    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}))
+    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
 
 
 @app.post("/srs/event/nonlookup")
@@ -776,7 +775,7 @@ def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), user: Us
                 pos = pos or analysis.get("pos")
         if not lemma:
             continue
-        _srs_nonlookup(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context))
+        _srs_nonlookup(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
     db.commit()
     return {"ok": True, "count": count}

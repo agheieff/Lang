@@ -1,8 +1,9 @@
 type Token = { t: string; isWord: boolean };
 
-const inputEl = document.getElementById('input') as HTMLTextAreaElement;
+// No manual input field anymore; text comes from generation only
+const inputEl = document.getElementById('input') as HTMLTextAreaElement | null;
 const outEl = document.getElementById('output') as HTMLDivElement;
-const renderBtn = document.getElementById('render') as HTMLButtonElement;
+const renderBtn = document.getElementById('render') as HTMLButtonElement | null;
 const srcSel = document.getElementById('src') as HTMLSelectElement;
 const tgtSel = document.getElementById('tgt') as HTMLSelectElement;
 const popover = document.getElementById('popover') as HTMLDivElement;
@@ -102,7 +103,9 @@ function showPopover(x: number, y: number, payload: any) {
 }
 
 function renderText() {
-  localStorage.setItem('arcadia_text', inputEl.value);
+  const text = (localStorage.getItem('arcadia_text') || '').toString();
+  if (!text.trim()) { outEl.innerHTML = ''; return; }
+  localStorage.setItem('arcadia_text', text);
   outEl.innerHTML = '';
   clearPopover();
   const lang = srcSel.value;
@@ -110,7 +113,7 @@ function renderText() {
   const exposures: { lemma?: string; surface?: string }[] = [];
   if (lang.startsWith('zh')) {
     // Server-side parse with char-level pinyin
-    parse(lang, inputEl.value).then(data => {
+    parse(lang, text).then(data => {
       const seen = new Set<string>();
       for (const t of data.tokens) {
         if (t.is_word && t.text && t.text.trim()) {
@@ -138,7 +141,7 @@ function renderText() {
       sendExposures(lang, exposures);
     }).catch(() => {
       // fallback to client tokenization
-      const toks = tokenize(inputEl.value);
+      const toks = tokenize(text);
       for (const tok of toks) {
         if (tok.isWord) {
           const span = document.createElement('span');
@@ -152,7 +155,7 @@ function renderText() {
       }
     });
   } else {
-    const toks = tokenize(inputEl.value);
+    const toks = tokenize(text);
     const seen = new Set<string>();
     for (const tok of toks) {
       if (tok.isWord) {
@@ -176,8 +179,7 @@ const savedSrc = localStorage.getItem('arcadia_src');
 if (savedSrc) srcSel.value = savedSrc;
 const savedTgt = localStorage.getItem('arcadia_tgt');
 if (savedTgt) tgtSel.value = savedTgt;
-inputEl.value = localStorage.getItem('arcadia_text') || inputEl.value;
-renderBtn.addEventListener('click', renderText);
+renderBtn?.addEventListener('click', renderText);
 // Persist changes to lang/target and re-render
 srcSel.addEventListener('change', () => { localStorage.setItem('arcadia_src', srcSel.value); renderText(); });
 tgtSel.addEventListener('change', () => { localStorage.setItem('arcadia_tgt', tgtSel.value); });
@@ -339,7 +341,7 @@ outEl.addEventListener('mouseout', (e) => {
   hoverTip.style.display = 'none';
 });
 // Only render on explicit click or when text exists
-if ((inputEl.value || '').trim()) {
+if ((localStorage.getItem('arcadia_text') || '').trim()) {
   renderText();
 }
 
@@ -365,8 +367,9 @@ genBtn.addEventListener('click', async () => {
     const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length }) });
     if (!res.ok) { const t = await res.text(); try { const j = JSON.parse(t); showMsg(false, j.detail || 'Generation failed'); } catch { showMsg(false, t || 'Generation failed'); } return; }
     const data = await res.json();
-    inputEl.value = data.text || '';
+    const text = data.text || '';
     if (data.text_id) localStorage.setItem('arcadia_last_text_id', String(data.text_id));
+    localStorage.setItem('arcadia_text', text);
     renderText();
     showMsg(true, 'Generated text inserted');
   } catch (e:any) {
@@ -404,3 +407,29 @@ async function loadUrgent() {
 }
 urgentRefresh?.addEventListener('click', loadUrgent);
 srcSel.addEventListener('change', loadUrgent);
+
+// Text read button: recompute word scores for current text
+const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
+textReadBtn?.addEventListener('click', async () => {
+  const lang = srcSel.value;
+  const text = (localStorage.getItem('arcadia_text') || '').toString();
+  if (!text.trim()) return;
+  // Re-send exposures for all tokens to recalc scores
+  try {
+    if (lang.startsWith('zh')) {
+      const data = await parse(lang, text);
+      const surfaces: string[] = [];
+      for (const t of data.tokens) { if (t.is_word && t.text && !surfaces.includes(t.text)) surfaces.push(t.text); }
+      await sendExposures(lang, surfaces.map(s => ({ surface: s })));
+    } else {
+      const seen = new Set<string>();
+      const toks = tokenize(text);
+      const items = [] as { surface: string }[];
+      for (const tk of toks) if (tk.isWord && !seen.has(tk.t)) { seen.add(tk.t); items.push({ surface: tk.t }); }
+      await sendExposures(lang, items);
+    }
+    showMsg(true, 'Recalculated word scores for this text');
+  } catch (e:any) {
+    showMsg(false, 'Failed to recalc');
+  }
+});
