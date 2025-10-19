@@ -204,9 +204,13 @@ refreshProfiles();
 async function auth(path: string) {
   const body = { email: emailEl.value, password: pwdEl.value };
   const res = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok) { alert('Auth failed'); return; }
-  const data = await res.json();
-  if (data.access_token) setTokens(data.access_token, data.refresh_token || '');
+  const txt = await res.text();
+  if (!res.ok) { try { const j = JSON.parse(txt); showMsg(false, j.detail || 'Auth failed'); } catch { showMsg(false, txt || 'Auth failed'); } return; }
+  try {
+    const data = JSON.parse(txt);
+    if (data.access_token) setTokens(data.access_token, data.refresh_token || '');
+  } catch { /* ignore */ }
+  showMsg(true, path.includes('register') ? 'Registered and logged in' : 'Logged in');
   await loadTiers();
   await refreshProfiles();
 }
