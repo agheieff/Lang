@@ -17,7 +17,7 @@ from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
 from .db import get_db, init_db
-from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo
+from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant
 from sqlalchemy.orm import Session
 import jwt
 from datetime import datetime, timedelta
@@ -129,11 +129,21 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
 
 
 def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> Lexeme:
-    lex = db.query(Lexeme).filter(Lexeme.lang == lang, Lexeme.lemma == lemma, Lexeme.pos == pos).first()
-    if lex:
-        return lex
-    lex = Lexeme(lang=lang, lemma=lemma, pos=pos)
-    db.add(lex)
+    # For Chinese, normalize to unified 'zh' lexeme, and capture variants by script when possible
+    is_zh = lang.startswith("zh")
+    canon_lang = "zh" if is_zh else lang
+    lex = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma == lemma, Lexeme.pos == pos).first()
+    if not lex:
+        lex = Lexeme(lang=canon_lang, lemma=lemma, pos=pos)
+        db.add(lex)
+        db.flush()
+    # If Chinese and lemma is in a specific script, add as variant
+    if is_zh:
+        script = "Hant" if lang.endswith("Hant") else "Hans"
+        existing = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == script, LexemeVariant.form == lemma).first()
+        if not existing:
+            db.add(LexemeVariant(lexeme_id=lex.id, script=script, form=lemma))
+            db.flush()
     db.commit()
     db.refresh(lex)
     return lex

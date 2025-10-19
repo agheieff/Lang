@@ -79,6 +79,19 @@ class Lexeme(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class LexemeVariant(Base):
+    __tablename__ = "lexeme_variants"
+    __table_args__ = (
+        UniqueConstraint("script", "form", name="uq_variant_script_form"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
+    script: Mapped[str] = mapped_column(String(8), index=True)  # Hans | Hant
+    form: Mapped[str] = mapped_column(String(256), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class UserLexeme(Base):
     __tablename__ = "user_lexemes"
     __table_args__ = (
