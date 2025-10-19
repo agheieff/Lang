@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from argon2 import PasswordHasher
 from Lang.tokenize.registry import TOKENIZERS
 from Lang.tokenize.base import Token
-from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, estimate_level
+from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint
 
 # SRS parameters
 _SRS_ALPHA_CLICK = 0.2
@@ -570,7 +570,7 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     script = "Hant" if req.lang.endswith("Hant") else ("Hans" if req.lang.startswith("zh") else None)
     # Auto-pick words if not provided
     words = req.include_words or pick_words(db, user, req.lang, count=12)
-    level_hint = estimate_level(db, user, req.lang)
+    level_hint = compose_level_hint(db, user, req.lang)
     # Per-language unit and default length
     unit = "chars" if req.lang.startswith("zh") else "words"
     approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)

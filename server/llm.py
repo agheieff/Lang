@@ -185,3 +185,63 @@ def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:
         return None
     top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[0][0]
     return top
+
+
+# ---------- User level description (language-specific) ----------
+def _bucket_zh(level_value: float) -> Tuple[str, str]:
+    """Map numeric value (0..6) to HSK bucket with lower/mid/upper and a short description."""
+    v = max(0.0, min(6.0, float(level_value)))
+    if v <= 0.0:
+        return ("pre-HSK1", "beginner: limited characters; keep sentences very short and concrete")
+    # Determine HSK level 1..6 and sublevel 0:lower 1:mid 2:upper
+    if v >= 6.0:
+        return ("HSK6-upper", "advanced: broad vocabulary; natural register; nuanced connectors")
+    base = int(v)  # 0..5
+    hsk = base + 1  # 1..6
+    frac = v - base
+    sub = int(min(2, frac * 3))  # 0,1,2
+    subname = ["lower", "mid", "upper"][sub]
+    code = f"HSK{hsk}-{subname}"
+    desc_map = {
+        1: [
+            "very simple daily phrases; pinyin support helpful",
+            "short everyday sentences; frequent repetition",
+            "connected simple sentences; basic function words",
+        ],
+        2: [
+            "common topics; present/past actions; keep vocabulary basic",
+            "short narratives with time words; simple connectors",
+            "richer everyday contexts; a few new words ok",
+        ],
+        3: [
+            "familiar themes; short paragraphs; simple relative clauses",
+            "multi-paragraph stories; varied sentence starts",
+            "mild abstraction; descriptive language; avoid rare idioms",
+        ],
+        4: [
+            "broader topics; modest idiomatic usage; clear structure",
+            "argument + examples; transitions (不过/因此/然而)",
+            "more nuance; occasional 成语 if transparent",
+        ],
+        5: [
+            "news-like style; more precise vocabulary; balanced complexity",
+            "abstract topics; layered clauses; keep clarity",
+            "near-native narrative flow; occasional literary turns",
+        ],
+        6: [
+            "authentic style; concise yet expressive; diverse registers",
+            "nuanced, persuasive or reflective prose; subtle cohesion",
+            "native-like richness; cultural references acceptable",
+        ],
+    }
+    desc = desc_map.get(hsk, ["appropriate difficulty"])[sub]
+    return (code, desc)
+
+
+def compose_level_hint(db: Session, user: User, lang: str) -> Optional[str]:
+    prof = _profile_for_lang(db, user, lang)
+    if prof and lang.startswith("zh"):
+        code, desc = _bucket_zh(getattr(prof, "level_value", 0.0) or 0.0)
+        return f"{code}: {desc}"
+    # Fallback to inferred level codes
+    return estimate_level(db, user, lang)
