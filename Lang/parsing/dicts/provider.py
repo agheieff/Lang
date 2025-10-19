@@ -24,7 +24,9 @@ class StarDictProvider(DictionaryProvider):
         if env_root:
             self.root = Path(env_root)
         else:
-            self.root = root or Path.cwd() / "data" / "dicts"
+            # Resolve relative to project root regardless of current working dir
+            base = Path(__file__).resolve().parents[3] / "data" / "dicts"
+            self.root = root or base
         self._ok = False
         try:
             import pystardict  # noqa: F401

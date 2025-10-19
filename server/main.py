@@ -219,6 +219,11 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     # Attempt dictionary translations using lemma when available, else surface
     lemma = analysis.get("lemma") or req.surface
     translations = get_dict_chain().translations(req.source_lang, req.target_lang, lemma)
+    # For Chinese, if no translations on lemma, try the surface form too (handles un-normalized variants)
+    if not translations and req.source_lang.startswith("zh") and req.surface != lemma:
+        more = get_dict_chain().translations(req.source_lang, req.target_lang, req.surface)
+        if more:
+            translations = more
 
     morph = analysis.get("morph") or {}
     label = format_morph_label(analysis.get("pos"), morph)
