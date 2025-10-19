@@ -51,36 +51,50 @@ def _simple_spanish_rules(surface: str) -> Dict[str, Any]:
 
 
 def analyze_word_es(surface: str, context: Optional[str] = None) -> Dict[str, Any]:
-    """Analyze a single Spanish word. Returns dict with lemma, pos, and morph.
+    """Analyze a single Spanish word using external lemmatizers when available.
 
-    If spaCy is available (es_core_news_sm), use it; otherwise, fall back to simple rules.
+    Preference order:
+    1) spaCy es_core_news_* model (best POS+morph+lemma)
+    2) simplemma (dictionary-based lemma only)
+    3) very light heuristics as a last resort
     """
+    # 1) Try spaCy with Spanish model
     try:
         import spacy  # type: ignore
-        try:
-            nlp = spacy.load("es_core_news_sm")
-        except Exception:
-            # If model isn't installed, fall back
-            return _simple_spanish_rules(surface)
-        doc = nlp(surface)
-        token = doc[0] if len(doc) else None
-        if not token:
-            return _simple_spanish_rules(surface)
-        morph = {}
-        for feat in ["Person", "Number", "Mood", "Tense", "Gender"]:
-            val = token.morph.get(feat)
-            if val:
-                morph[feat] = val[0]
-        pos_out = token.pos_
-        # Treat lowercase proper nouns as common nouns in Spanish (heuristic)
-        if pos_out == "PROPN" and surface.islower():
-            pos_out = "NOUN"
-        return {
-            "surface": surface,
-            "lemma": token.lemma_,
-            "pos": pos_out,
-            "morph": morph,
-        }
+        for model in ("es_core_news_sm", "es_core_news_md", "es_core_news_lg"):
+            try:
+                nlp = spacy.load(model)
+                break
+            except Exception:
+                nlp = None  # type: ignore
+        if nlp is not None:  # type: ignore
+            doc = nlp(surface)
+            token = doc[0] if len(doc) else None
+            if token:
+                morph: Dict[str, str] = {}
+                for feat in ["Person", "Number", "Mood", "Tense", "Gender"]:
+                    val = token.morph.get(feat)
+                    if val:
+                        morph[feat] = val[0]
+                pos_out = token.pos_
+                if pos_out == "PROPN" and surface.islower():
+                    pos_out = "NOUN"
+                return {
+                    "surface": surface,
+                    "lemma": token.lemma_,
+                    "pos": pos_out,
+                    "morph": morph,
+                }
     except Exception:
-        # spaCy not installed; use simple rules
-        return _simple_spanish_rules(surface)
+        pass
+
+    # 2) Try simplemma dictionary-based lemmatizer
+    try:
+        from simplemma import lemmatize  # type: ignore
+        lemma = lemmatize(surface, lang="es")
+        return {"surface": surface, "lemma": lemma, "pos": None, "morph": {}}
+    except Exception:
+        pass
+
+    # 3) Fallback to simple rules
+    return _simple_spanish_rules(surface)

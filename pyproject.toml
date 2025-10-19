@@ -12,6 +12,8 @@
   "SQLAlchemy>=2.0.32",
   "PyJWT>=2.9.0",
   "argon2-cffi>=23.1.0",
+  "simplemma>=0.9.1",
+  "beautifulsoup4>=4.12.3",
  ]
 
  [project.optional-dependencies]
