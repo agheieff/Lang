@@ -129,21 +129,44 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
 
 
 def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> Lexeme:
-    # For Chinese, normalize to unified 'zh' lexeme, and capture variants by script when possible
+    # For Chinese, normalize to unified 'zh' with simplified lemma; capture Hans/Hant variants
     is_zh = lang.startswith("zh")
     canon_lang = "zh" if is_zh else lang
-    lex = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma == lemma, Lexeme.pos == pos).first()
+    canon_lemma = lemma
+    hans_form = None
+    hant_form = None
+    if is_zh:
+        try:
+            from opencc import OpenCC  # type: ignore
+            hans = OpenCC("t2s").convert(lemma)
+            hant = OpenCC("s2t").convert(hans)
+            canon_lemma = hans
+            hans_form = hans
+            hant_form = hant
+        except Exception:
+            # fallback: assume provided lemma is simplified
+            hans_form = lemma
+    lex = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma == canon_lemma, Lexeme.pos == pos).first()
     if not lex:
-        lex = Lexeme(lang=canon_lang, lemma=lemma, pos=pos)
+        lex = Lexeme(lang=canon_lang, lemma=canon_lemma, pos=pos)
         db.add(lex)
         db.flush()
-    # If Chinese and lemma is in a specific script, add as variant
     if is_zh:
+        # Always ensure Hans variant for simplified
+        if hans_form:
+            exists_hans = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == "Hans", LexemeVariant.form == hans_form).first()
+            if not exists_hans:
+                db.add(LexemeVariant(lexeme_id=lex.id, script="Hans", form=hans_form))
+        # Ensure Hant variant
+        if hant_form:
+            exists_hant = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == "Hant", LexemeVariant.form == hant_form).first()
+            if not exists_hant:
+                db.add(LexemeVariant(lexeme_id=lex.id, script="Hant", form=hant_form))
+        # Also record the original as variant with detected script from lang
         script = "Hant" if lang.endswith("Hant") else "Hans"
-        existing = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == script, LexemeVariant.form == lemma).first()
-        if not existing:
+        exists_orig = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lex.id, LexemeVariant.script == script, LexemeVariant.form == lemma).first()
+        if not exists_orig:
             db.add(LexemeVariant(lexeme_id=lex.id, script=script, form=lemma))
-            db.flush()
     db.commit()
     db.refresh(lex)
     return lex
