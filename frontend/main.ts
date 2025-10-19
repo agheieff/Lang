@@ -19,6 +19,7 @@ const profileLangInput = document.getElementById('profile-lang') as HTMLInputEle
 const addProfileBtn = document.getElementById('add-profile') as HTMLButtonElement;
 const profilesDiv = document.getElementById('profiles') as HTMLDivElement;
 const genBtn = document.getElementById('gen') as HTMLButtonElement;
+const msgEl = document.getElementById('msg') as HTMLDivElement;
 
 // Auth tokens (simple localStorage for demo)
 function getAccessToken() { return localStorage.getItem('arcadia_access') || ''; }
@@ -41,6 +42,12 @@ async function api(path: string, opts: RequestInit = {}) {
     }
   }
   return res;
+}
+
+function showMsg(ok: boolean, text: string) {
+  if (!msgEl) return;
+  msgEl.className = 'msg ' + (ok ? 'ok' : 'err');
+  msgEl.textContent = text;
 }
 
 function tokenize(text: string): Token[] {
@@ -205,7 +212,7 @@ async function auth(path: string) {
 }
 loginBtn.onclick = () => auth('/auth/login');
 registerBtn.onclick = () => auth('/auth/register');
-logoutBtn.onclick = () => { setTokens('', ''); alert('Logged out'); };
+logoutBtn.onclick = () => { setTokens('', ''); showMsg(true, 'Logged out'); };
 
 saveSettingsBtn.onclick = async () => {
   const lang = srcSel.value;
@@ -276,11 +283,12 @@ genBtn.addEventListener('click', async () => {
   const length = lang.startsWith('zh') ? 300 : 180;
   try {
     const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length }) });
-    if (!res.ok) { alert('Generation failed'); return; }
+    if (!res.ok) { showMsg(false, 'Generation failed'); return; }
     const data = await res.json();
     inputEl.value = data.text || '';
     renderText();
+    showMsg(true, 'Generated text inserted');
   } catch {
-    alert('Generation failed');
+    showMsg(false, 'Generation failed');
   }
 });
