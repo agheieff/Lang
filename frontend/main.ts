@@ -286,6 +286,10 @@ async function whoami() {
   }
   try {
     const me = await res.json();
+    const profBtn = document.createElement('button');
+    profBtn.textContent = 'Profile';
+    profBtn.onclick = () => { settingsView.style.display = 'block'; };
+    userbar.appendChild(profBtn);
     const span = document.createElement('span');
     span.textContent = `${me.email} (${me.subscription_tier})`;
     const btn = document.createElement('button');
@@ -442,6 +446,7 @@ textReadBtn?.addEventListener('click', async () => {
   if (!text.trim()) return;
   // Re-send exposures for all tokens to recalc scores
   try {
+    textReadBtn.disabled = true;
     if (lang.startsWith('zh')) {
       const data = await parse(lang, text);
       const surfaces: string[] = [];
@@ -455,7 +460,12 @@ textReadBtn?.addEventListener('click', async () => {
       await sendExposures(lang, items);
     }
     showMsg(true, 'Recalculated word scores for this text');
+    // Hide button after confirmed recalculation
+    textReadBtn.style.display = 'none';
   } catch (e:any) {
     showMsg(false, 'Failed to recalc');
+  }
+  finally {
+    // keep disabled to prevent double submits; display handled above
   }
 });
