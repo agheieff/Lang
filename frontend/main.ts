@@ -9,7 +9,7 @@ const tgtSel = document.getElementById('tgt') as HTMLSelectElement;
 const popover = document.getElementById('popover') as HTMLDivElement;
 const hoverTip = document.getElementById('hover-tip') as HTMLDivElement;
 // Settings view elements
-const openSettingsBtn = document.getElementById('open-settings') as HTMLButtonElement;
+const openSettingsBtn = document.getElementById('open-settings') as HTMLButtonElement | null;
 const settingsView = document.getElementById('settings-view') as HTMLDivElement;
 const settingsContent = document.getElementById('settings-content') as HTMLDivElement;
 const setTierSel = document.getElementById('set-tier') as HTMLSelectElement;
@@ -423,7 +423,7 @@ setUrgentRefresh?.addEventListener('click', loadUrgent);
 srcSel.addEventListener('change', loadUrgent);
 
 // Settings navigation
-openSettingsBtn.onclick = () => { settingsView.style.display = 'block'; };
+openSettingsBtn && (openSettingsBtn.onclick = () => { settingsView.style.display = 'block'; });
 settingsBack.onclick = () => { settingsView.style.display = 'none'; };
 document.querySelectorAll('.set-nav').forEach(btn => {
   btn.addEventListener('click', () => {
