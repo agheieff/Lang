@@ -131,3 +131,19 @@ class UserLexemeContext(Base):
     user_lexeme_id: Mapped[int] = mapped_column(ForeignKey("user_lexemes.id", ondelete="CASCADE"), index=True)
     context_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LexemeInfo(Base):
+    __tablename__ = "lexeme_info"
+    __table_args__ = (
+        UniqueConstraint("lexeme_id", name="uq_lexeme_info_lexeme_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
+    freq_rank: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    freq_score: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., HSK1..HSK6
+    source: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    tags: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
