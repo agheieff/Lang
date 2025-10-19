@@ -536,9 +536,17 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
     init_db()
     count = 0
     for it in req.items:
-        if not it.lemma:
+        lemma = it.lemma
+        pos = it.pos
+        if not lemma and it.surface:
+            engine = _ENGINES.get(req.lang)
+            if engine:
+                analysis = engine.analyze_word(it.surface, context=None)
+                lemma = analysis.get("lemma") or it.surface
+                pos = pos or analysis.get("pos")
+        if not lemma:
             continue
-        _srs_exposure(db, user, req.lang, it.lemma, it.pos, it.surface, _hash_context(it.context))
+        _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context))
         count += 1
     db.commit()
     return {"ok": True, "count": count}
@@ -576,6 +584,90 @@ def srs_click(req: ClickRequest, db: Session = Depends(get_db), user: User = Dep
     b = ul.b_nonclick or 0
     p_click = a / (a + b) if (a + b) > 0 else 0.0
     return {"ok": True, "lexeme_id": lex.id, "p_click": p_click, "n": a + b, "stability": ul.stability, "diversity": ul.distinct_texts}
+
+
+class SrsWordsOut(BaseModel):
+    lexeme_id: int
+    lemma: str
+    pos: Optional[str]
+    p_click: float
+    n: int
+    stability: float
+    diversity: int
+
+
+@app.get("/srs/words", response_model=List[SrsWordsOut])
+def get_srs_words(
+    lang: str = Query(...),
+    min_p: Optional[float] = None,
+    max_p: Optional[float] = None,
+    min_S: Optional[float] = None,
+    max_S: Optional[float] = None,
+    min_D: Optional[int] = None,
+    max_D: Optional[int] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    user: User = Depends(_get_current_user),
+):
+    init_db()
+    q = db.query(UserLexeme, Lexeme).join(Lexeme, UserLexeme.lexeme_id == Lexeme.id).filter(
+        UserLexeme.user_id == user.id,
+        UserLexeme.profile_id == db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == lang).scalar_subquery(),
+    )
+    rows = q.limit(1000).all()
+    out: List[SrsWordsOut] = []
+    for ul, lx in rows:
+        a = ul.a_click or 0
+        b = ul.b_nonclick or 0
+        p = (a / (a + b)) if (a + b) > 0 else 0.0
+        S = float(ul.stability or 0.0)
+        D = int(ul.distinct_texts or 0)
+        if min_p is not None and p < min_p: continue
+        if max_p is not None and p > max_p: continue
+        if min_S is not None and S < min_S: continue
+        if max_S is not None and S > max_S: continue
+        if min_D is not None and D < min_D: continue
+        if max_D is not None and D > max_D: continue
+        out.append(SrsWordsOut(lexeme_id=lx.id, lemma=lx.lemma, pos=lx.pos, p_click=p, n=(a+b), stability=S, diversity=D))
+        if len(out) >= limit:
+            break
+    return out
+
+
+class SrsStatsOut(BaseModel):
+    total: int
+    by_p: Dict[str, int]
+    by_S: Dict[str, int]
+    by_D: Dict[str, int]
+
+
+@app.get("/srs/stats", response_model=SrsStatsOut)
+def get_srs_stats(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == lang).scalar()
+    if not pid:
+        return SrsStatsOut(total=0, by_p={}, by_S={}, by_D={})
+    rows = db.query(UserLexeme, Lexeme).join(Lexeme, UserLexeme.lexeme_id == Lexeme.id).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid).all()
+    def bucketize(val: float, bounds: List[float]):
+        for i, b in enumerate(bounds):
+            if val < b: return f"<{b}"
+        return f">={bounds[-1]}"
+    by_p: Dict[str, int] = {}
+    by_S: Dict[str, int] = {}
+    by_D: Dict[str, int] = {}
+    for ul, lx in rows:
+        a = ul.a_click or 0
+        b = ul.b_nonclick or 0
+        p = (a / (a + b)) if (a + b) > 0 else 0.0
+        S = float(ul.stability or 0.0)
+        D = int(ul.distinct_texts or 0)
+        pb = bucketize(p, [0.2, 0.4, 0.6, 0.8])
+        Sb = bucketize(S, [0.33, 0.66, 0.85])
+        Db = bucketize(min(1.0, 1 - pow(2.71828, -D / 8.0)), [0.25, 0.5, 0.75])
+        by_p[pb] = by_p.get(pb, 0) + 1
+        by_S[Sb] = by_S.get(Sb, 0) + 1
+        by_D[Db] = by_D.get(Db, 0) + 1
+    return SrsStatsOut(total=len(rows), by_p=by_p, by_S=by_S, by_D=by_D)
 
 
 # Static site (frontend build output). We mount after API routes so they take priority.

@@ -91,11 +91,15 @@ function renderText() {
   outEl.innerHTML = '';
   clearPopover();
   const lang = srcSel.value;
+  // Collect exposures after a small debounce
+  const exposures: { lemma?: string; surface?: string }[] = [];
   if (lang.startsWith('zh')) {
     // Server-side parse with char-level pinyin
     parse(lang, inputEl.value).then(data => {
+      const seen = new Set<string>();
       for (const t of data.tokens) {
         if (t.is_word && t.text && t.text.trim()) {
+          if (!seen.has(t.text)) { exposures.push({ surface: t.text }); seen.add(t.text); }
           const span = document.createElement('span');
           span.className = 'token';
           span.setAttribute('data-text', t.text);
@@ -115,6 +119,8 @@ function renderText() {
           outEl.appendChild(document.createTextNode(t.text));
         }
       }
+      // fire exposures (surface only; server resolves lemmas)
+      sendExposures(lang, exposures);
     }).catch(() => {
       // fallback to client tokenization
       const toks = tokenize(inputEl.value);
@@ -132,6 +138,7 @@ function renderText() {
     });
   } else {
     const toks = tokenize(inputEl.value);
+    const seen = new Set<string>();
     for (const tok of toks) {
       if (tok.isWord) {
         const span = document.createElement('span');
@@ -139,10 +146,12 @@ function renderText() {
         span.textContent = tok.t;
         span.setAttribute('data-text', tok.t);
         outEl.appendChild(span);
+        if (!seen.has(tok.t)) { exposures.push({ surface: tok.t }); seen.add(tok.t); }
       } else {
         outEl.appendChild(document.createTextNode(tok.t));
       }
     }
+    sendExposures(lang, exposures);
   }
 }
 
@@ -250,3 +259,11 @@ outEl.addEventListener('mouseout', (e) => {
   hoverTip.style.display = 'none';
 });
 renderText();
+
+async function sendExposures(lang: string, items: { lemma?: string; surface?: string }[]) {
+  if (!items.length) return;
+  try {
+    const res = await api('/srs/event/exposures', { method: 'POST', body: JSON.stringify({ lang, items }) });
+    // ignore failures silently for now
+  } catch {}
+}
