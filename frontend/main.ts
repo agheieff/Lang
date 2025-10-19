@@ -244,6 +244,8 @@ registerBtn.onclick = () => auth('/auth/register');
 // replace inline logout button with header userbar; render button dynamically
 async function whoami() {
   const res = await api('/me');
+  const userbar = document.getElementById('userbar') as HTMLDivElement | null;
+  const authDlg = document.getElementById('authdlg') as HTMLDialogElement | null;
   if (!userbar) return;
   userbar.innerHTML = '';
   if (!res.ok) {
