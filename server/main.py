@@ -30,6 +30,8 @@ from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, es
 _SRS_ALPHA_CLICK = 0.2
 _SRS_BETA_EXPOSURE = 0.02
 _DIVERSITY_K = 8.0
+_SRS_BETA_NONLOOKUP = 2  # extra weight to b_nonclick for explicit non-lookup confirmations
+_SRS_GAMMA_NONLOOKUP = 0.08  # stability boost factor for non-lookup
 
 
 class LookupRequest(BaseModel):
@@ -673,6 +675,50 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
         if not lemma:
             continue
         _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context))
+        count += 1
+    db.commit()
+    return {"ok": True, "count": count}
+
+
+class NonLookupRequest(BaseModel):
+    lang: str
+    items: List[ExposureItem]
+
+
+def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str]):
+    # ensure profile and lexeme
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        prof = Profile(user_id=user.id, lang=lang)
+        db.add(prof)
+        db.commit()
+        db.refresh(prof)
+    lex = _resolve_lexeme(db, lang, lemma, pos)
+    ul = _get_or_create_userlexeme(db, user, prof, lex)
+    # Treat as an explicit non-click success: increase evidence against clicking and boost stability more strongly
+    ul.b_nonclick = (ul.b_nonclick or 0) + _SRS_BETA_NONLOOKUP
+    now = datetime.utcnow()
+    ul.last_seen_at = now
+    ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) + _SRS_GAMMA_NONLOOKUP * (1.0 - (ul.stability or 0.0)))))
+    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}))
+
+
+@app.post("/srs/event/nonlookup")
+def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    count = 0
+    for it in req.items:
+        lemma = it.lemma
+        pos = it.pos
+        if not lemma and it.surface:
+            engine = _ENGINES.get(req.lang)
+            if engine:
+                analysis = engine.analyze_word(it.surface, context=None)
+                lemma = analysis.get("lemma") or it.surface
+                pos = pos or analysis.get("pos")
+        if not lemma:
+            continue
+        _srs_nonlookup(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context))
         count += 1
     db.commit()
     return {"ok": True, "count": count}
