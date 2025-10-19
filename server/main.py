@@ -6,7 +6,7 @@ import os
 import time
 from collections import deque, defaultdict
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Query
+from fastapi import FastAPI, HTTPException, Depends, Request, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -272,7 +272,7 @@ def _create_refresh_token(user_id: int) -> str:
     return jwt.encode(payload, _JWT_SECRET, algorithm="HS256")
 
 
-def _get_current_user(db: Session = Depends(get_db), authorization: str | None = None) -> User:
+def _get_current_user(db: Session = Depends(get_db), authorization: Optional[str] = Header(default=None)) -> User:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Not authenticated")
     token = authorization.split(" ", 1)[1]
