@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 
@@ -27,8 +27,8 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     from . import models  # noqa: F401 - ensure models are imported
-    Base.metadata.create_all(bind=engine)
     _run_migrations()
+    _ensure_tables()
 
 
 def _run_migrations() -> None:
@@ -60,10 +60,18 @@ def _run_migrations() -> None:
             if not has_column("word_events", "text_id"):
                 conn.exec_driver_sql("ALTER TABLE word_events ADD COLUMN text_id INTEGER")
             
-            # reading_texts table
-            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS reading_texts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, lang VARCHAR(16), content TEXT, created_at DATETIME, source VARCHAR(16))")
-            # generation_logs table
-            conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS generation_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, profile_id INTEGER, text_id INTEGER, model VARCHAR(128), base_url VARCHAR(256), prompt JSON, words JSON, level_hint VARCHAR(128), approx_len INTEGER, unit VARCHAR(16), created_at DATETIME)")
+            # Tables mapped by SQLAlchemy will be created in _ensure_tables
     except Exception:
         # Best-effort; avoid crashing app startup
+        pass
+
+
+def _ensure_tables() -> None:
+    try:
+        insp = inspect(engine)
+        with engine.begin() as conn:
+            for table in Base.metadata.sorted_tables:
+                if not insp.has_table(table.name):
+                    table.create(bind=conn)
+    except Exception:
         pass
