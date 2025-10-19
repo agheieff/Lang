@@ -20,6 +20,11 @@ const addProfileBtn = document.getElementById('add-profile') as HTMLButtonElemen
 const profilesDiv = document.getElementById('profiles') as HTMLDivElement;
 const genBtn = document.getElementById('gen') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLDivElement;
+const urgentDiv = document.getElementById('urgent') as HTMLDivElement;
+const urgentList = document.getElementById('urgent-list') as HTMLDivElement;
+const urgentCount = document.getElementById('urgent-count') as HTMLInputElement;
+const urgentNew = document.getElementById('urgent-new') as HTMLInputElement;
+const urgentRefresh = document.getElementById('refresh-urgent') as HTMLButtonElement;
 const userbar = document.getElementById('userbar') as HTMLDivElement;
 const authDlg = document.getElementById('authdlg') as HTMLDialogElement;
 
@@ -351,3 +356,33 @@ genBtn.addEventListener('click', async () => {
     showMsg(false, String(e));
   }
 });
+
+// Urgent words panel (client-calculated via server selection inside /gen)
+async function loadUrgent() {
+  // We call the backend urgent picker indirectly by requesting a prompt word list
+  try {
+    const lang = srcSel.value;
+    const n = parseInt(urgentCount.value || '12', 10);
+    // Call a lightweight generation to fetch words only: we use /gen/reading but ignore text
+    const res = await api('/gen/reading', { method: 'POST', body: JSON.stringify({ lang, length: lang.startsWith('zh')? 1: 1 }) });
+    if (!res.ok) return;
+    const data = await res.json();
+    const words: string[] = data.words || [];
+    urgentList.innerHTML = '';
+    for (const w of words.slice(0, n)) {
+      const badge = document.createElement('button');
+      badge.textContent = w;
+      badge.style.border = '1px solid #ccc';
+      badge.style.borderRadius = '12px';
+      badge.style.padding = '2px 8px';
+      badge.onclick = async () => {
+        // Mark as known (nonlookup)
+        const res = await api('/srs/event/nonlookup', { method: 'POST', body: JSON.stringify({ lang, items: [{ surface: w }] }) });
+        if (res.ok) { showMsg(true, `Marked known: ${w}`); loadUrgent(); }
+      };
+      urgentList.appendChild(badge);
+    }
+  } catch {}
+}
+urgentRefresh?.addEventListener('click', loadUrgent);
+loadUrgent();

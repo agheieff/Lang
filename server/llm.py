@@ -142,7 +142,7 @@ def _hsk_numeric(level_code: Optional[str]) -> Optional[int]:
     return None
 
 
-def urgent_words(db: Session, user: User, lang: str, total: int = 12, new_ratio: float = 0.3) -> List[str]:
+def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, new_ratio: float = 0.3) -> List[Dict[str, Any]]:
     prof = _profile_for_lang(db, user, lang)
     if not prof:
         return []
@@ -171,18 +171,18 @@ def urgent_words(db: Session, user: User, lang: str, total: int = 12, new_ratio:
     known_scored.sort(key=lambda t: t[0], reverse=True)
 
     target_known = max(0, min(len(known_scored), int(round(total * (1.0 - new_ratio)))))
-    picked_forms: List[str] = []
+    picked: List[Dict[str, Any]] = []
     picked_ids = set()
     for score, lx in known_scored:
         form = _variant_form_for_lang(db, lx, lang)
-        if form not in picked_forms:
-            picked_forms.append(form)
+        if all(it["form"] != form for it in picked):
+            picked.append({"form": form, "lexeme_id": lx.id, "known": True})
             picked_ids.add(lx.id)
-        if len(picked_forms) >= target_known:
+        if len(picked) >= target_known:
             break
 
     # New word candidates (unknown to user)
-    need_new = total - len(picked_forms)
+    need_new = total - len(picked)
     if need_new > 0:
         # Build pool from LexemeInfo near profile level and decent frequency
         user_level = getattr(prof, "level_value", 0.0) or 0.0
@@ -212,16 +212,17 @@ def urgent_words(db: Session, user: User, lang: str, total: int = 12, new_ratio:
         scored_new.sort(key=lambda t: t[0], reverse=True)
         for score, lx in scored_new:
             form = _variant_form_for_lang(db, lx, lang)
-            if form not in picked_forms:
-                picked_forms.append(form)
-            if len(picked_forms) >= total:
+            if all(it["form"] != form for it in picked):
+                picked.append({"form": form, "lexeme_id": lx.id, "known": False})
+            if len(picked) >= total:
                 break
 
-    return picked_forms[:total]
+    return picked[:total]
 
 
 def pick_words(db: Session, user: User, lang: str, count: int = 12) -> List[str]:
-    return urgent_words(db, user, lang, total=count)
+    # Return only forms for prompt inclusion
+    return [it["form"] for it in urgent_words_detailed(db, user, lang, total=count)]
 
 
 def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:
