@@ -43,6 +43,17 @@ def resolve_model(base_url: str, prefer: Optional[str] = None) -> str:
     return "local"
 
 
+def _strip_thinking_blocks(text: str) -> str:
+    import re
+    # Remove <think>...</think> or variants, case-insensitive, multiline
+    text = re.sub(r"<\s*(think|thinking|analysis)[^>]*>.*?<\s*/\s*\1\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # Drop leading lines that look like reasoning headers
+    text = re.sub(r"^(?:\s*(?:Thoughts?|Thinking|Reasoning)\s*:?\s*\n)+", "", text, flags=re.IGNORECASE)
+    # Remove fenced code blocks if the model wrapped the passage
+    text = re.sub(r"^\s*```[\s\S]*?```\s*", lambda m: m.group(0).strip('`\n '), text, flags=re.MULTILINE)
+    return text.strip()
+
+
 def chat_complete(base_url: str, model: Optional[str], messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: Optional[int] = None) -> str:
     url = base_url.rstrip("/") + "/chat/completions"
     payload: Dict[str, Any] = {
@@ -53,8 +64,11 @@ def chat_complete(base_url: str, model: Optional[str], messages: List[Dict[str, 
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     try:
+        # Try to discourage thinking output via stop sequences (best-effort; some backends may ignore)
+        payload.setdefault("stop", ["</think>", "<think>", "<analysis>", "</analysis>"])
         data = _http_json(url, method="POST", data=payload)
-        return data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"].strip()
+        return _strip_thinking_blocks(content)
     except Exception as e:
         raise RuntimeError(f"LLM request failed: {e}")
 
@@ -88,6 +102,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     lines.append("- Do not include translations or vocabulary lists.")
     lines.append("- Avoid English unless the target language is English.")
     lines.append("- Keep the vocabulary consistent with the stated level; gently reinforce target words in context.")
+    lines.append("- Output ONLY the passage text; no analysis, no <think> or meta commentary.")
     content = "\n".join(lines)
     return [
         {"role": "system", "content": sys},
