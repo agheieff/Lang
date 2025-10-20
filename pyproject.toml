@@ -22,6 +22,8 @@
   # UI libraries (core widgets/JS and personal style), local editable references for dev
   "arcadia-ui-core @ file:///home/agheieff/Arcadia/libs/arcadia_ui_core",
   "arcadia-ui-style @ file:///home/agheieff/Arcadia/libs/arcadia_ui_style",
+  # Shared auth library (router + security)
+  "arcadia-auth @ file:///home/agheieff/Arcadia/libs/auth",
  ]
 
  [project.optional-dependencies]

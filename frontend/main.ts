@@ -237,13 +237,21 @@ refreshProfiles();
 
 async function auth(path: string) {
   const body = { email: emailEl.value, password: pwdEl.value };
-  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
-  const txt = await res.text();
+  let res = await fetch(path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+  let txt = await res.text();
   if (!res.ok) { try { const j = JSON.parse(txt); showMsg(false, j.detail || 'Auth failed'); } catch { showMsg(false, txt || 'Auth failed'); } return; }
+  let gotToken = false;
   try {
     const data = JSON.parse(txt);
-    if (data.access_token) setTokens(data.access_token, data.refresh_token || '');
+    if (data.access_token) { setTokens(data.access_token, ''); gotToken = true; }
   } catch { /* ignore */ }
+  // Shared auth router returns AccountOut on register; follow up with login to get token
+  if (!gotToken && path.includes('register')) {
+    const lr = await fetch('/auth/login', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+    if (lr.ok) {
+      try { const d = await lr.json(); if (d.access_token) { setTokens(d.access_token, ''); gotToken = true; } } catch { /* ignore */ }
+    }
+  }
   showMsg(true, path.includes('register') ? 'Registered and logged in' : 'Logged in');
   // refresh header state
   try {
