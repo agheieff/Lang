@@ -1,0 +1,9 @@
+- add a list of "all words" for a language, separate from a list of "learned/learning words"
+- switch between profiles for a user, with one profile active at a time (served server-side)
+- language choice on signup and automatic profile creation with that
+- Headline generation - the user chooses a text that gets generated
+- topic preferences based on user text choice - also think about how to avoid local minima
+- Remove the target language parameter, make it a detail of the profile. One profile = one source and one target language
+- improve the translation popup - check what to do with tokens not in dict, and punctuation
+- actually hook up openrouter
+- openrouter library - rework the model list into a database that can be easily updated by the app and integration with the ui lib

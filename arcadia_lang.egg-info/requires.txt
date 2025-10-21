@@ -14,6 +14,7 @@ opencc-python-reimplemented>=0.1.7
 openrouter@ file:///home/agheieff/Arcadia/libs/openrouter
 arcadia-ui-core@ file:///home/agheieff/Arcadia/libs/arcadia_ui_core
 arcadia-ui-style@ file:///home/agheieff/Arcadia/libs/arcadia_ui_style
+arcadia-auth@ file:///home/agheieff/Arcadia/libs/auth
 
 [dicts]
 pystardict>=0.3.1

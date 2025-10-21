@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log in - Arcadia</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen" style="margin:0;">
+    {% include "_header.html" ignore missing %}
+    <div id="arcadia-content">
+    <div class="ui-section" style="margin:16px">
+    <div class="max-w-md mx-auto mt-12 bg-white shadow p-6 rounded">
+        <h1 class="text-2xl font-semibold mb-4">Log in</h1>
+        <form id="login-form" class="space-y-4" onsubmit="return false;">
+            <div>
+                <label class="block text-sm mb-1">Email</label>
+                <input id="email" type="email" class="w-full border rounded p-2" required />
+            </div>
+            <div>
+                <label class="block text-sm mb-1">Password</label>
+                <input id="password" type="password" class="w-full border rounded p-2" required />
+            </div>
+            <button id="login-btn" class="w-full bg-blue-600 text-white py-2 rounded">Log in</button>
+            <p id="login-error" class="text-sm text-red-600 mt-2" style="display:none;"></p>
+        </form>
+    </div>
+    <script>
+    function extractErrorMessage(data, fallback) {
+        if (!data) return fallback;
+        const d = data.detail;
+        if (typeof d === 'string') return d;
+        if (Array.isArray(d) && d.length) {
+            const first = d[0] || {};
+            const loc = first.loc || [];
+            if (loc.includes('password')) return 'Password must be at least 8 characters.';
+            if (loc.includes('email')) return 'Please enter a valid email address.';
+            return first.msg || fallback;
+        }
+        return fallback;
+    }
+    document.getElementById('login-btn').addEventListener('click', async () => {
+        const email = (document.getElementById('email').value || '').trim();
+        const password = document.getElementById('password').value || '';
+        const err = document.getElementById('login-error');
+        err.style.display = 'none';
+        try {
+            const res = await fetch('/auth/login', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ email, password })
+            });
+            if (!res.ok) {
+                const d = await res.json().catch(()=>null);
+                throw new Error(extractErrorMessage(d, 'Login failed'));
+            }
+            const data = await res.json();
+            try {
+                document.cookie = `access_token=${data.access_token}; Path=/; SameSite=Lax`;
+                localStorage.setItem('arcadia_access', data.access_token);
+            } catch {}
+            window.location.href = '/';
+        } catch (e) {
+            err.textContent = e.message || 'Login failed';
+            err.style.display = 'block';
+        }
+    });
+    </script>
+    </div>
+</div>
+</body>
+</html>

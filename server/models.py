@@ -29,12 +29,14 @@ class Profile(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh-Hans'
+    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh'
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     # User's level in this language
     level_value: Mapped[float] = mapped_column(Float, default=0.0)  # continuous estimate (e.g., 0..10)
     level_var: Mapped[float] = mapped_column(Float, default=1.0)    # uncertainty / learning-rate proxy
     level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., HSK3, A2, etc.
+    # For Chinese, user's preferred script: Hans or Hant
+    preferred_script: Mapped[Optional[str]] = mapped_column(String(8), default=None)
 
     user: Mapped[User] = relationship("User", back_populates="profiles")
 

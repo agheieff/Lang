@@ -1,0 +1,4 @@
+- use uv for everything python
+- always prefer ts over js
+- make everything as modular as possible, so that it's easy to make adjustments/swap parts
+- comments only where they actually have some value, explain why, not what

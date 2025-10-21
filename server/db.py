@@ -49,6 +49,9 @@ def _run_migrations() -> None:
                 conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN level_var REAL DEFAULT 1.0")
             if not has_column("profiles", "level_code"):
                 conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN level_code VARCHAR(32)")
+            # profiles: preferred_script (for Chinese)
+            if not has_column("profiles", "preferred_script"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN preferred_script VARCHAR(8)")
 
             # user_lexemes: importance, importance_var
             if not has_column("user_lexemes", "importance"):

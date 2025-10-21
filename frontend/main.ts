@@ -15,6 +15,7 @@ const settingsContent = document.getElementById('settings-content') as HTMLDivEl
 const setTierSel = document.getElementById('set-tier') as HTMLSelectElement;
 const setPinyinSel = document.getElementById('set-pinyin-style') as HTMLSelectElement;
 const setSaveSettingsBtn = document.getElementById('set-save-settings') as HTMLButtonElement;
+const setZhScriptSel = document.getElementById('set-zh-script') as HTMLSelectElement | null;
 const setProfileLangInput = document.getElementById('set-profile-lang') as HTMLInputElement;
 const setAddProfileBtn = document.getElementById('set-add-profile') as HTMLButtonElement;
 const setProfilesDiv = document.getElementById('set-profiles') as HTMLDivElement;
@@ -231,7 +232,13 @@ async function refreshProfiles() {
   const res = await api('/me/profiles');
   if (!res.ok) { setProfilesDiv.textContent = 'Login to manage profiles'; return; }
   const items = await res.json();
-  setProfilesDiv.innerHTML = '<strong>Your profiles:</strong> ' + items.map((p:any)=>`${p.lang}`).join(', ');
+  setProfilesDiv.innerHTML = '<strong>Your profiles:</strong> ' + items.map((p:any)=>`${p.lang}${p.preferred_script?` (${p.preferred_script})`:''}`).join(', ');
+  try {
+    if (srcSel.value.startsWith('zh') && setZhScriptSel) {
+      const cur = items.find((p:any)=>p.lang === srcSel.value);
+      if (cur && cur.preferred_script) setZhScriptSel.value = cur.preferred_script;
+    }
+  } catch {}
 }
 refreshProfiles();
 
@@ -318,7 +325,9 @@ setSaveSettingsBtn.onclick = async () => {
   const lang = srcSel.value;
   const style = setPinyinSel.value === 'tone' ? 'tone' : 'number';
   const settings = { zh_pinyin_style: style };
-  const res = await api('/me/profile', { method: 'POST', body: JSON.stringify({ lang, settings }) });
+  const body: any = { lang, settings };
+  if (lang.startsWith('zh') && setZhScriptSel) body.preferred_script = setZhScriptSel.value;
+  const res = await api('/me/profile', { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) alert('Save failed');
 };
 

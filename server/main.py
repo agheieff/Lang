@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from fastapi.responses import RedirectResponse
 
 # Language engine
 from Lang.parsing.registry import ENGINES
@@ -25,6 +26,10 @@ from Lang.tokenize.registry import TOKENIZERS
 from Lang.tokenize.base import Token
 from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint, urgent_words_detailed
 from arcadia_auth import decode_token, create_auth_router, AuthSettings  # type: ignore
+try:
+    from arcadia_auth.middleware import CookieUserMiddleware  # type: ignore
+except Exception:  # noqa: BLE001
+    CookieUserMiddleware = None  # type: ignore
 from arcadia_auth.adapters.sqlalchemy_repo import SQLAlchemyRepo  # type: ignore
 from fastapi.templating import Jinja2Templates
 
@@ -53,6 +58,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Attach cookie-based current user middleware so header/footer can reflect auth state
+if CookieUserMiddleware is not None:
+    try:
+        app.add_middleware(
+            CookieUserMiddleware,
+            session_factory=SessionLocal,
+            UserModel=User,
+            secret_key=os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change"),
+            algorithm="HS256",
+            cookie_name="access_token",
+        )
+    except Exception:
+        pass
+else:
+    # Fallback: if shared CookieUserMiddleware is unavailable, populate request.state.user from cookie
+    @app.middleware("http")
+    async def _cookie_user_ctx(request: Request, call_next):  # type: ignore
+        try:
+            request.state.user = None
+            token = request.cookies.get("access_token")
+            if token:
+                data = decode_token(token, os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change"), ["HS256"])  # type: ignore
+                uid = (data or {}).get("sub")
+                if uid is not None:
+                    db = SessionLocal()
+                    try:
+                        u = db.get(User, int(uid))
+                        if u is not None:
+                            request.state.user = u
+                    finally:
+                        db.close()
+        except Exception:
+            request.state.user = None
+        return await call_next(request)
 
 # Integrate shared auth router from libs/auth
 try:
@@ -307,10 +347,14 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     except Exception:
         pass
     return resp
-def _get_current_user(db: Session = Depends(get_db), authorization: Optional[str] = Header(default=None)) -> User:
-    if not authorization or not authorization.lower().startswith("bearer "):
+def _get_current_user(request: Request, db: Session = Depends(get_db), authorization: Optional[str] = Header(default=None)) -> User:
+    token: Optional[str] = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
+    else:
+        token = request.cookies.get("access_token")
+    if not token:
         raise HTTPException(401, "Not authenticated")
-    token = authorization.split(" ", 1)[1]
     try:
         data = decode_token(token, _JWT_SECRET, ["HS256"])  # type: ignore
         user_id = int(data.get("sub"))
@@ -358,6 +402,7 @@ class ProfileRequest(BaseModel):
     level_value: Optional[float] = None
     level_var: Optional[float] = None
     level_code: Optional[str] = None
+    preferred_script: Optional[str] = None  # 'Hans' | 'Hant' for zh
 
 
 @app.post("/me/profile")
@@ -384,6 +429,12 @@ def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), user: Use
             db.add(pref)
         else:
             pref.data = req.settings
+    # Optional preferred script for Chinese
+    if req.preferred_script is not None and req.lang.startswith("zh"):
+        ps = req.preferred_script
+        if ps not in ("Hans", "Hant"):
+            raise HTTPException(400, "preferred_script must be 'Hans' or 'Hant'")
+        prof.preferred_script = ps
     # Optional level updates
     if req.level_value is not None:
         prof.level_value = float(req.level_value)
@@ -402,6 +453,7 @@ class ProfileOut(BaseModel):
     level_value: float
     level_var: float
     level_code: Optional[str] = None
+    preferred_script: Optional[str] = None
 
 
 @app.get("/me/profiles", response_model=List[ProfileOut])
@@ -411,7 +463,7 @@ def list_profiles(db: Session = Depends(get_db), user: User = Depends(_get_curre
     out: List[ProfileOut] = []
     for p in profiles:
         pref = db.query(ProfilePref).filter(ProfilePref.profile_id == p.id).first()
-        out.append(ProfileOut(lang=p.lang, created_at=p.created_at, settings=(pref.data if pref else None), level_value=p.level_value, level_var=p.level_var, level_code=p.level_code))
+        out.append(ProfileOut(lang=p.lang, created_at=p.created_at, settings=(pref.data if pref else None), level_value=p.level_value, level_var=p.level_var, level_code=p.level_code, preferred_script=p.preferred_script))
     return out
 
 
@@ -642,7 +694,14 @@ class GenRequest(BaseModel):
 @app.post("/gen/reading")
 def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
     init_db()
-    script = "Hant" if req.lang.endswith("Hant") else ("Hans" if req.lang.startswith("zh") else None)
+    # Preferred script: pick from user's profile when available
+    script = None
+    if req.lang.startswith("zh"):
+        prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()
+        if prof and getattr(prof, "preferred_script", None) in ("Hans", "Hant"):
+            script = prof.preferred_script
+        else:
+            script = "Hans"
     # Auto-pick words if not provided
     words = req.include_words or pick_words(db, user, req.lang, count=12)
     level_hint = compose_level_hint(db, user, req.lang)
@@ -651,6 +710,7 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)
     spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script)
     messages = build_reading_prompt(spec)
+    text: str
     try:
         text = chat_complete(
             messages,
@@ -659,12 +719,14 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
             base_url=req.base_url,
         )
     except Exception as e:
-        # Log details for debugging
+        # Graceful error: return a sanitized message without stack traces or placeholder text
         import logging
-        logging.getLogger("uvicorn.error").exception("LLM generation failed")
-        raise HTTPException(502, f"LLM generation failed: {e}")
+        logging.getLogger("uvicorn.error").warning("LLM generation failed: %s", e)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="No LLM backend available")
     # Save text and generation log (unlimited tier check placeholder)
-    rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source="llm")
+    source = "llm"
+    rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source=source)
     db.add(rt)
     db.flush()
     pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == req.lang).scalar()
@@ -972,6 +1034,15 @@ try:
     tdir = ensure_templates(Path(__file__).resolve().parent)
     from fastapi.templating import Jinja2Templates
     templates = Jinja2Templates(directory=tdir)
+    try:
+        templates.env.globals["persist_header"] = True
+        templates.env.globals["brand_home_url"] = "/"
+        templates.env.globals["brand_name"] = "Arcadia Lang"
+        templates.env.globals["brand_tag"] = ""
+    except Exception:
+        pass
+    # Use the same templates env for project pages to share globals (brand_name, etc.)
+    _templates_env = templates  # type: ignore
     ui_mount(templates)
     app.include_router(ui_router)
 except Exception:
@@ -984,6 +1055,46 @@ def words_page(request: Request, lang: Optional[str] = None, user: User = Depend
     # Render plain template; client fetches data via /srs/words
     t = _templates()
     return t.TemplateResponse("words.html", {"request": request, "lang": lang or "es"})
+
+# Lightweight pass-through routes to shared login/signup templates (ensures availability even if core router lacks them)
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    t = _templates()
+    return t.TemplateResponse("login.html", {"request": request, "brand_name": "Arcadia Lang", "brand_home_url": "/"})
+
+
+@app.get("/signup", response_class=HTMLResponse)
+def signup_page(request: Request):
+    t = _templates()
+    return t.TemplateResponse("signup.html", {"request": request, "brand_name": "Arcadia Lang", "brand_home_url": "/"})
+
+# Placeholder pages for account menu
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, user: User = Depends(_get_current_user)):
+    t = _templates()
+    return t.TemplateResponse("profile.html", {"request": request})
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, user: User = Depends(_get_current_user)):
+    t = _templates()
+    return t.TemplateResponse("settings.html", {"request": request})
+
+
+@app.get("/stats", response_class=HTMLResponse)
+def stats_page(request: Request, user: User = Depends(_get_current_user)):
+    t = _templates()
+    return t.TemplateResponse("stats.html", {"request": request})
+
+
+@app.get("/logout")
+def logout() -> RedirectResponse:
+    resp = RedirectResponse(url="/", status_code=302)
+    try:
+        resp.delete_cookie("access_token", path="/")
+    except Exception:
+        pass
+    return resp
 
 # Static site (frontend build output). Mount after custom HTML routes so they take precedence.
 STATIC_DIR = Path(__file__).resolve().parent / "static"

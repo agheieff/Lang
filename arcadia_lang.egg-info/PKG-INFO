@@ -19,6 +19,7 @@ Requires-Dist: opencc-python-reimplemented>=0.1.7
 Requires-Dist: openrouter@ file:///home/agheieff/Arcadia/libs/openrouter
 Requires-Dist: arcadia-ui-core@ file:///home/agheieff/Arcadia/libs/arcadia_ui_core
 Requires-Dist: arcadia-ui-style@ file:///home/agheieff/Arcadia/libs/arcadia_ui_style
+Requires-Dist: arcadia-auth@ file:///home/agheieff/Arcadia/libs/auth
 Provides-Extra: nlp
 Requires-Dist: spacy<4; extra == "nlp"
 Provides-Extra: dicts

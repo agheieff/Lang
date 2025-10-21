@@ -24,19 +24,14 @@
   </head>
   <body>
     <link rel="stylesheet" href="/arcadia.css" />
-    <link rel="stylesheet" href="/app.css" />
     <div id="ui-header"></div>
-    <header style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px">
-      <h1 style="margin:0">Arcadia Lang</h1>
-      <div id="userbar" style="display:flex; align-items:center; gap:8px"></div>
-    </header>
+    <main id="arcadia-content">
+      <div class="ui-section" style="margin:16px">
     <div class="controls">
       <label>Source:
         <select id="src">
+          <option value="zh" selected>Chinese (zh)</option>
           <option value="es">Spanish (es)</option>
-          <option value="zh">Chinese (auto)</option>
-          <option value="zh-Hans">Chinese Simplified (zh-Hans)</option>
-          <option value="zh-Hant">Chinese Traditional (zh-Hant)</option>
         </select>
       </label>
       <label>Target:
@@ -48,20 +43,7 @@
       </label>
       <button id="gen">Generate text</button>
     </div>
-    <dialog id="authdlg">
-      <form method="dialog" style="min-width:340px">
-        <h3 style="margin:0 0 8px">Sign in</h3>
-        <div style="display:flex; flex-direction:column; gap:8px">
-          <input id="email" placeholder="you@example.com" />
-          <input id="password" type="password" placeholder="password" />
-          <div style="display:flex; gap:8px; justify-content:flex-end">
-            <button id="register" value="register">Sign up</button>
-            <button id="login" value="login">Login</button>
-            <button value="cancel">Cancel</button>
-          </div>
-        </div>
-      </form>
-    </dialog>
+    
     <!-- Removed manual input field as requested -->
     <div id="msg" class="msg"></div>
 
@@ -93,13 +75,19 @@
                   <option value="number">Tone numbers</option>
                 </select>
               </label>
+              <label style="margin-left:12px">Chinese script:
+                <select id="set-zh-script">
+                  <option value="Hans">Simplified (Hans)</option>
+                  <option value="Hant">Traditional (Hant)</option>
+                </select>
+              </label>
               <button id="set-save-settings">Save for current source language</button>
             </div>
           </section>
           <section id="section-lang" class="set-section" style="display:none">
             <h3>Per-language settings</h3>
             <div>
-              <label>Add profile (lang): <input id="set-profile-lang" placeholder="es or zh-Hans" style="width:120px"></label>
+              <label>Add profile (lang): <input id="set-profile-lang" placeholder="es or zh" style="width:120px"></label>
               <button id="set-add-profile">Add</button>
             </div>
             <div id="set-profiles" style="margin-top:8px"></div>
@@ -122,6 +110,8 @@
     </div>
     <div id="popover" class="popover" style="display:none"></div>
     <div id="hover-tip" style="display:none; position:absolute; background:#333; color:#fff; font-size:12px; padding:2px 6px; border-radius:4px; pointer-events:none; z-index:20"></div>
+      </div>
+    </main>
     <div id="ui-footer"></div>
     <script>
       // Fetch shared header/footer from server UI router (arcadia-ui-core)

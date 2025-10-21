@@ -171,14 +171,21 @@ def _profile_for_lang(db: Session, user: User, lang: str) -> Optional[Profile]:
 
 def _script_from_lang(lang: str) -> Optional[str]:
     if lang.startswith("zh"):
-        return "Hant" if lang.endswith("Hant") else "Hans"
+        # Default to simplified when no explicit preference present
+        return "Hans"
     return None
 
 
-def _variant_form_for_lang(db: Session, lx: Lexeme, lang: str) -> str:
+def _variant_form_for_lang(db: Session, user: User, lx: Lexeme, lang: str) -> str:
     form = lx.lemma
     if lx.lang == "zh":
-        script = _script_from_lang(lang)
+        script = None
+        # Prefer user profile setting when available
+        prof = _profile_for_lang(db, user, lang)
+        if prof and getattr(prof, "preferred_script", None):
+            script = prof.preferred_script
+        if not script:
+            script = _script_from_lang(lang)
         if script:
             v = db.query(LexemeVariant).filter(LexemeVariant.lexeme_id == lx.id, LexemeVariant.script == script).first()
             if v:
@@ -230,7 +237,7 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
     picked: List[Dict[str, Any]] = []
     picked_ids = set()
     for score, lx in known_scored:
-        form = _variant_form_for_lang(db, lx, lang)
+        form = _variant_form_for_lang(db, user, lx, lang)
         if all(it["form"] != form for it in picked):
             picked.append({"form": form, "lexeme_id": lx.id, "known": True})
             picked_ids.add(lx.id)
@@ -272,7 +279,7 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             scored_new.append((score, lx))
         scored_new.sort(key=lambda t: t[0], reverse=True)
         for score, lx in scored_new:
-            form = _variant_form_for_lang(db, lx, lang)
+            form = _variant_form_for_lang(db, user, lx, lang)
             if all(it["form"] != form for it in picked):
                 picked.append({"form": form, "lexeme_id": lx.id, "known": False})
             if len(picked) >= total:
