@@ -7,3 +7,4 @@
 - improve the translation popup - check what to do with tokens not in dict, and punctuation
 - actually hook up openrouter
 - openrouter library - rework the model list into a database that can be easily updated by the app and integration with the ui lib
+- when server is off, the tokenizer fails in a not-nice way - entire sentences as a token, not critical, but could be handled better
