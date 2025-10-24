@@ -97,7 +97,23 @@ class ZhTokenizer(Tokenizer):
         raw: List[Tuple[str, int, int]] = [(w, s, e) for (w, s, e) in _jieba_tokenize(text)]
         if not raw:
             # per-character fallback
-            return [Token(text=ch, start=i, end=i + 1, is_word=bool(ch.strip())) for i, ch in enumerate(text)]
+            out: List[Token] = []
+            i = 0
+            L = len(text)
+            while i < L:
+                ch = text[i]
+                if ch.isalnum():
+                    j = i + 1
+                    while j < L and text[j].isalnum():
+                        j += 1
+                    out.append(Token(text=text[i:j], start=i, end=j, is_word=True))
+                    i = j
+                    continue
+                if '\u4e00' <= ch <= '\u9fff':
+                    out.append(Token(text=ch, start=i, end=i + 1, is_word=True))
+                # skip punctuation/whitespace
+                i += 1
+            return out
 
         # If jieba collapsed into one massive token or mostly single chars, repair Han runs using FMM
         def is_han(ch: str) -> bool:
@@ -106,6 +122,9 @@ class ZhTokenizer(Tokenizer):
                 return bool(re.match(r"\p{Script=Han}$", ch))
             except Exception:
                 return '\u4e00' <= ch <= '\u9fff'
+        def _is_word_span(w: str) -> bool:
+            # Consider a token a word if it has any Han or alphanumeric chars
+            return any(is_han(c) or c.isalnum() for c in w)
 
         single_ratio = sum(1 for w, _, _ in raw if len(w) == 1) / max(len(raw), 1)
         use_fmm = single_ratio > 0.6 or any((e - s) >= int(0.6 * len(text)) and any(is_han(c) for c in w) for w, s, e in raw)
@@ -123,12 +142,19 @@ class ZhTokenizer(Tokenizer):
                         tokens.append(Token(text=w, start=s, end=e, is_word=True))
                     i = j
                 else:
-                    tokens.append(Token(text=text[i], start=i, end=i + 1, is_word=bool(text[i].strip())))
-                    i += 1
+                    # emit contiguous alnum run as a single token; skip punctuation/space
+                    if text[i].isalnum():
+                        j = i + 1
+                        while j < L and text[j].isalnum():
+                            j += 1
+                        tokens.append(Token(text=text[i:j], start=i, end=j, is_word=True))
+                        i = j
+                    else:
+                        i += 1
             return tokens
 
         # Normal case: trust jieba tokenization
         for w, s, e in raw:
-            tokens.append(Token(text=w, start=s, end=e, is_word=True))
+            if _is_word_span(w):
+                tokens.append(Token(text=w, start=s, end=e, is_word=True))
         return tokens
-        return out

@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+import math
+from pathlib import Path
+from datetime import datetime
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import os
 
 try:
     # Local OpenRouter client from libs/
-    from openrouter import complete as _or_complete  # type: ignore
+    from openrouter import complete as _or_complete, resolve_model_id as _or_resolve_model_id  # type: ignore
 except Exception:  # pragma: no cover - optional during dev
     _or_complete = None  # type: ignore
+    _or_resolve_model_id = None  # type: ignore
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select
@@ -24,6 +28,7 @@ from .models import (
     UserLexeme,
     LexemeVariant,
 )
+from .level import update_level_if_stale
 
 
 def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, timeout: int = 60) -> Any:
@@ -49,6 +54,24 @@ def resolve_model(base_url: str, prefer: Optional[str] = None) -> str:
     except Exception:
         pass
     return "local"
+
+
+def _pick_openrouter_model(requested: Optional[str]) -> str:
+    """Prefer non-thinking model variants by default.
+
+    Order:
+    1) explicit requested model
+    2) env OPENROUTER_MODEL_NONREASONING (preferred override)
+    3) env OPENROUTER_MODEL
+    4) fallback 'openrouter/auto'
+    """
+    if requested:
+        return requested
+    m = os.getenv("OPENROUTER_MODEL_NONREASONING")
+    if m:
+        return m
+    m2 = os.getenv("OPENROUTER_MODEL")
+    return m2 or "openrouter/auto"
 
 
 def _strip_thinking_blocks(text: str) -> str:
@@ -77,12 +100,18 @@ def chat_complete(
     """
     prov = (provider or os.getenv("LLM_PROVIDER") or "").strip().lower()
     if not prov:
-        # Default to LM Studio for dev unless explicitly configured for OpenRouter
-        prov = "openrouter" if os.getenv("OPENROUTER_API_KEY") and os.getenv("PREFER_OPENROUTER", "").strip() else "lmstudio"
+        # Default to OpenRouter if available; fall back to LM Studio explicitly
+        prov = "openrouter"
     if prov == "openrouter":
         if _or_complete is None:
             raise RuntimeError("openrouter client not available; install libs/openrouter or set LLM_PROVIDER=lmstudio")
-        use_model = model or os.getenv("OPENROUTER_MODEL", "openrouter/auto")
+        use_model = _pick_openrouter_model(model)
+        # Allow resolving aliases/labels via catalog when available
+        try:
+            if _or_resolve_model_id is not None:
+                use_model = _or_resolve_model_id(use_model)  # type: ignore
+        except Exception:
+            pass
         try:
             data = _or_complete(messages=messages, model=use_model, max_tokens=(max_tokens or 4096), temperature=temperature)
             content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
@@ -125,44 +154,105 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
             return "Spanish"
         return code
 
-    sys = (
-        f"You are a tutor of {_lang_display(spec.lang)}. "
-        "Please generate a text for learning and comprehensible input practice, given the following parameters."
+    def _load_prompt(name: str) -> str:
+        p = Path(__file__).resolve().parent / "prompts" / name
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    sys_tpl = _load_prompt("reading_system.txt") or (
+        "You are a tutor of {lang_display}. Please generate a text for learning and comprehensible input practice, given the following parameters."
+    )
+    user_tpl = _load_prompt("reading_user.txt") or (
+        "Write in {lang_display}.\n{script_line}{level_line}{length_line}{include_words_line}Constraints:\n- Do not include translations or vocabulary lists.\n- Avoid English unless the target language is English.\n- Gently reinforce the target words in context and keep the language natural and engaging.\n- Do not include meta commentary."
     )
 
-    lines: List[str] = []
-    # Natural language guidance
-    lines.append(f"Write in {_lang_display(spec.lang)}.")
+    lang_display = _lang_display(spec.lang)
+    script_line = ""
     if spec.script and spec.lang.startswith("zh"):
         if spec.script == "Hans":
-            lines.append("Use simplified Chinese characters.")
+            script_line = "Use simplified Chinese characters.\n"
         elif spec.script == "Hant":
-            lines.append("Use traditional Chinese characters.")
-    # Level hint phrased naturally
-    if spec.user_level_hint:
-        lines.append(f"The student is around {spec.user_level_hint}; please use appropriate language for this level.")
-    # Explicit length phrasing
-    if spec.unit == "chars":
-        lines.append(f"The text should be around {spec.approx_len} characters long.")
-    else:
-        lines.append(f"The text should be around {spec.approx_len} words long.")
-    # Target words
+            script_line = "Use traditional Chinese characters.\n"
+    level_line = f"The student is around {spec.user_level_hint}; please use appropriate language for this level.\n" if spec.user_level_hint else ""
+    length_line = (
+        f"The text should be around {spec.approx_len} characters long.\n" if spec.unit == "chars" else f"The text should be around {spec.approx_len} words long.\n"
+    )
+    include_words_line = ""
     if spec.include_words:
         words = ", ".join(spec.include_words)
-        lines.append(f"Please include these words naturally: {words}.")
-    # Constraints
-    lines.append("Constraints:")
-    lines.append("- Do not include translations or vocabulary lists.")
-    lines.append("- Avoid English unless the target language is English.")
-    lines.append("- Gently reinforce the target words in context and keep the language natural and engaging.")
-    # No mention of <think> sections; meta commentary discouraged
-    lines.append("- Do not include meta commentary.")
+        include_words_line = f"Please include these words naturally: {words}.\n"
 
-    content = "\n".join(lines)
+    sys_content = sys_tpl.format(lang_display=lang_display)
+    user_content = user_tpl.format(
+        lang_display=lang_display,
+        script_line=script_line,
+        level_line=level_line,
+        length_line=length_line,
+        include_words_line=include_words_line,
+    )
     return [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": content},
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
     ]
+
+
+@dataclass
+class TranslationSpec:
+    lang: str
+    target_lang: str
+    unit: str  # "sentence" | "paragraph" | "text"
+    content: Union[str, List[str]]
+    continue_with_reading: bool = False
+    script: Optional[str] = None  # for zh source formatting
+
+
+def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
+    def _lang_display(code: str) -> str:
+        if code.startswith("zh"):
+            return "Chinese"
+        if code.startswith("es"):
+            return "Spanish"
+        return code
+
+    def _load_prompt(name: str) -> str:
+        p = Path(__file__).resolve().parent / "prompts" / name
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    # XML-only output mode
+    sys_tpl = _load_prompt("translation_system_xml.txt") or (
+        "You are a professional translator from {src_lang} to {tgt_lang}. Respond with a single well-formed XML document only. {line_mode_line}{script_line}"
+    )
+    user_tpl = _load_prompt("translation_user_xml.txt") or ("{content}")
+
+    src_lang = _lang_display(spec.lang)
+    tgt_lang = _lang_display(spec.target_lang)
+    line_mode_line = (
+        "Translate each input line independently and return exactly one line per input line in the same order."
+        if isinstance(spec.content, list) else ""
+    )
+    script_line = ""
+    if spec.script and spec.lang.startswith("zh"):
+        if spec.script == "Hans":
+            script_line = "Source text may be in simplified Chinese."
+        elif spec.script == "Hant":
+            script_line = "Source text may be in traditional Chinese."
+
+    sys_content = sys_tpl.format(src_lang=src_lang, tgt_lang=tgt_lang, line_mode_line=line_mode_line, script_line=script_line)
+    lines = spec.content if isinstance(spec.content, list) else [spec.content]
+    user_content = user_tpl.format(content="\n".join(lines))
+
+    msgs: List[Dict[str, str]] = []
+    if prev_messages and spec.continue_with_reading:
+        tail = prev_messages[-4:]
+        msgs.extend([{"role": m.get("role", "user"), "content": m.get("content", "")} for m in tail if isinstance(m, dict)])
+    msgs.insert(0, {"role": "system", "content": sys_content})
+    msgs.append({"role": "user", "content": user_content})
+    return msgs
 
 
 def _profile_for_lang(db: Session, user: User, lang: str) -> Optional[Profile]:
@@ -206,6 +296,11 @@ def _hsk_numeric(level_code: Optional[str]) -> Optional[int]:
 
 
 def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, new_ratio: float = 0.3) -> List[Dict[str, Any]]:
+    # ensure level estimate is fresh enough
+    try:
+        update_level_if_stale(db, user.id, lang)
+    except Exception:
+        pass
     prof = _profile_for_lang(db, user, lang)
     if not prof:
         return []
@@ -219,30 +314,87 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
         .filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
         .all()
     )
-    known_scored: List[Tuple[float, Lexeme]] = []
-    now_score = 0.0
+    known_scored: List[Tuple[float, Lexeme, Dict[str, Any]]] = []
+    now_ts = 0.0
     for ul, lx, li in rows:
-        a = ul.a_click or 0
-        b = ul.b_nonclick or 0
-        n = a + b
-        p = (a / n) if n > 0 else 0.0
-        S = float(ul.stability or 0.0)
-        # urgency: low stability (review soon) + high click propensity (still confusing), weighted by importance
+        # decayed Beta metrics
+        alpha = float(getattr(ul, "alpha", None) or 1.0)
+        beta = float(getattr(ul, "beta", None) or 9.0)
+        mu = alpha / (alpha + beta) if (alpha + beta) > 0 else 0.0
+        var = (alpha * beta) / (((alpha + beta) ** 2) * (alpha + beta + 1)) if (alpha + beta + 1) > 0 else 0.0
+        ucb = mu + math.sqrt(var)
+        # retention
+        S = max(0.5, float(getattr(ul, "stability", 1.0) or 1.0))
+        ref = ul.last_seen_at or ul.first_seen_at or ul.created_at
+        dt = 0.0
+        if ref:
+            try:
+                dt = max(0.0, (datetime.utcnow() - ref).total_seconds() / 86400.0)
+            except Exception:
+                dt = 0.0
+        try:
+            R_now = math.exp(-dt / S)
+        except Exception:
+            R_now = 0.5
         imp = float(getattr(ul, "importance", 0.5) or 0.5)
-        score = ((1.0 - S) * 0.65 + p * 0.35) * (0.5 + 0.5 * imp)
-        known_scored.append((score, lx))
+        d_div = 1.0 - math.exp(- float(getattr(ul, "distinct_texts", 0) or 0) / 8.0)
+        rec_pen = 0.0
+        if ul.last_clicked_at:
+            try:
+                rec_sec = (datetime.utcnow() - ul.last_clicked_at).total_seconds()
+                rec_pen = max(0.0, 1.0 - rec_sec / 600.0)  # 10 min decay
+            except Exception:
+                rec_pen = 0.0
+        base = 0.6 * (1.0 - R_now) + 0.3 * ucb + 0.1 * (0.5 + 0.5 * imp) + 0.05 * d_div - 0.1 * rec_pen
+        known_scored.append((base, lx, {"ucb": ucb, "R_now": R_now, "pos": lx.pos}))
     known_scored.sort(key=lambda t: t[0], reverse=True)
 
-    target_known = max(0, min(len(known_scored), int(round(total * (1.0 - new_ratio)))))
+    # dynamic new ratio by due backlog (approx via R_now)
+    due = sum(1 for _, _lx, meta in known_scored if meta.get("R_now", 1.0) < 0.9)
+    tk_default = int(round(total * (1.0 - new_ratio)))
+    if due > 2 * tk_default:
+        new_ratio = 0.1
+    elif due < 0.5 * tk_default:
+        new_ratio = 0.4
+    target_known = max(0, min(len(known_scored), total - int(round(total * new_ratio))))
     picked: List[Dict[str, Any]] = []
     picked_ids = set()
-    for score, lx in known_scored:
+    def _sim(a: str, b: str) -> float:
+        if not a or not b or a == b:
+            return 1.0 if a == b else 0.0
+        if lang.startswith("zh"):
+            def bigrams(s: str):
+                return {s[i:i+2] for i in range(len(s)-1)} if len(s) > 1 else {s}
+            A, B = bigrams(a), bigrams(b)
+            if not A or not B:
+                return 0.0
+            return len(A & B) / max(1, len(A | B))
+        return 0.3 if a.lower() != b.lower() else 1.0
+    # MMR select for known
+    K = []
+    cand_known = []
+    for score, lx, meta in known_scored:
         form = _variant_form_for_lang(db, user, lx, lang)
-        if all(it["form"] != form for it in picked):
-            picked.append({"form": form, "lexeme_id": lx.id, "known": True})
-            picked_ids.add(lx.id)
-        if len(picked) >= target_known:
+        cand_known.append((score, lx, form, meta))
+    while cand_known and len(K) < target_known:
+        best = None
+        best_s = -1e9
+        for score, lx, form, meta in cand_known[:200]:
+            if any(p["form"] == form for p in picked):
+                continue
+            sim = 0.0
+            if K:
+                sim = max(_sim(form, p["form"]) for p in K)
+            s = 0.7 * score - 0.3 * sim
+            if s > best_s:
+                best_s = s
+                best = (score, lx, form, meta)
+        if not best:
             break
+        _, lx, form, _meta = best
+        K.append({"form": form, "lexeme_id": lx.id, "known": True})
+        cand_known = [c for c in cand_known if c[1].id != lx.id]
+    picked.extend(K)
 
     # New word candidates (unknown to user)
     need_new = total - len(picked)
@@ -262,7 +414,7 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             .filter(Lexeme.id.notin_(subq_known))
         )
         pool = pool_q.limit(5000).all()
-        scored_new: List[Tuple[float, Lexeme]] = []
+        scored_new: List[Tuple[float, Lexeme, str]] = []
         for lx, li in pool:
             if not li:
                 continue
@@ -276,14 +428,31 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             if li.freq_rank:
                 freq = 1.0 / (1.0 + li.freq_rank)
             score = 0.6 * level_closeness + 0.4 * freq
-            scored_new.append((score, lx))
-        scored_new.sort(key=lambda t: t[0], reverse=True)
-        for score, lx in scored_new:
             form = _variant_form_for_lang(db, user, lx, lang)
-            if all(it["form"] != form for it in picked):
-                picked.append({"form": form, "lexeme_id": lx.id, "known": False})
-            if len(picked) >= total:
+            scored_new.append((score, lx, form))
+        scored_new.sort(key=lambda t: t[0], reverse=True)
+        # MMR for new
+        N = []
+        while scored_new and len(N) < need_new:
+            best = None
+            best_s = -1e9
+            for score, lx, form in scored_new[:200]:
+                if any(p["form"] == form for p in picked) or any(p["form"] == form for p in N):
+                    continue
+                sim = 0.0
+                base_set = picked + N
+                if base_set:
+                    sim = max(_sim(form, p["form"]) for p in base_set)
+                s = 0.7 * score - 0.3 * sim
+                if s > best_s:
+                    best_s = s
+                    best = (score, lx, form)
+            if not best:
                 break
+            _, lx, form = best
+            N.append({"form": form, "lexeme_id": lx.id, "known": False})
+            scored_new = [c for c in scored_new if c[1].id != lx.id]
+        picked.extend(N)
 
     return picked[:total]
 

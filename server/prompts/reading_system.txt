@@ -1,0 +1,1 @@
+You are a tutor of {lang_display}. Please generate a text for learning and comprehensible input practice, given the following parameters.

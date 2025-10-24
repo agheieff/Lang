@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Callable
+from typing import Any, Dict, Optional, List, Callable, Literal, Tuple
 import os
 import time
 from collections import deque, defaultdict
+import math
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,27 +19,50 @@ from Lang.parsing.registry import ENGINES
 from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
-from .db import get_db, init_db, SessionLocal
-from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog
+from .db import get_db, init_db, SessionLocal, DB_PATH
+from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel
+from .level import update_level_if_stale, update_level_for_profile
+from .level import get_level_summary
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from Lang.tokenize.registry import TOKENIZERS
 from Lang.tokenize.base import Token
-from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint, urgent_words_detailed
-from arcadia_auth import decode_token, create_auth_router, AuthSettings  # type: ignore
-try:
-    from arcadia_auth.middleware import CookieUserMiddleware  # type: ignore
-except Exception:  # noqa: BLE001
-    CookieUserMiddleware = None  # type: ignore
-from arcadia_auth.adapters.sqlalchemy_repo import SQLAlchemyRepo  # type: ignore
+from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint, urgent_words_detailed, build_translation_prompt, TranslationSpec
+from arcadia_auth import decode_token, create_auth_router, AuthSettings, mount_cookie_agent_middleware  # type: ignore
 from fastapi.templating import Jinja2Templates
 
 # SRS parameters
 _SRS_ALPHA_CLICK = 0.2
 _SRS_BETA_EXPOSURE = 0.02
 _DIVERSITY_K = 8.0
-_SRS_BETA_NONLOOKUP = 2  # extra weight to b_nonclick for explicit non-lookup confirmations
-_SRS_GAMMA_NONLOOKUP = 0.08  # stability boost factor for non-lookup
+_SRS_BETA_NONLOOKUP = 2
+_SRS_GAMMA_NONLOOKUP = 0.08
+
+# SRS config (env-overridable)
+_W_CLICK = float(os.getenv("ARC_SRS_W_CLICK", "1.0"))
+_W_NONLOOK = float(os.getenv("ARC_SRS_W_NONLOOK", "1.5"))
+_W_EXPOSURE = float(os.getenv("ARC_SRS_W_EXPOSURE", "0.1"))
+_HL_CLICK_D = float(os.getenv("ARC_SRS_HL_CLICK_DAYS", "14"))
+_HL_NONLOOK_D = float(os.getenv("ARC_SRS_HL_NONLOOK_DAYS", "30"))
+_HL_EXPOSURE_D = float(os.getenv("ARC_SRS_HL_EXPOSURE_DAYS", "7"))
+_FSRS_TARGET_R = float(os.getenv("ARC_SRS_TARGET_RETENTION", "0.9"))
+_FSRS_FAIL_F = float(os.getenv("ARC_SRS_FAIL_FACTOR", "0.4"))
+_G_PASS_WEAK = float(os.getenv("ARC_SRS_G_PASS_WEAK", "0.15"))
+_G_PASS_NORM = float(os.getenv("ARC_SRS_G_PASS_NORM", "0.30"))
+_G_PASS_STRONG = float(os.getenv("ARC_SRS_G_PASS_STRONG", "0.45"))
+
+# Exposure gating
+_SESSION_MIN = int(os.getenv("ARC_SRS_SESSION_MINUTES", "30"))
+_EXPOSURE_WEAK_W = float(os.getenv("ARC_SRS_EXPOSURE_WEAK", "0.05"))
+_DISTINCT_PROMOTE = int(os.getenv("ARC_SRS_DISTINCTS_PROMOTE", "2"))
+_FREQ_LOW_THRESH = int(os.getenv("ARC_SRS_FREQ_LOW_THRESHOLD", "10000"))
+_DIFF_HIGH = float(os.getenv("ARC_SRS_DIFFICULTY_HIGH", "1.2"))
+
+# Synthetic nonlookup promotion
+_SYN_NL_ENABLE = os.getenv("ARC_SRS_SYN_NONLOOK_ENABLE", "1") != "0"
+_SYN_NL_MIN_DISTINCT = int(os.getenv("ARC_SRS_SYN_NONLOOK_MIN_DISTINCT", "3"))
+_SYN_NL_MIN_DAYS = float(os.getenv("ARC_SRS_SYN_NONLOOK_MIN_DAYS", "2"))
+_SYN_NL_COOLDOWN_DAYS = float(os.getenv("ARC_SRS_SYN_NONLOOK_COOLDOWN_DAYS", "7"))
 
 
 class LookupRequest(BaseModel):
@@ -59,40 +83,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Attach cookie-based current user middleware so header/footer can reflect auth state
-if CookieUserMiddleware is not None:
-    try:
-        app.add_middleware(
-            CookieUserMiddleware,
-            session_factory=SessionLocal,
-            UserModel=User,
-            secret_key=os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change"),
-            algorithm="HS256",
-            cookie_name="access_token",
-        )
-    except Exception:
-        pass
-else:
-    # Fallback: if shared CookieUserMiddleware is unavailable, populate request.state.user from cookie
-    @app.middleware("http")
-    async def _cookie_user_ctx(request: Request, call_next):  # type: ignore
-        try:
-            request.state.user = None
-            token = request.cookies.get("access_token")
-            if token:
-                data = decode_token(token, os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change"), ["HS256"])  # type: ignore
-                uid = (data or {}).get("sub")
-                if uid is not None:
-                    db = SessionLocal()
-                    try:
-                        u = db.get(User, int(uid))
-                        if u is not None:
-                            request.state.user = u
-                    finally:
-                        db.close()
-        except Exception:
-            request.state.user = None
-        return await call_next(request)
+# Attach lightweight cookie agent middleware (sets request.state.user/agent from JWT cookie)
+try:
+    mount_cookie_agent_middleware(app, secret_key=os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change"))
+except Exception:
+    pass
 
 # Integrate shared auth router from libs/auth
 try:
@@ -100,19 +95,19 @@ try:
     init_db()
     # Ensure secret is available before using AuthSettings
     _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
-    _auth_repo = SQLAlchemyRepo(
-        SessionLocal,
-        UserModel=User,
-        ProfileModel=Profile,
-        user_subscription_field="subscription_tier",
-        profile_display_name_field=None,
-        profile_prefs_field=None,
-        profile_extras_field=None,
-    )
+    # Use SQLite-backed auth repository from libs/auth (decoupled from app DB)
+    from arcadia_auth import create_sqlite_repo  # type: ignore
     _auth_settings = AuthSettings(secret_key=_JWT_SECRET, multi_profile=True)
-    app.include_router(create_auth_router(_auth_repo, _auth_settings))
+    app.include_router(create_auth_router(create_sqlite_repo("sqlite:///data/auth.db"), _auth_settings))
 except Exception:
     # non-fatal during dev if auth lib unavailable
+    pass
+
+# Populate/refresh LLM model catalog via OpenRouter sqlite helpers (best-effort)
+try:
+    from openrouter import seed_sqlite, get_default_catalog  # type: ignore
+    seed_sqlite(str(DB_PATH), table="models", cat=get_default_catalog())
+except Exception:
     pass
 
 # Simple per-minute rate limit by IP or user tier for heavy endpoints
@@ -123,7 +118,7 @@ _RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
 @app.middleware("http")
 async def _rate_limit(request, call_next):
     path = request.url.path
-    if not (path.startswith("/api/lookup") or path.startswith("/api/parse")):
+    if not (path.startswith("/api/lookup") or path.startswith("/api/parse") or path.startswith("/translate")):
         return await call_next(request)
     tier = "free"
     key: Optional[str] = None
@@ -206,6 +201,62 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
         return None
 
 
+def _decay_posterior(ul: UserLexeme, now: datetime, hl_days: float) -> None:
+    if not hl_days or hl_days <= 0:
+        ul.last_decay_at = now
+        return
+    ref = ul.last_decay_at or ul.last_seen_at or ul.created_at or now
+    dt = (now - ref).total_seconds() / 86400.0
+    if dt <= 0:
+        ul.last_decay_at = now
+        return
+    k = pow(0.5, dt / hl_days)
+    ul.alpha = float(max(0.0, (ul.alpha or 1.0) * k))
+    ul.beta = float(max(0.0, (ul.beta or 9.0) * k))
+    ul.last_decay_at = now
+
+
+def _retention_now(ul: UserLexeme, now: datetime) -> float:
+    S = max(0.5, float(ul.stability or 1.0))
+    ref = ul.last_seen_at or ul.first_seen_at or ul.created_at or now
+    dt = max(0.0, (now - ref).total_seconds() / 86400.0)
+    try:
+        return math.exp(-dt / S)
+    except Exception:
+        return 0.5
+
+
+def _schedule_next(ul: UserLexeme, quality: int, now: datetime) -> None:
+    S = max(0.5, float(ul.stability or 1.0))
+    D = float(getattr(ul, "difficulty", 1.0) or 1.0)
+    if quality <= 0:
+        S = max(0.5, S * _FSRS_FAIL_F)
+        nxt = now + timedelta(days=1)
+        D = min(1.5, D + 0.05)
+    else:
+        g = _G_PASS_WEAK if quality == 1 else _G_PASS_NORM if quality == 2 else _G_PASS_STRONG
+        S = S * (1.0 + g * (2.0 - D))
+        try:
+            days = S * (-math.log(_FSRS_TARGET_R))
+        except Exception:
+            days = max(1.0, S * 0.1)
+        nxt = now + timedelta(days=days)
+        D = max(0.3, min(1.5, D - (0.02 if quality == 3 else 0.01)))
+    ul.stability = float(min(3650.0, S))
+    ul.difficulty = float(D)
+    ul.next_due_at = nxt
+
+
+# Cached OpenCC converters (graceful if unavailable)
+try:  # type: ignore
+    from opencc import OpenCC  # type: ignore
+    _OPENCC_T2S = OpenCC("t2s")
+    _OPENCC_S2T = OpenCC("s2t")
+except Exception:  # noqa: BLE001
+    _OPENCC_T2S = None  # type: ignore
+    _OPENCC_S2T = None  # type: ignore
+
+
 def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> Lexeme:
     # For Chinese, normalize to unified 'zh' with simplified lemma; capture Hans/Hant variants
     is_zh = lang.startswith("zh")
@@ -215,14 +266,12 @@ def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> L
     hant_form = None
     if is_zh:
         try:
-            from opencc import OpenCC  # type: ignore
-            hans = OpenCC("t2s").convert(lemma)
-            hant = OpenCC("s2t").convert(hans)
+            hans = _OPENCC_T2S.convert(lemma) if _OPENCC_T2S else lemma
+            hant = _OPENCC_S2T.convert(hans) if _OPENCC_S2T else None
             canon_lemma = hans
             hans_form = hans
             hant_form = hant
         except Exception:
-            # fallback: assume provided lemma is simplified
             hans_form = lemma
     # Try to reuse existing lexeme via variants to avoid duplicates
     lex = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma == canon_lemma, Lexeme.pos == pos).first()
@@ -255,8 +304,7 @@ def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> L
             exists = db.query(LexemeVariant).filter(LexemeVariant.script == sc, LexemeVariant.form == fm).first()
             if not exists:
                 db.add(LexemeVariant(lexeme_id=lex.id, script=sc, form=fm))
-    db.commit()
-    db.refresh(lex)
+    db.flush()
     return lex
 
 
@@ -274,8 +322,7 @@ def _get_or_create_userlexeme(db: Session, user: User, profile: Profile, lexeme:
         pass
     ul = UserLexeme(user_id=user.id, profile_id=profile.id, lexeme_id=lexeme.id, importance=imp)
     db.add(ul)
-    db.commit()
-    db.refresh(ul)
+    db.flush()
     return ul
 
 
@@ -293,9 +340,12 @@ def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str
     ul.a_click = (ul.a_click or 0) + 1
     ul.clicks = (ul.clicks or 0) + 1
     ul.last_clicked_at = datetime.utcnow()
-    ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) * (1.0 - _SRS_ALPHA_CLICK))))
+    now = datetime.utcnow()
+    _decay_posterior(ul, now, _HL_CLICK_D)
+    ul.alpha = float((ul.alpha or 1.0) + _W_CLICK)
+    _schedule_next(ul, 0, now)
     # Event row
-    ev = WordEvent(ts=datetime.utcnow(), user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
+    ev = WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
     db.add(ev)
     db.commit()
 
@@ -312,8 +362,8 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     # Attempt dictionary translations using lemma when available, else surface
     lemma = analysis.get("lemma") or req.surface
     translations = get_dict_chain().translations(req.source_lang, req.target_lang, lemma)
-    # For Chinese, if no translations on lemma, try the surface form too (handles un-normalized variants)
-    if not translations and req.source_lang.startswith("zh") and req.surface != lemma:
+    # Fallback: if lemma yields nothing, try surface form as well (zh special handling remains elsewhere)
+    if not translations and req.surface != lemma:
         more = get_dict_chain().translations(req.source_lang, req.target_lang, req.surface)
         if more:
             translations = more
@@ -343,7 +393,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
             if uid is not None:
                 user = db.get(User, uid)
                 if user:
-                    _srs_click(db, user, req.source_lang, lemma=lemma, pos=analysis.get("pos"), surface=req.surface, context_hash=None)
+                    _srs_click(db, user, req.source_lang, lemma=lemma, pos=analysis.get("pos"), surface=req.surface, context_hash=_hash_context(req.context))
     except Exception:
         pass
     return resp
@@ -657,19 +707,20 @@ def parse(req: ParseRequest) -> Dict[str, Any]:
             "is_mwe": w.is_mwe,
         }
         if req.lang.startswith("zh"):
-            # per-character pinyin
             try:
                 from pypinyin import lazy_pinyin, Style  # type: ignore
+                p_mark_list = lazy_pinyin(w.text, style=Style.TONE)
+                p_num_list = lazy_pinyin(w.text, style=Style.TONE3)
                 chars = []
                 for i, ch in enumerate(w.text):
-                    p_mark = lazy_pinyin(ch, style=Style.TONE)
-                    p_num = lazy_pinyin(ch, style=Style.TONE3)
+                    p_mark = p_mark_list[i] if i < len(p_mark_list) else None
+                    p_num = p_num_list[i] if i < len(p_num_list) else None
                     chars.append({
                         "ch": ch,
                         "start": w.start + i,
                         "end": w.start + i + 1,
-                        "pinyin": p_mark[0] if p_mark else None,
-                        "pinyin_num": p_num[0] if p_num else None,
+                        "pinyin": p_mark,
+                        "pinyin_num": p_num,
                     })
                 entry["chars"] = chars
             except Exception:
@@ -687,7 +738,7 @@ class GenRequest(BaseModel):
     length: Optional[int] = None  # UI length hint; unit is decided per-language
     include_words: Optional[List[str]] = None
     model: Optional[str] = None
-    provider: Optional[str] = None  # openrouter|lmstudio
+    provider: Optional[str] = "openrouter"  # default to openrouter; alt: lmstudio
     base_url: str = "http://localhost:1234/v1"
 
 
@@ -820,15 +871,45 @@ def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[
         db.refresh(prof)
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, user, prof, lex)
-    # Beta non-click increment
+    now = datetime.utcnow()
+    # determine exposure weight with gating
+    # 1) session collapse: skip additional weight if last exposure was recent
+    recent_ev = db.query(WordEvent).filter(
+        WordEvent.user_id == user.id,
+        WordEvent.profile_id == prof.id,
+        WordEvent.lexeme_id == lex.id,
+        WordEvent.event_type == "exposure",
+    ).order_by(WordEvent.ts.desc()).first()
+    session_skip = False
+    if recent_ev:
+        try:
+            mins = (now - recent_ev.ts).total_seconds() / 60.0
+            if mins < _SESSION_MIN:
+                session_skip = True
+        except Exception:
+            session_skip = False
+    # 2) distinct texts gating (use before increment)
+    distincts_before = int(ul.distinct_texts or 0)
+    w_exp = _W_EXPOSURE
+    quality = 2  # normal pass
+    if distincts_before < _DISTINCT_PROMOTE:
+        w_exp = min(w_exp, _EXPOSURE_WEAK_W)
+        quality = 1  # weak pass
+    # 3) difficulty/frequency adjustment
+    li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lex.id).first()
+    if (getattr(ul, "difficulty", 1.0) or 1.0) >= _DIFF_HIGH or (li and li.freq_rank and li.freq_rank > _FREQ_LOW_THRESH):
+        w_exp = min(w_exp, _EXPOSURE_WEAK_W)
+        quality = min(quality, 1)
+    # 4) apply updates
     ul.b_nonclick = (ul.b_nonclick or 0) + 1
     ul.exposures = (ul.exposures or 0) + 1
-    now = datetime.utcnow()
     if not ul.first_seen_at:
         ul.first_seen_at = now
     ul.last_seen_at = now
-    # Stability increase
-    ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) + _SRS_BETA_EXPOSURE * (1.0 - (ul.stability or 0.0)))))
+    _decay_posterior(ul, now, _HL_EXPOSURE_D)
+    if not session_skip and w_exp > 0:
+        ul.beta = float((ul.beta or 9.0) + w_exp)
+    _schedule_next(ul, quality, now)
     # Diversity (distinct contexts)
     if context_hash:
         exists = db.query(UserLexemeContext).filter(UserLexemeContext.user_lexeme_id == ul.id, UserLexemeContext.context_hash == context_hash).first()
@@ -837,6 +918,25 @@ def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[
             ul.distinct_texts = (ul.distinct_texts or 0) + 1
     # Event
     db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
+
+    # Synthetic nonlookup promotion (conservative)
+    if _SYN_NL_ENABLE:
+        try:
+            if (ul.clicks or 0) == 0 and int(ul.distinct_texts or 0) >= _SYN_NL_MIN_DISTINCT and ul.first_seen_at:
+                days_seen = (now - ul.first_seen_at).total_seconds() / 86400.0
+                if days_seen >= _SYN_NL_MIN_DAYS:
+                    # cooldown: no recent nonlookup
+                    recent_nl = db.query(WordEvent).filter(
+                        WordEvent.user_id == user.id,
+                        WordEvent.profile_id == prof.id,
+                        WordEvent.lexeme_id == lex.id,
+                        WordEvent.event_type == "nonlookup",
+                        WordEvent.ts >= (now - timedelta(days=_SYN_NL_COOLDOWN_DAYS))
+                    ).first()
+                    if not recent_nl:
+                        _srs_nonlookup(db, user, lang, lemma, pos, surface, context_hash, text_id)
+        except Exception:
+            pass
 
 
 @app.post("/srs/event/exposures")
@@ -857,6 +957,12 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
         _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
     db.commit()
+    # Update bulk level estimate if stale (best-effort)
+    try:
+        update_level_if_stale(db, user.id, req.lang)
+        db.commit()
+    except Exception:
+        pass
     return {"ok": True, "count": count}
 
 
@@ -876,11 +982,13 @@ def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional
         db.refresh(prof)
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, user, prof, lex)
-    # Treat as an explicit non-click success: increase evidence against clicking and boost stability more strongly
-    ul.b_nonclick = (ul.b_nonclick or 0) + _SRS_BETA_NONLOOKUP
+    # explicit non-click success: add strong nonlookup weight and schedule
     now = datetime.utcnow()
+    _decay_posterior(ul, now, _HL_NONLOOK_D)
+    ul.b_nonclick = (ul.b_nonclick or 0) + _SRS_BETA_NONLOOKUP
+    ul.beta = float((ul.beta or 9.0) + _W_NONLOOK)
     ul.last_seen_at = now
-    ul.stability = float(max(0.0, min(1.0, (ul.stability or 0.0) + _SRS_GAMMA_NONLOOKUP * (1.0 - (ul.stability or 0.0)))))
+    _schedule_next(ul, 3, now)
     db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
 
 
@@ -902,6 +1010,11 @@ def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), user: Us
         _srs_nonlookup(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
     db.commit()
+    try:
+        update_level_if_stale(db, user.id, req.lang)
+        db.commit()
+    except Exception:
+        pass
     return {"ok": True, "count": count}
 
 
@@ -928,6 +1041,11 @@ def srs_click(req: ClickRequest, db: Session = Depends(get_db), user: User = Dep
     if not lemma:
         raise HTTPException(400, "lemma or surface required")
     _srs_click(db, user, req.lang, lemma, pos, req.surface, _hash_context(req.context), req.text_id)
+    try:
+        update_level_if_stale(db, user.id, req.lang)
+        db.commit()
+    except Exception:
+        pass
     # Return derived metrics
     lex = _resolve_lexeme(db, req.lang, lemma, pos)
     prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()
@@ -970,6 +1088,23 @@ def get_srs_words(
         UserLexeme.user_id == user.id,
         UserLexeme.profile_id == db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == lang).scalar_subquery(),
     )
+    # Push simple filters into SQL
+    if min_S is not None:
+        q = q.filter(UserLexeme.stability >= float(min_S))
+    if max_S is not None:
+        q = q.filter(UserLexeme.stability <= float(max_S))
+    if min_D is not None:
+        q = q.filter(UserLexeme.distinct_texts >= int(min_D))
+    if max_D is not None:
+        q = q.filter(UserLexeme.distinct_texts <= int(max_D))
+    # p filters approximate: only apply when denominator > 0
+    if min_p is not None or max_p is not None:
+        denom = (UserLexeme.a_click + UserLexeme.b_nonclick)
+        q = q.filter(denom > 0)
+        if min_p is not None:
+            q = q.filter((UserLexeme.a_click * 1.0) / (denom * 1.0) >= float(min_p))
+        if max_p is not None:
+            q = q.filter((UserLexeme.a_click * 1.0) / (denom * 1.0) <= float(max_p))
     rows = q.limit(1000).all()
     out: List[SrsWordsOut] = []
     for ul, lx, li in rows:
@@ -1026,24 +1161,344 @@ def get_srs_stats(lang: str, db: Session = Depends(get_db), user: User = Depends
     return SrsStatsOut(total=len(rows), by_p=by_p, by_S=by_S, by_D=by_D)
 
 
+class LevelOut(BaseModel):
+    level_value: float
+    level_var: float
+    last_update_at: Optional[str]
+    last_activity_at: Optional[str]
+    ess: float
+    bins: Dict[str, List[float]]
+
+
+@app.get("/srs/level", response_model=LevelOut)
+def get_srs_level(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    # best-effort freshness
+    try:
+        update_level_if_stale(db, user.id, lang)
+        db.commit()
+    except Exception:
+        pass
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        raise HTTPException(404, "profile not found")
+    summ = get_level_summary(db, prof)
+    return LevelOut(**summ)
+
+
+# -------- Translation API --------
+class TranslateIn(BaseModel):
+    lang: str
+    target_lang: Optional[str] = "en"
+    unit: Literal["sentence", "paragraph", "text"]
+    text: Optional[str] = None
+    text_id: Optional[int] = None
+    start: Optional[int] = None
+    end: Optional[int] = None
+    continue_with_reading: Optional[bool] = False
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+def _sentence_spans(text: str, lang: str) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    n = len(text)
+    i = 0
+    enders = [".", "!", "?"]
+    zh_enders = ["。", "！", "？"]
+    if lang.startswith("zh"):
+        # split on zh punctuation; include the punctuation in span
+        start = 0
+        while i < n:
+            ch = text[i]
+            if ch in zh_enders:
+                spans.append((start, i + 1))
+                start = i + 1
+            i += 1
+        if start < n:
+            spans.append((start, n))
+        return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
+    # Latin-like
+    start = 0
+    while i < n:
+        ch = text[i]
+        if ch in enders:
+            j = i + 1
+            while j < n and text[j].isspace():
+                j += 1
+            spans.append((start, j))
+            start = j
+            i = j
+            continue
+        i += 1
+    if start < n:
+        spans.append((start, n))
+    return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
+
+
+def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    n = len(text)
+    i = 0
+    start = 0
+    while i < n:
+        if text[i] == "\n":
+            # detect blank line
+            j = i
+            while j < n and text[j] == "\n":
+                j += 1
+            if j - i >= 2:
+                if start < i:
+                    spans.append((start, i))
+                start = j
+                i = j
+                continue
+        i += 1
+    if start < n:
+        spans.append((start, n))
+    return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
+
+
+def _parse_xml_translations(xml_text: str) -> Tuple[str, List[str]]:
+    """Parse XML output; returns (mode, items)
+    mode: 'single' for <translation>, 'multi' for <translations>.<seg>
+    items: list of strings (one item for single as [text]).
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        xml_text = xml_text.strip()
+        root = ET.fromstring(xml_text)
+        tag = (root.tag or '').lower()
+        if tag.endswith('translation') and tag != 'translations':
+            return 'single', [ (root.text or '').strip() ]
+        if tag.endswith('translations'):
+            out: List[str] = []
+            for seg in list(root):
+                if (seg.tag or '').lower().endswith('seg'):
+                    out.append((seg.text or '').strip())
+            return 'multi', out
+    except Exception:
+        pass
+    # fallback: treat as single chunk
+    return 'single', [xml_text.strip()]
+
+
+def _assemble_prev_messages(db: Session, user: User, text_id: Optional[int]) -> Optional[List[Dict[str, str]]]:
+    if not text_id:
+        return None
+    msgs: List[Dict[str, str]] = []
+    # Base conversation from reading generation
+    gl = db.query(GenerationLog).filter(GenerationLog.text_id == text_id).order_by(GenerationLog.id.asc()).all()
+    if gl:
+        # take earliest prompt (closest to generation) and assistant text as a seed
+        first = gl[0]
+        if isinstance(first.prompt, dict):
+            base = first.prompt.get("messages")
+            if isinstance(base, list):
+                for m in base[-4:]:
+                    if isinstance(m, dict) and m.get("content"):
+                        msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+        rt = db.get(ReadingText, text_id)
+        if rt and rt.content:
+            msgs.append({"role": "assistant", "content": rt.content})
+    # Append last few translation exchanges (user + assistant) if available
+    tlogs = db.query(TranslationLog).filter(TranslationLog.text_id == text_id).order_by(TranslationLog.id.desc()).limit(3).all()
+    for tl in reversed(tlogs):
+        try:
+            pm = tl.prompt.get("messages") if isinstance(tl.prompt, dict) else None
+            if isinstance(pm, list) and pm:
+                # take the last user content from that prompt
+                last_user = None
+                for m in reversed(pm):
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        last_user = m.get("content", "")
+                        break
+                if last_user:
+                    msgs.append({"role": "user", "content": last_user})
+            if getattr(tl, 'response', None):
+                msgs.append({"role": "assistant", "content": tl.response})
+        except Exception:
+            continue
+    return msgs or None
+
+
+@app.post("/translate")
+def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    # Resolve source content
+    raw: Optional[str] = payload.text
+    base_offset = 0
+    if raw is None and payload.text_id is not None:
+        rt = db.get(ReadingText, payload.text_id)
+        if not rt or rt.user_id != user.id:
+            raise HTTPException(404, "reading text not found")
+        raw = rt.content
+        if payload.start is not None or payload.end is not None:
+            s = max(0, int(payload.start or 0))
+            e = min(len(raw), int(payload.end or len(raw)))
+            if e <= s:
+                raise HTTPException(400, "invalid span")
+            base_offset = s
+            raw = raw[s:e]
+    if raw is None:
+        raise HTTPException(400, "text or text_id required")
+
+    # Build segments
+    unit = payload.unit
+    spans: List[Tuple[int, int]]
+    if unit == "text":
+        spans = [(0, len(raw))]
+    elif unit == "sentence":
+        spans = _sentence_spans(raw, payload.lang)
+    elif unit == "paragraph":
+        spans = _paragraph_spans(raw)
+    else:
+        raise HTTPException(400, "invalid unit")
+    segments = [raw[s:e] for (s, e) in spans]
+
+    # Previous conversation (optional)
+    prev_msgs: Optional[List[Dict[str, str]]] = None
+    if payload.continue_with_reading and payload.text_id:
+        prev_msgs = _assemble_prev_messages(db, user, payload.text_id)
+
+    spec = TranslationSpec(
+        lang=payload.lang,
+        target_lang=(payload.target_lang or "en"),
+        unit=unit,
+        content=(segments if len(segments) > 1 else segments[0]),
+        continue_with_reading=bool(payload.continue_with_reading),
+        script=None,
+    )
+    messages = build_translation_prompt(spec, prev_messages=prev_msgs)
+
+    def _call_llm(msgs: List[Dict[str, str]]) -> str:
+        return chat_complete(
+            msgs,
+            provider=payload.provider,
+            model=payload.model,
+            base_url=(payload.base_url or "http://localhost:1234/v1"),
+            temperature=0.3,
+        )
+
+    translations: List[str]
+    raw_response: str
+    out = _call_llm(messages)
+    raw_response = out
+    mode, items_parsed = _parse_xml_translations(out)
+    if isinstance(spec.content, list):
+        if len(items_parsed) != len(segments):
+            # retry per-segment in XML mode
+            items_parsed = []
+            for seg in segments:
+                m = build_translation_prompt(TranslationSpec(lang=spec.lang, target_lang=spec.target_lang, unit="sentence", content=seg), prev_messages=prev_msgs)
+                r = _call_llm(m)
+                raw_response += "\n" + r
+                _, one = _parse_xml_translations(r)
+                items_parsed.append(one[0] if one else "")
+    translations = [s.strip() for s in items_parsed]
+
+    items = []
+    for idx, (span, src, tr) in enumerate(zip(spans, segments, translations)):
+        s0 = base_offset + span[0]
+        e0 = base_offset + span[1]
+        items.append({"start": s0, "end": e0, "source": src, "translation": tr})
+
+    # Persist when translating a stored reading
+    if payload.text_id is not None:
+        from sqlalchemy.exc import IntegrityError  # local import
+        for idx, (span, src, tr) in enumerate(zip(spans, segments, translations)):
+            row = ReadingTextTranslation(
+                user_id=user.id,
+                text_id=payload.text_id,
+                unit=unit,
+                target_lang=(payload.target_lang or "en"),
+                segment_index=(idx if unit != "text" else None),
+                span_start=(base_offset + span[0]),
+                span_end=(base_offset + span[1]),
+                source_text=src,
+                translated_text=tr,
+                provider=(payload.provider or "openrouter"),
+                model=payload.model,
+            )
+            try:
+                db.add(row)
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+        # minimal log
+        try:
+            db.add(TranslationLog(
+                user_id=user.id,
+                text_id=payload.text_id,
+                unit=unit,
+                target_lang=(payload.target_lang or "en"),
+                provider=(payload.provider or "openrouter"),
+                model=payload.model,
+                prompt={"messages": messages},
+                segments={"count": len(segments)},
+                response=raw_response,
+            ))
+        except Exception:
+            pass
+        db.commit()
+
+    return {
+        "unit": unit,
+        "target_lang": (payload.target_lang or "en"),
+        "items": items,
+        "provider": (payload.provider or "openrouter"),
+        "model": payload.model,
+    }
+
+
+@app.get("/reading/{text_id}/translations")
+def get_translations(text_id: int, unit: Literal["sentence", "paragraph", "text"], target_lang: str = "en", db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    rt = db.get(ReadingText, text_id)
+    if not rt or rt.user_id != user.id:
+        raise HTTPException(404, "reading text not found")
+    rows = (
+        db.query(ReadingTextTranslation)
+        .filter(
+            ReadingTextTranslation.text_id == text_id,
+            ReadingTextTranslation.user_id == user.id,
+            ReadingTextTranslation.unit == unit,
+            ReadingTextTranslation.target_lang == target_lang,
+        )
+        .order_by(ReadingTextTranslation.segment_index.asc().nullsfirst(), ReadingTextTranslation.span_start.asc().nullslast())
+        .all()
+    )
+    items = [
+        {
+            "start": r.span_start,
+            "end": r.span_end,
+            "source": r.source_text,
+            "translation": r.translated_text,
+        }
+        for r in rows
+    ]
+    return {"unit": unit, "target_lang": target_lang, "items": items}
+
+
 # ---- UI shell mounting (header/footer/templates) ----
 try:
     # Optional UI libraries from libs/
     from arcadia_ui_style import ensure_templates  # type: ignore
-    from arcadia_ui_core import router as ui_router, mount_templates as ui_mount  # type: ignore
+    from arcadia_ui_core import router as ui_router, attach_ui, mount_ui_static  # type: ignore
     tdir = ensure_templates(Path(__file__).resolve().parent)
-    from fastapi.templating import Jinja2Templates
     templates = Jinja2Templates(directory=tdir)
-    try:
-        templates.env.globals["persist_header"] = True
-        templates.env.globals["brand_home_url"] = "/"
-        templates.env.globals["brand_name"] = "Arcadia Lang"
-        templates.env.globals["brand_tag"] = ""
-    except Exception:
-        pass
-    # Use the same templates env for project pages to share globals (brand_name, etc.)
-    _templates_env = templates  # type: ignore
-    ui_mount(templates)
+    # Attach UI state and mount static assets
+    attach_ui(
+        app,
+        templates,
+        persist_header=True,
+        brand_home_url="/",
+        brand_name="Arcadia Lang",
+        brand_tag="",
+    )
+    mount_ui_static(app)
+    _templates_env = templates  # share env for project pages
     app.include_router(ui_router)
 except Exception:
     # non-fatal during dev
@@ -1056,17 +1511,7 @@ def words_page(request: Request, lang: Optional[str] = None, user: User = Depend
     t = _templates()
     return t.TemplateResponse("words.html", {"request": request, "lang": lang or "es"})
 
-# Lightweight pass-through routes to shared login/signup templates (ensures availability even if core router lacks them)
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    t = _templates()
-    return t.TemplateResponse("login.html", {"request": request, "brand_name": "Arcadia Lang", "brand_home_url": "/"})
-
-
-@app.get("/signup", response_class=HTMLResponse)
-def signup_page(request: Request):
-    t = _templates()
-    return t.TemplateResponse("signup.html", {"request": request, "brand_name": "Arcadia Lang", "brand_home_url": "/"})
+# Login/Signup pages are provided by arcadia_ui_core router
 
 # Placeholder pages for account menu
 @app.get("/profile", response_class=HTMLResponse)

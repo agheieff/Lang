@@ -161,6 +161,29 @@ def _simple_spanish_rules(surface: str) -> Dict[str, Any]:
     }
 
 
+_ES_NLP: Optional[Any] = None
+_ES_NLP_TRIED = False
+
+
+def _get_es_nlp() -> Optional[Any]:
+    global _ES_NLP, _ES_NLP_TRIED
+    if _ES_NLP is not None or _ES_NLP_TRIED:
+        return _ES_NLP
+    try:
+        import spacy  # type: ignore
+    except Exception:
+        _ES_NLP_TRIED = True
+        return None
+    for model in ("es_core_news_sm", "es_core_news_md", "es_core_news_lg"):
+        try:
+            _ES_NLP = spacy.load(model)  # type: ignore
+            break
+        except Exception:
+            _ES_NLP = None
+    _ES_NLP_TRIED = True
+    return _ES_NLP
+
+
 def analyze_word_es(surface: str, context: Optional[str] = None) -> Dict[str, Any]:
     """Analyze a single Spanish word using external lemmatizers when available.
 
@@ -171,15 +194,9 @@ def analyze_word_es(surface: str, context: Optional[str] = None) -> Dict[str, An
     """
     # 1) Try spaCy with Spanish model
     try:
-        import spacy  # type: ignore
-        for model in ("es_core_news_sm", "es_core_news_md", "es_core_news_lg"):
-            try:
-                nlp = spacy.load(model)
-                break
-            except Exception:
-                nlp = None  # type: ignore
-        if nlp is not None:  # type: ignore
-            doc = nlp(surface)
+        nlp = _get_es_nlp()
+        if nlp is not None:
+            doc = nlp(surface)  # type: ignore
             token = doc[0] if len(doc) else None
             if token:
                 morph: Dict[str, str] = {}

@@ -1,39 +1,8 @@
+<!-- arcadia-ui-style:v2 -->
+<link rel="stylesheet" href="/ui-static/arcadia_theme.css">
 
-<!-- Shared header styled like Trading MMO -->
-<style>
-  :root { scrollbar-gutter: stable; }
-  .tm-header, .tm-header *, .tm-header *::before, .tm-header *::after { box-sizing: border-box; }
-  .tm-header { background:#111827; color:#e5e7eb; border-bottom:1px solid #1f2937; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif; font-size:14px; line-height:1.25; }
-  .tm-header .tm-container { max-width:1200px; margin:0 auto; padding:0.75rem 1rem; display:flex; align-items:center; justify-content:space-between; }
-  @media (min-width: 640px){ .tm-header .tm-container { min-height:56px; } }
-  .tm-header .tm-brand { color:#f9fafb; font-weight:600; text-decoration:none; letter-spacing:0.2px; font-size:18px; }
-  .tm-header .tm-nav a { color:#9ca3af; text-decoration:none; margin-left:1rem; font-size:14px; }
-  .tm-header .tm-nav a:hover { color:#f9fafb; }
-  .tm-right { display:flex; align-items:center; gap:1rem; }
-  .tm-actions .tm-btn { padding:0.35rem 0.75rem; border:1px solid #374151; border-radius:0.375rem; color:#e5e7eb; text-decoration:none; font-size:14px; }
-  .tm-actions .tm-btn:hover { background:#1f2937; }
-  .tm-actions .tm-primary { border-color:#2563eb; background:#2563eb; }
-  .tm-actions .tm-primary:hover { background:#1d4ed8; }
-  .tm-user { position:relative; }
-  .tm-user-btn { padding:0.35rem 0.75rem; border:1px solid #374151; border-radius:0.375rem; color:#e5e7eb; background:#111827; cursor:pointer; font-size:14px; }
-  .tm-user-menu { position:absolute; right:0; top:2.25rem; background:#111827; border:1px solid #1f2937; border-radius:0.375rem; min-width:180px; display:none; z-index:50; }
-  .tm-user:focus-within .tm-user-menu { display:block; }
-  .tm-user-menu a { display:block; padding:0.5rem 0.75rem; color:#e5e7eb; text-decoration:none; font-size:14px; }
-  .tm-user-menu a:hover { background:#1f2937; }
-  .tm-divider { width:1px; height:18px; background:#374151; margin:0 0.5rem; }
-  .tm-nav a.active { color:#f9fafb; }
-  .tm-brand small { color:#9ca3af; font-weight:400; font-size:12px; margin-left:6px; }
-  .tm-flex { display:flex; align-items:center; gap:.75rem; }
-  .tm-nav { display:flex; align-items:center; }
-  @media (max-width: 640px){ .tm-nav a { margin-left:.5rem; } }
-  .tm-link { color:#9ca3af; }
-  .tm-link:hover { color:#f9fafb; }
-  .tm-hidden { display:none; }
-  .tm-show { display:block; }
-  .tm-menu-right { position:relative; }
-  .tm-user-menu hr { border:none; border-top:1px solid #1f2937; margin:4px 0; }
-</style>
-<header class="tm-header">
+<!-- Shared application header -->
+<header class="tm-header t-header">
   <div class="tm-container">
     <a class="tm-brand" href="{{ brand_home_url or '/' }}">
       {% if brand_logo_url %}<img src="{{ brand_logo_url }}" alt="logo" style="height:22px;vertical-align:middle;margin-right:8px;"/>{% endif %}
@@ -52,12 +21,12 @@
         <div class="tm-user" id="tm-user">
           <button class="tm-user-btn" id="tm-user-btn">Account ▾</button>
           <div class="tm-user-menu" id="tm-user-menu">
+            <button class="tm-menu-trigger" id="theme-menu-trigger">Theme</button>
+            <div id="theme-submenu" style="display:none; position:absolute; right: 100%; top: 0; z-index: 3000;"></div>
             <a href="/profile">Profile</a>
             <a href="/settings">Settings</a>
-            <a href="/words">My Words</a>
-            <a href="/stats">Statistics</a>
             <hr />
-            <a href="/logout">Log out</a>
+            <a href="/auth/logout">Log out</a>
           </div>
         </div>
       {% else %}
@@ -70,6 +39,7 @@
   </div>
 </header>
 <!-- Dropdown uses CSS :focus-within; no JS needed -->
+<script src="/ui-static/theme-selector.js"></script>
 {% set __persist = persist_header if persist_header is defined else true %}
 {% if __persist %}
 <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-+bVsx3b8QdE7cO1S4oFQ9hQ1TImfQxWqS4LzJd8j3jL5uFQw8L7f3NfL2hJdJg9w" crossorigin="anonymous"></script>
@@ -86,24 +56,22 @@
   }catch(e){}
 })();
 </script>
-<!-- Persistent module hook: re-initialize pages after HTMX swaps (e.g., chart bootstrap) -->
-<script type="module">
-  const initPage = async () => {
-    const chartCanvas = document.getElementById('price-chart');
-    if (chartCanvas) {
-      try {
-        const mod = await import('/static/js/modules/app.js');
-        if (!window._arcadia_chart) {
-          window._arcadia_chart = mod.bootstrapApp?.();
-        }
-      } catch (e) { /* ignore */ }
+<!-- App-neutral UI re-init event; apps can hook `ui:reinit` to (re)initialize features -->
+<script>
+(function(){
+  try{
+    function fire(){
+      try{ window.dispatchEvent(new CustomEvent('ui:reinit')); }catch(e){}
     }
-  };
-  window.addEventListener('DOMContentLoaded', initPage);
-  document.body.addEventListener('htmx:afterSwap', initPage);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') initPage();
-  });
-}</script>
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', fire, { once: true });
+    } else {
+      fire();
+    }
+    try{ document.body.addEventListener('htmx:afterSwap', fire); }catch(e){}
+    document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='visible') fire(); });
+  }catch(e){}
+})();
+</script>
 {% endif %}
-            
+        

@@ -1,0 +1,6 @@
+Write in {lang_display}.
+{script_line}{level_line}{length_line}{include_words_line}Constraints:
+- Do not include translations or vocabulary lists.
+- Avoid English unless the target language is English.
+- Gently reinforce the target words in context and keep the language natural and engaging.
+- Do not include meta commentary.

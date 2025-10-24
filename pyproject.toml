@@ -17,13 +17,11 @@
   "jieba>=0.42.1",
   "pypinyin>=0.50.0",
   "opencc-python-reimplemented>=0.1.7",
-  # OpenRouter client from local libs for production LLM integration
-  "openrouter @ file:///home/agheieff/Arcadia/libs/openrouter",
-  # UI libraries (core widgets/JS and personal style), local editable references for dev
-  "arcadia-ui-core @ file:///home/agheieff/Arcadia/libs/arcadia_ui_core",
-  "arcadia-ui-style @ file:///home/agheieff/Arcadia/libs/arcadia_ui_style",
-  # Shared auth library (router + security)
-  "arcadia-auth @ file:///home/agheieff/Arcadia/libs/auth",
+  # Local libs resolved via [tool.uv.sources] as editable installs
+  "openrouter>=0.1.0",
+  "arcadia-ui-core>=0.1.0",
+  "arcadia-ui-style>=0.1.0",
+  "arcadia-auth>=0.1.0",
  ]
 
  [project.optional-dependencies]
@@ -52,5 +50,11 @@ packages = { find = { include = ["Lang*", "server*" ] } }
 managed = true
 [tool.uv.scripts]
 serve = "uvicorn server.main:app --reload --port 8000"
+
+[tool.uv.sources]
+openrouter = { path = "/home/agheieff/Arcadia/libs/openrouter", editable = true }
+arcadia-ui-core = { path = "/home/agheieff/Arcadia/libs/arcadia_ui_core", editable = true }
+arcadia-ui-style = { path = "/home/agheieff/Arcadia/libs/arcadia_ui_style", editable = true }
+arcadia-auth = { path = "/home/agheieff/Arcadia/libs/auth", editable = true }
 
 

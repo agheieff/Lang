@@ -16,10 +16,10 @@ Requires-Dist: beautifulsoup4>=4.12.3
 Requires-Dist: jieba>=0.42.1
 Requires-Dist: pypinyin>=0.50.0
 Requires-Dist: opencc-python-reimplemented>=0.1.7
-Requires-Dist: openrouter@ file:///home/agheieff/Arcadia/libs/openrouter
-Requires-Dist: arcadia-ui-core@ file:///home/agheieff/Arcadia/libs/arcadia_ui_core
-Requires-Dist: arcadia-ui-style@ file:///home/agheieff/Arcadia/libs/arcadia_ui_style
-Requires-Dist: arcadia-auth@ file:///home/agheieff/Arcadia/libs/auth
+Requires-Dist: openrouter>=0.1.0
+Requires-Dist: arcadia-ui-core>=0.1.0
+Requires-Dist: arcadia-ui-style>=0.1.0
+Requires-Dist: arcadia-auth>=0.1.0
 Provides-Extra: nlp
 Requires-Dist: spacy<4; extra == "nlp"
 Provides-Extra: dicts

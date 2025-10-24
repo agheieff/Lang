@@ -62,6 +62,33 @@ def _run_migrations() -> None:
             # word_events: text_id
             if not has_column("word_events", "text_id"):
                 conn.exec_driver_sql("ALTER TABLE word_events ADD COLUMN text_id INTEGER")
+
+            # user_lexemes: alpha, beta, difficulty, last_decay_at
+            if not has_column("user_lexemes", "alpha"):
+                conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN alpha REAL DEFAULT 1.0")
+            if not has_column("user_lexemes", "beta"):
+                conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN beta REAL DEFAULT 9.0")
+            if not has_column("user_lexemes", "difficulty"):
+                conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN difficulty REAL DEFAULT 1.0")
+            if not has_column("user_lexemes", "last_decay_at"):
+                conn.exec_driver_sql("ALTER TABLE user_lexemes ADD COLUMN last_decay_at DATETIME")
+
+            # indexes for performance
+            try:
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_word_events_user_prof_lex_ts ON word_events(user_id, profile_id, lexeme_id, ts)")
+            except Exception:
+                pass
+            try:
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_lexeme_info_freq_rank ON lexeme_info(freq_rank)")
+            except Exception:
+                pass
+            try:
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_user_lexemes_due ON user_lexemes(profile_id, next_due_at)")
+            except Exception:
+                pass
+            # translation_logs: response text (to support conversation continuation)
+            if not has_column("translation_logs", "response"):
+                conn.exec_driver_sql("ALTER TABLE translation_logs ADD COLUMN response TEXT")
             
             # Tables mapped by SQLAlchemy will be created in _ensure_tables
     except Exception:

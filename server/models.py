@@ -123,6 +123,10 @@ class UserLexeme(Base):
     a_click: Mapped[int] = mapped_column(Integer, default=1)
     b_nonclick: Mapped[int] = mapped_column(Integer, default=4)
     stability: Mapped[float] = mapped_column(Float, default=0.2)  # 0..1
+    # Bayesian posterior for click propensity (non-lookup vs click)
+    alpha: Mapped[float] = mapped_column(Float, default=1.0)
+    beta: Mapped[float] = mapped_column(Float, default=9.0)
+    difficulty: Mapped[float] = mapped_column(Float, default=1.0)
     # Word importance (e.g., based on frequency or curriculum); user-specific so it can evolve
     importance: Mapped[float] = mapped_column(Float, default=0.5)
     importance_var: Mapped[float] = mapped_column(Float, default=0.3)
@@ -134,6 +138,7 @@ class UserLexeme(Base):
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     last_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     next_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    last_decay_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -197,4 +202,72 @@ class GenerationLog(Base):
     level_hint: Mapped[Optional[str]] = mapped_column(String(128), default=None)
     approx_len: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     unit: Mapped[Optional[str]] = mapped_column(String(16), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReadingTextTranslation(Base):
+    __tablename__ = "reading_text_translations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "text_id",
+            "target_lang",
+            "unit",
+            "segment_index",
+            "span_start",
+            "span_end",
+            name="uq_rtt_unique",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    unit: Mapped[str] = mapped_column(String(16))  # sentence|paragraph|text
+    target_lang: Mapped[str] = mapped_column(String(8))
+    segment_index: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
+    span_start: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
+    span_end: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
+    source_text: Mapped[str] = mapped_column(String)
+    translated_text: Mapped[str] = mapped_column(String)
+    provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class TranslationLog(Base):
+    __tablename__ = "translation_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
+    unit: Mapped[Optional[str]] = mapped_column(String(16), default=None)
+    target_lang: Mapped[Optional[str]] = mapped_column(String(8), default=None)
+    provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    prompt: Mapped[dict] = mapped_column(JSON, default=dict)
+    segments: Mapped[dict] = mapped_column(JSON, default=dict)
+    response: Mapped[Optional[str]] = mapped_column(String, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LLMModel(Base):
+    __tablename__ = "llm_models"
+    __table_args__ = (
+        UniqueConstraint("mid", name="uq_llm_models_mid"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mid: Mapped[str] = mapped_column(String(128), index=True)  # provider/model-id
+    provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    label: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    family: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    context_window: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    max_output_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    modalities: Mapped[dict] = mapped_column(JSON, default=dict)
+    features: Mapped[dict] = mapped_column(JSON, default=dict)
+    tiers: Mapped[dict] = mapped_column(JSON, default=dict)
+    pricing: Mapped[dict] = mapped_column(JSON, default=dict)
+    limits: Mapped[dict] = mapped_column(JSON, default=dict)
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

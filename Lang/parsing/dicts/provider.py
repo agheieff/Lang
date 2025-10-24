@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from collections import OrderedDict
 
 
@@ -28,6 +28,10 @@ class StarDictProvider(DictionaryProvider):
             base = Path(__file__).resolve().parents[3] / "data" / "dicts"
             self.root = root or base
         self._ok = False
+        # Cache: discovered base paths per language pair (e.g., "es-en" -> [Path,...])
+        self._bases_cache: dict[str, List[Path]] = {}
+        # Cache: StarDict handles per base path string
+        self._handles: dict[str, Any] = {}
         try:
             import pystardict  # noqa: F401
             self._ok = True
@@ -36,8 +40,12 @@ class StarDictProvider(DictionaryProvider):
 
     def _dict_paths(self, src: str, tgt: str) -> List[Path]:
         pair = f"{src}-{tgt}"
+        # Cached discovery per language pair
+        if pair in self._bases_cache:
+            return self._bases_cache[pair]
         d = self.root / pair
         if not d.exists() or not d.is_dir():
+            self._bases_cache[pair] = []
             return []
         # Search recursively for .ifo files; that reliably yields the base
         bases: List[Path] = []
@@ -58,6 +66,8 @@ class StarDictProvider(DictionaryProvider):
                     if str(base) not in seen:
                         seen.add(str(base))
                         bases.append(base)
+        # Store in cache
+        self._bases_cache[pair] = bases
         return bases
 
     def translations(self, src: str, tgt: str, lemma: str) -> List[str]:
@@ -70,7 +80,12 @@ class StarDictProvider(DictionaryProvider):
         results: List[str] = []
         for base in self._dict_paths(src, tgt):
             try:
-                d = Dictionary(str(base))
+                base_key = str(base)
+                d = self._handles.get(base_key)
+                if d is None:
+                    d = Dictionary(base_key)
+                    # Only cache successfully created handles
+                    self._handles[base_key] = d
                 if lemma in d:
                     raw = d[lemma]
                     # Prefer extracting <li> entries; fall back to text cleanup
