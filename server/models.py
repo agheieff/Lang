@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float
+from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float, Boolean, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -50,6 +50,9 @@ class ReadingText(Base):
     content: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual
+    # Read tracking
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
 
 
 # Placeholder for future SRS tables (not implemented yet)
@@ -248,6 +251,30 @@ class TranslationLog(Base):
     prompt: Mapped[dict] = mapped_column(JSON, default=dict)
     segments: Mapped[dict] = mapped_column(JSON, default=dict)
     response: Mapped[Optional[str]] = mapped_column(String, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReadingLookup(Base):
+    __tablename__ = "reading_lookups"
+    __table_args__ = (
+        UniqueConstraint("user_id", "text_id", "target_lang", "span_start", "span_end", name="uq_reading_lookup_span"),
+        Index("ix_rl_text_id", "text_id"),
+        Index("ix_rl_user_text", "user_id", "text_id"),
+        Index("ix_rl_text_target", "text_id", "target_lang"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    lang: Mapped[str] = mapped_column(String(16))
+    target_lang: Mapped[str] = mapped_column(String(8))
+    surface: Mapped[str] = mapped_column(String(256))
+    lemma: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    span_start: Mapped[int] = mapped_column(Integer)
+    span_end: Mapped[int] = mapped_column(Integer)
+    context_hash: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    translations: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

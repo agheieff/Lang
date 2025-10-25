@@ -89,6 +89,11 @@ def _run_migrations() -> None:
             # translation_logs: response text (to support conversation continuation)
             if not has_column("translation_logs", "response"):
                 conn.exec_driver_sql("ALTER TABLE translation_logs ADD COLUMN response TEXT")
+            # reading_texts: is_read, read_at
+            if not has_column("reading_texts", "is_read"):
+                conn.exec_driver_sql("ALTER TABLE reading_texts ADD COLUMN is_read BOOLEAN DEFAULT 0")
+            if not has_column("reading_texts", "read_at"):
+                conn.exec_driver_sql("ALTER TABLE reading_texts ADD COLUMN read_at DATETIME")
             
             # Tables mapped by SQLAlchemy will be created in _ensure_tables
     except Exception:

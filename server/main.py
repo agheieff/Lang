@@ -20,7 +20,7 @@ from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
 from .db import get_db, init_db, SessionLocal, DB_PATH
-from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel
+from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel, ReadingLookup
 from .level import update_level_if_stale, update_level_for_profile
 from .level import get_level_summary
 from sqlalchemy.orm import Session
@@ -70,6 +70,9 @@ class LookupRequest(BaseModel):
     target_lang: str = Field(..., description="BCP-47 or ISO code for output, e.g., 'en'")
     surface: str = Field(..., description="Surface form as clicked in text")
     context: Optional[str] = Field(None, description="Optional sentence context for disambiguation")
+    text_id: Optional[int] = Field(None, description="Reading text id for caching")
+    start: Optional[int] = Field(None, description="Start offset within text")
+    end: Optional[int] = Field(None, description="End offset within text (exclusive)")
 
 
 app = FastAPI(title="Arcadia Lang", version="0.1.0")
@@ -357,20 +360,107 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
 
     # Analyze word (lemma, pos, morph)
     analysis = engine.analyze_word(req.surface, context=req.context)
-
-    # Attempt dictionary translations using lemma when available, else surface
     lemma = analysis.get("lemma") or req.surface
-    translations = get_dict_chain().translations(req.source_lang, req.target_lang, lemma)
-    # Fallback: if lemma yields nothing, try surface form as well (zh special handling remains elsewhere)
-    if not translations and req.surface != lemma:
-        more = get_dict_chain().translations(req.source_lang, req.target_lang, req.surface)
-        if more:
-            translations = more
-
     morph = analysis.get("morph") or {}
     label = format_morph_label(analysis.get("pos"), morph)
 
-    mode = "translation" if translations else "analysis"
+    translations: Dict[str, Any] | list | None = None
+    mode = "analysis"
+
+    # If authorized and text_id/start/end provided, try cache
+    uid: Optional[int] = None
+    user: Optional[User] = None
+    rt: Optional[ReadingText] = None
+    try:
+        auth = request.headers.get("authorization") or request.headers.get("Authorization")
+        if auth and auth.lower().startswith("bearer "):
+            data = decode_token(auth.split(" ", 1)[1], _JWT_SECRET, ["HS256"])  # type: ignore
+            uid = int((data or {}).get("sub")) if data and data.get("sub") is not None else None
+            if uid is not None:
+                user = db.get(User, uid)
+    except Exception:
+        uid = None
+        user = None
+
+    context_hash = _hash_context(req.context)
+    # Best-effort span validation
+    if req.text_id is not None and req.start is not None and req.end is not None and user is not None:
+        try:
+            rt = db.get(ReadingText, int(req.text_id))
+            if rt and rt.user_id == user.id:
+                s = max(0, int(req.start))
+                e = int(req.end)
+                if e > s:
+                    if rt.content:
+                        e = min(e, len(rt.content))
+                    # Try cache read
+                    row = (
+                        db.query(ReadingLookup)
+                        .filter(
+                            ReadingLookup.user_id == user.id,
+                            ReadingLookup.text_id == rt.id,
+                            ReadingLookup.target_lang == req.target_lang,
+                            ReadingLookup.span_start == s,
+                            ReadingLookup.span_end == e,
+                        )
+                        .first()
+                    )
+                    if row and row.translations:
+                        translations = row.translations
+                        mode = "translation"
+        except Exception:
+            pass
+
+    # Compute translations if not from cache
+    if translations is None:
+        tr = get_dict_chain().translations(req.source_lang, req.target_lang, lemma)
+        if not tr and req.surface != lemma:
+            more = get_dict_chain().translations(req.source_lang, req.target_lang, req.surface)
+            if more:
+                tr = more
+        translations = tr or []
+        mode = "translation" if translations else "analysis"
+        # Persist lookup if we have ownership context
+        if user is not None and rt is not None and req.start is not None and req.end is not None:
+            try:
+                s = max(0, int(req.start))
+                e = int(req.end)
+                if rt.content:
+                    e = min(e, len(rt.content))
+                existing = (
+                    db.query(ReadingLookup)
+                    .filter(
+                        ReadingLookup.user_id == user.id,
+                        ReadingLookup.text_id == rt.id,
+                        ReadingLookup.target_lang == req.target_lang,
+                        ReadingLookup.span_start == s,
+                        ReadingLookup.span_end == e,
+                    )
+                    .first()
+                )
+                if not existing:
+                    db.add(ReadingLookup(
+                        user_id=user.id,
+                        text_id=rt.id,
+                        lang=req.source_lang,
+                        target_lang=req.target_lang,
+                        surface=req.surface,
+                        lemma=lemma,
+                        pos=analysis.get("pos"),
+                        span_start=s,
+                        span_end=e,
+                        context_hash=context_hash,
+                        translations=(translations if isinstance(translations, (dict, list)) else {}),
+                    ))
+                    db.flush()
+                else:
+                    existing.surface = req.surface
+                    existing.lemma = lemma
+                    existing.pos = analysis.get("pos")
+                    existing.context_hash = context_hash
+                    existing.translations = translations if isinstance(translations, (dict, list)) else {}
+            except Exception:
+                pass
 
     resp = {
         "mode": mode,
@@ -385,15 +475,9 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     }
     # Auto-log click event for SRS if authenticated header is present
     try:
-        auth = request.headers.get("authorization") or request.headers.get("Authorization")
-        if auth and auth.lower().startswith("bearer "):
-            data = decode_token(auth.split(" ", 1)[1], _JWT_SECRET, ["HS256"])  # type: ignore
-            uid = int((data or {}).get("sub")) if data and data.get("sub") is not None else None
-            if uid is not None:
-                user = db.get(User, uid)
-                if user:
-                    _srs_click(db, user, req.source_lang, lemma=lemma, pos=analysis.get("pos"), surface=req.surface, context_hash=_hash_context(req.context))
-                    db.commit()
+        if user is not None:
+            _srs_click(db, user, req.source_lang, lemma=lemma, pos=analysis.get("pos"), surface=req.surface, context_hash=context_hash, text_id=(rt.id if rt else None))
+            db.commit()
     except Exception:
         pass
     return resp
@@ -777,8 +861,22 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
         # Graceful error: return a sanitized message without stack traces or placeholder text
         import logging
         logging.getLogger("uvicorn.error").warning("LLM generation failed: %s", e)
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail="No LLM backend available")
+    # If empty, retry once with alternate provider, else return 503 without persisting
+    if not text or text.strip() == "":
+        alt_provider = "lmstudio" if (req.provider or "openrouter").lower() == "openrouter" else "openrouter"
+        try:
+            retry = chat_complete(
+                messages,
+                provider=alt_provider,
+                model=req.model,
+                base_url=req.base_url,
+            )
+        except Exception:
+            retry = ""
+        if not retry or retry.strip() == "":
+            raise HTTPException(status_code=503, detail="No LLM backend available")
+        text = retry
     # Save text and generation log (unlimited tier check placeholder)
     source = "llm"
     rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source=source)
@@ -1261,27 +1359,80 @@ def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
 
 
 def _parse_xml_translations(xml_text: str) -> Tuple[str, List[str]]:
-    """Parse XML output; returns (mode, items)
-    mode: 'single' for <translation>, 'multi' for <translations>.<seg>
-    items: list of strings (one item for single as [text]).
+    """Parse XML-like output from LLMs.
+    Returns a pair (mode, items):
+    - mode: 'single' when a single <translation> element is parsed; 'multi' when a
+      <translations> container with segments is parsed.
+    - items: list of strings (for 'single' it's a singleton list with the text).
+
+    Robustness improvements:
+    - Strip surrounding markdown code fences (``` or ```xml) and whitespace
+      before XML parsing.
+    - Accept root wrappers; descend to first <translation> or <translations>
+      node if the root differs.
+    - For multi, accept child tags in {'seg','s','item','line'}.
     """
+    import re
     import xml.etree.ElementTree as ET
+
+    def _strip_fences(s: str) -> str:
+        t = s.strip()
+        # Regex: optional language marker; capture inner block
+        m = re.match(r"^```[ \t]*([a-zA-Z0-9_-]+)?\s*\n(?P<body>[\s\S]*?)\n?```\s*$", t)
+        return (m.group("body") if m else t).strip()
+
+    def _local(tag: Optional[str]) -> str:
+        if not tag:
+            return ""
+        # Strip XML namespace if present: {ns}local
+        return tag.split('}', 1)[-1].lower()
+
+    cleaned = _strip_fences(xml_text)
+
     try:
-        xml_text = xml_text.strip()
-        root = ET.fromstring(xml_text)
-        tag = (root.tag or '').lower()
-        if tag.endswith('translation') and tag != 'translations':
-            return 'single', [ (root.text or '').strip() ]
-        if tag.endswith('translations'):
-            out: List[str] = []
-            for seg in list(root):
-                if (seg.tag or '').lower().endswith('seg'):
-                    out.append((seg.text or '').strip())
-            return 'multi', out
+        root = ET.fromstring(cleaned)
+
+        wanted = {"translation", "translations"}
+
+        # Find the operative node: either root or a descendant
+        def _find_node(r: ET.Element) -> tuple[ET.Element, str] | tuple[None, None]:
+            rname = _local(r.tag)
+            if rname in wanted:
+                return r, rname
+            # If single child and that child matches, descend
+            kids = [c for c in list(r) if isinstance(getattr(c, 'tag', None), str)]
+            if len(kids) == 1:
+                k = kids[0]
+                kname = _local(k.tag)
+                if kname in wanted:
+                    return k, kname
+            # Otherwise, find first descendant
+            for el in r.iter():
+                if el is r:
+                    continue
+                name = _local(getattr(el, 'tag', None))
+                if name in wanted:
+                    return el, name
+            return None, None
+
+        node, name = _find_node(root)
+        if node is None or name is None:
+            # No recognizable tags: fallback to single with trimmed original
+            return "single", [cleaned.strip()]
+
+        if name == "translation":
+            return "single", [((node.text or "").strip())]
+
+        # name == 'translations'
+        out: List[str] = []
+        accept = {"seg", "s", "item", "line"}
+        for child in list(node):
+            if _local(child.tag) in accept:
+                out.append((child.text or "").strip())
+        return "multi", out
     except Exception:
-        pass
-    # fallback: treat as single chunk
-    return 'single', [xml_text.strip()]
+        # Not XML — treat the cleaned text as a single translation
+        return "single", [cleaned.strip()]
 
 
 def _assemble_prev_messages(db: Session, user: User, text_id: Optional[int]) -> Optional[List[Dict[str, str]]]:
@@ -1479,6 +1630,56 @@ def get_translations(text_id: int, unit: Literal["sentence", "paragraph", "text"
         for r in rows
     ]
     return {"unit": unit, "target_lang": target_lang, "items": items}
+
+
+class MarkReadIn(BaseModel):
+    read: bool
+
+
+@app.get("/reading/{text_id}/lookups")
+def get_reading_lookups(text_id: int, target_lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    rt = db.get(ReadingText, text_id)
+    if not rt or rt.user_id != user.id:
+        raise HTTPException(404, "reading text not found")
+    rows = (
+        db.query(ReadingLookup)
+        .filter(
+            ReadingLookup.user_id == user.id,
+            ReadingLookup.text_id == text_id,
+            ReadingLookup.target_lang == target_lang,
+        )
+        .order_by(ReadingLookup.span_start.asc())
+        .all()
+    )
+    return [
+        {
+            "start": r.span_start,
+            "end": r.span_end,
+            "surface": r.surface,
+            "lemma": r.lemma,
+            "pos": r.pos,
+            "translations": r.translations,
+        }
+        for r in rows
+    ]
+
+
+@app.post("/reading/{text_id}/mark_read")
+def mark_reading(text_id: int, payload: MarkReadIn, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    rt = db.get(ReadingText, text_id)
+    if not rt or rt.user_id != user.id:
+        raise HTTPException(404, "reading text not found")
+    now = datetime.utcnow()
+    if payload.read:
+        rt.is_read = True
+        rt.read_at = now
+    else:
+        rt.is_read = False
+        rt.read_at = None
+    db.commit()
+    return {"ok": True, "is_read": rt.is_read, "read_at": (rt.read_at.isoformat() if rt.read_at else None)}
 
 
 # ---- UI shell mounting (header/footer/templates) ----
