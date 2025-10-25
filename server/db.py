@@ -78,6 +78,12 @@ def _run_migrations() -> None:
             # profiles: preferred_script (for Chinese)
             if not has_column("profiles", "preferred_script"):
                 conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN preferred_script VARCHAR(8)")
+            # profiles: target_lang
+            if not has_column("profiles", "target_lang"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN target_lang VARCHAR(16) DEFAULT 'en'")
+            # profiles: settings (JSON for flexible preferences)
+            if not has_column("profiles", "settings"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN settings TEXT DEFAULT '{}'")  # SQLite doesn't support JSON type natively
 
             # user_lexemes: importance, importance_var
             if not has_column("user_lexemes", "importance"):
@@ -110,6 +116,10 @@ def _run_migrations() -> None:
                 pass
             try:
                 conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_user_lexemes_due ON user_lexemes(profile_id, next_due_at)")
+            except Exception:
+                pass
+            try:
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_ul_user_profile ON user_lexemes(user_id, profile_id)")
             except Exception:
                 pass
             # translation_logs: response text (to support conversation continuation)

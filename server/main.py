@@ -8,6 +8,7 @@ from collections import deque, defaultdict
 import math
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Query, Header
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -20,7 +21,11 @@ from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
 from .db import get_db, init_db, SessionLocal, DB_PATH
-from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel, ReadingLookup, LLMRequestLog
+from .deps import get_current_account as _get_current_account, require_tier
+from .api.profile import router as profile_router
+from .api.wordlists import router as wordlists_router
+from arcadia_auth import Account
+from .models import Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel, ReadingLookup, LLMRequestLog
 from .level import update_level_if_stale, update_level_for_profile
 from .level import get_level_summary
 from sqlalchemy.orm import Session
@@ -67,7 +72,6 @@ _SYN_NL_COOLDOWN_DAYS = float(os.getenv("ARC_SRS_SYN_NONLOOK_COOLDOWN_DAYS", "7"
 
 class LookupRequest(BaseModel):
     source_lang: str = Field(..., description="BCP-47 or ISO code, e.g., 'es'")
-    target_lang: str = Field(..., description="BCP-47 or ISO code for output, e.g., 'en'")
     surface: str = Field(..., description="Surface form as clicked in text")
     context: Optional[str] = Field(None, description="Optional sentence context for disambiguation")
     text_id: Optional[int] = Field(None, description="Reading text id for caching")
@@ -75,7 +79,14 @@ class LookupRequest(BaseModel):
     end: Optional[int] = Field(None, description="End offset within text (exclusive)")
 
 
-app = FastAPI(title="Arcadia Lang", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize database once at startup
+    init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan, title="Arcadia Lang", version="0.1.0")
 
 # Allow local dev in browser
 app.add_middleware(
@@ -94,8 +105,6 @@ except Exception:
 
 # Integrate shared auth router from libs/auth
 try:
-    # Ensure DB schema exists before attaching auth routes
-    init_db()
     # Ensure secret is available before using AuthSettings
     _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
     # Use SQLite-backed auth repository from libs/auth (decoupled from app DB)
@@ -112,6 +121,10 @@ try:
     seed_sqlite(str(DB_PATH), table="models", cat=get_default_catalog())
 except Exception:
     pass
+
+# Mount API routers
+app.include_router(profile_router)
+app.include_router(wordlists_router, prefix="/api")
 
 # Simple per-minute rate limit by IP or user tier for heavy endpoints
 # TODO(deploy): tighten rate limits per tier; for local/dev, set effectively unlimited.
@@ -136,9 +149,9 @@ async def _rate_limit(request, call_next):
                 key = f"u:{uid}:{path}"
                 db = SessionLocal()
                 try:
-                    u = db.get(User, int(uid))
-                    if u and u.subscription_tier in _RATE_LIMITS:
-                        tier = u.subscription_tier
+                    account = db.get(Account, int(uid))
+                    if account and account.subscription_tier in _RATE_LIMITS:
+                        tier = account.subscription_tier
                 finally:
                     db.close()
         except Exception:
@@ -205,6 +218,26 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
         return None
 
 
+def _log_llm_request_safe(entry: dict) -> None:
+    """Log LLM request/response using an isolated short-lived DB session."""
+    from .db import SessionLocal as _SessionLocal
+    from .models import LLMRequestLog as _LLMRequestLog
+    s = _SessionLocal()
+    try:
+        s.add(_LLMRequestLog(**entry))
+        s.commit()
+    except Exception:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     try:
         return max(lo, min(hi, float(v)))
@@ -212,7 +245,7 @@ def _clamp(v: float, lo: float, hi: float) -> float:
         return lo
 
 
-def _get_ci_target(db: Session, user: User, lang: str) -> float:
+def _get_ci_target(db: Session, account: Account, lang: str) -> float:
     """Return the user's comprehensible input target (0..1) for the language.
 
     Reads ProfilePref.settings.ci_target when available; otherwise falls back to env default.
@@ -223,7 +256,7 @@ def _get_ci_target(db: Session, user: User, lang: str) -> float:
         default = 0.95
     ci_min = float(os.getenv("ARC_CI_MIN", "0.8"))
     ci_max = float(os.getenv("ARC_CI_MAX", "0.99"))
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
         return _clamp(default, ci_min, ci_max)
     pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
@@ -252,7 +285,7 @@ def _normalize_lemma_for_lang(lang: str, surface: str) -> str:
     return surface.lower()
 
 
-def _estimate_familiar_share(db: Session, user: User, lang: str, text: str) -> float:
+def _estimate_familiar_share(db: Session, account: Account, lang: str, text: str) -> float:
     """Best-effort estimate of familiar token share based on user lexicon and priors.
 
     Uses tokenizer for the language; maps tokens to lemmas; batches DB lookups for Lexeme, UserLexeme, and LexemeInfo.
@@ -293,11 +326,11 @@ def _estimate_familiar_share(db: Session, user: User, lang: str, text: str) -> f
     lemma_to_lx: dict[str, Lexeme] = {lx.lemma: lx for lx in Lx}
     lx_ids = [lx.id for lx in Lx]
     # Profile
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     pid = prof.id if prof else None
     ul_by_id: dict[int, UserLexeme] = {}
     if pid and lx_ids:
-        for ul in db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid, UserLexeme.lexeme_id.in_(lx_ids)).all():
+        for ul in db.query(UserLexeme).filter(UserLexeme.account_id == account.id, UserLexeme.profile_id == pid, UserLexeme.lexeme_id.in_(lx_ids)).all():
             ul_by_id[ul.lexeme_id] = ul
     li_by_id: dict[int, LexemeInfo] = {}
     if lx_ids:
@@ -470,8 +503,8 @@ def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> L
     return lex
 
 
-def _get_or_create_userlexeme(db: Session, user: User, profile: Profile, lexeme: Lexeme) -> UserLexeme:
-    ul = db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == profile.id, UserLexeme.lexeme_id == lexeme.id).first()
+def _get_or_create_userlexeme(db: Session, account: Account, profile: Profile, lexeme: Lexeme) -> UserLexeme:
+    ul = db.query(UserLexeme).filter(UserLexeme.account_id == account.id, UserLexeme.profile_id == profile.id, UserLexeme.lexeme_id == lexeme.id).first()
     if ul:
         return ul
     # Initialize importance from frequency when available
@@ -482,21 +515,21 @@ def _get_or_create_userlexeme(db: Session, user: User, profile: Profile, lexeme:
             imp = min(1.0, 1.0 / (1.0 + li.freq_rank / 500.0))
     except Exception:
         pass
-    ul = UserLexeme(user_id=user.id, profile_id=profile.id, lexeme_id=lexeme.id, importance=imp)
+    ul = UserLexeme(account_id=account.id, profile_id=profile.id, lexeme_id=lexeme.id, importance=imp)
     db.add(ul)
     db.flush()
     return ul
 
 
-def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
+def _srs_click(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     # Pick or create profile for the lang
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
-        prof = Profile(user_id=user.id, lang=lang)
+        prof = Profile(account_id=account.id, lang=lang)
         db.add(prof)
         db.flush()
     lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, user, prof, lex)
+    ul = _get_or_create_userlexeme(db, account, prof, lex)
     # Update Beta and stability
     ul.a_click = (ul.a_click or 0) + 1
     ul.clicks = (ul.clicks or 0) + 1
@@ -506,7 +539,7 @@ def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str
     ul.alpha = float((ul.alpha or 1.0) + _W_CLICK)
     _schedule_next(ul, 0, now)
     # Event row
-    ev = WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
+    ev = WordEvent(ts=now, account_id=account.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
     db.add(ev)
     # Commit happens in caller endpoint
 
@@ -516,6 +549,23 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     engine = _ENGINES.get(req.source_lang)
     if not engine:
         raise HTTPException(status_code=400, detail="language not supported yet")
+
+    # Get user and profile to determine target language
+    user = None
+    target_lang = "en"  # default fallback
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        try:
+            data = decode_token(auth.split(" ", 1)[1], _JWT_SECRET, ["HS256"])  # type: ignore
+            uid = int((data or {}).get("sub")) if data and data.get("sub") is not None else None
+            if uid is not None:
+                account = db.get(Account, uid)
+                if account:
+                    profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.source_lang).first()
+                    if profile and profile.target_lang:
+                        target_lang = profile.target_lang
+        except Exception:
+            pass
 
     # Analyze word (lemma, pos, morph)
     analysis = engine.analyze_word(req.surface, context=req.context)
@@ -528,18 +578,14 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
 
     # If authorized and text_id/start/end provided, try cache
     uid: Optional[int] = None
-    user: Optional[User] = None
     rt: Optional[ReadingText] = None
     try:
         auth = request.headers.get("authorization") or request.headers.get("Authorization")
         if auth and auth.lower().startswith("bearer "):
             data = decode_token(auth.split(" ", 1)[1], _JWT_SECRET, ["HS256"])  # type: ignore
             uid = int((data or {}).get("sub")) if data and data.get("sub") is not None else None
-            if uid is not None:
-                user = db.get(User, uid)
     except Exception:
         uid = None
-        user = None
 
     context_hash = _hash_context(req.context)
     # Best-effort span validation
@@ -558,7 +604,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
                         .filter(
                             ReadingLookup.user_id == user.id,
                             ReadingLookup.text_id == rt.id,
-                            ReadingLookup.target_lang == req.target_lang,
+                            ReadingLookup.target_lang == target_lang,
                             ReadingLookup.span_start == s,
                             ReadingLookup.span_end == e,
                         )
@@ -572,9 +618,9 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
 
     # Compute translations if not from cache
     if translations is None:
-        tr = get_dict_chain().translations(req.source_lang, req.target_lang, lemma)
+        tr = get_dict_chain().translations(req.source_lang, target_lang, lemma)
         if not tr and req.surface != lemma:
-            more = get_dict_chain().translations(req.source_lang, req.target_lang, req.surface)
+            more = get_dict_chain().translations(req.source_lang, target_lang, req.surface)
             if more:
                 tr = more
         translations = tr or []
@@ -586,38 +632,32 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
                 e = int(req.end)
                 if rt.content:
                     e = min(e, len(rt.content))
-                existing = (
-                    db.query(ReadingLookup)
-                    .filter(
-                        ReadingLookup.user_id == user.id,
-                        ReadingLookup.text_id == rt.id,
-                        ReadingLookup.target_lang == req.target_lang,
-                        ReadingLookup.span_start == s,
-                        ReadingLookup.span_end == e,
-                    )
-                    .first()
+                from sqlalchemy.dialects.sqlite import insert
+                from .models import ReadingLookup as RL
+                stmt = insert(RL).values(
+                    user_id=user.id,
+                    text_id=rt.id,
+                    lang=req.source_lang,
+                    target_lang=target_lang,
+                    surface=req.surface,
+                    lemma=lemma,
+                    pos=analysis.get("pos"),
+                    span_start=s,
+                    span_end=e,
+                    context_hash=context_hash,
+                    translations=(translations if isinstance(translations, (dict, list)) else {}),
                 )
-                if not existing:
-                    db.add(ReadingLookup(
-                        user_id=user.id,
-                        text_id=rt.id,
-                        lang=req.source_lang,
-                        target_lang=req.target_lang,
-                        surface=req.surface,
-                        lemma=lemma,
-                        pos=analysis.get("pos"),
-                        span_start=s,
-                        span_end=e,
-                        context_hash=context_hash,
-                        translations=(translations if isinstance(translations, (dict, list)) else {}),
-                    ))
-                    db.flush()
-                else:
-                    existing.surface = req.surface
-                    existing.lemma = lemma
-                    existing.pos = analysis.get("pos")
-                    existing.context_hash = context_hash
-                    existing.translations = translations if isinstance(translations, (dict, list)) else {}
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[RL.user_id, RL.text_id, RL.target_lang, RL.span_start, RL.span_end],
+                    set_={
+                        "surface": stmt.excluded.surface,
+                        "lemma": stmt.excluded.lemma,
+                        "pos": stmt.excluded.pos,
+                        "context_hash": stmt.excluded.context_hash,
+                        "translations": stmt.excluded.translations,
+                    },
+                )
+                db.execute(stmt)
             except Exception:
                 pass
 
@@ -653,10 +693,10 @@ def _get_current_user(request: Request, db: Session = Depends(get_db), authoriza
         user_id = int(data.get("sub"))
     except Exception:
         raise HTTPException(401, "Invalid token")
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(401, "User not found")
-    return user
+    account = db.get(Account, user_id)
+    if not account:
+        raise HTTPException(401, "Account not found")
+    return account
 def _ensure_default_tiers(db: Session) -> None:
     existing = {t.name for t in db.query(SubscriptionTier).all()}
     defaults = [
@@ -678,11 +718,11 @@ def _is_supported_lang(code: str) -> bool:
     return code in _ENGINES
 
 
-def require_tier(allowed: set[str]) -> Callable[[User], User]:
-    def dep(user: User = Depends(_get_current_user)) -> User:
-        if user.subscription_tier not in allowed:
+def require_tier(allowed: set[str]) -> Callable[[Account], Account]:
+    def dep(account: Account = Depends(_get_current_account)) -> Account:
+        if account.subscription_tier not in allowed:
             raise HTTPException(403, "Insufficient subscription tier")
-        return user
+        return account
     return dep
 
 
@@ -699,14 +739,13 @@ class ProfileRequest(BaseModel):
 
 
 @app.post("/me/profile")
-def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     _ensure_default_tiers(db)
     if not _is_supported_lang(req.lang):
         raise HTTPException(400, "Unsupported language code")
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
     if not prof:
-        prof = Profile(user_id=user.id, lang=req.lang)
+        prof = Profile(account_id=account.id, lang=req.lang)
         db.add(prof)
         db.flush()
     if req.subscription_tier:
@@ -714,7 +753,7 @@ def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), user: Use
         tier = db.query(SubscriptionTier).filter(SubscriptionTier.name == req.subscription_tier).first()
         if not tier:
             raise HTTPException(400, "Invalid subscription tier")
-        user.subscription_tier = req.subscription_tier
+        account.subscription_tier = req.subscription_tier
     if req.settings is not None:
         pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
         if not pref:
@@ -736,7 +775,7 @@ def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), user: Use
     if req.level_code is not None:
         prof.level_code = req.level_code
     db.commit()
-    return {"ok": True, "user_id": user.id, "lang": prof.lang, "subscription_tier": user.subscription_tier, "level_value": prof.level_value, "level_var": prof.level_var, "level_code": prof.level_code}
+    return {"ok": True, "account_id": account.id, "lang": prof.lang, "subscription_tier": account.subscription_tier, "level_value": prof.level_value, "level_var": prof.level_var, "level_code": prof.level_code}
 
 
 class ProfileOut(BaseModel):
@@ -750,9 +789,8 @@ class ProfileOut(BaseModel):
 
 
 @app.get("/me/profiles", response_model=List[ProfileOut])
-def list_profiles(db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
-    profiles = db.query(Profile).filter(Profile.user_id == user.id).all()
+def list_profiles(db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    profiles = db.query(Profile).filter(Profile.account_id == account.id).all()
     out: List[ProfileOut] = []
     for p in profiles:
         pref = db.query(ProfilePref).filter(ProfilePref.profile_id == p.id).first()
@@ -762,7 +800,6 @@ def list_profiles(db: Session = Depends(get_db), user: User = Depends(_get_curre
 
 @app.delete("/me/profile")
 def delete_profile(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
     prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
     if not prof:
         raise HTTPException(404, "Profile not found")
@@ -781,7 +818,6 @@ class TierOut(BaseModel):
 
 @app.get("/tiers", response_model=List[TierOut])
 def list_tiers(db: Session = Depends(get_db)):
-    init_db()
     _ensure_default_tiers(db)
     tiers = db.query(SubscriptionTier).order_by(SubscriptionTier.id.asc()).all()
     return [TierOut(name=t.name, description=t.description) for t in tiers]
@@ -792,23 +828,21 @@ class TierSetRequest(BaseModel):
 
 
 @app.get("/me/tier", response_model=TierOut)
-def get_my_tier(db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def get_my_tier(db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     _ensure_default_tiers(db)
-    t = db.query(SubscriptionTier).filter(SubscriptionTier.name == user.subscription_tier).first()
+    t = db.query(SubscriptionTier).filter(SubscriptionTier.name == account.subscription_tier).first()
     if not t:
         t = db.query(SubscriptionTier).first()
     return TierOut(name=t.name, description=t.description if t else None)
 
 
 @app.post("/me/tier", response_model=TierOut)
-def set_my_tier(req: TierSetRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def set_my_tier(req: TierSetRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     _ensure_default_tiers(db)
     t = db.query(SubscriptionTier).filter(SubscriptionTier.name == req.name).first()
     if not t:
         raise HTTPException(400, "Invalid subscription tier")
-    user.subscription_tier = t.name
+    account.subscription_tier = t.name
     db.commit()
     return TierOut(name=t.name, description=t.description)
 
@@ -820,8 +854,8 @@ class MeOut(BaseModel):
 
 
 @app.get("/me", response_model=MeOut)
-def get_me(user: User = Depends(_get_current_user)):
-    return MeOut(id=user.id, email=user.email, subscription_tier=user.subscription_tier)
+def get_me(account: Account = Depends(_get_current_account)):
+    return MeOut(id=account.id, email=account.email, subscription_tier=account.subscription_tier)
 
 
 # ---- UI Theme and Prefs (minimal) ----
@@ -838,11 +872,11 @@ class UIPrefsIn(BaseModel):
     clear: Optional[bool] = None
 
 
-def _get_or_create_profile(db: Session, user: User, lang: str) -> Profile:
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+def _get_or_create_profile(db: Session, account: Account, lang: str) -> Profile:
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if prof:
         return prof
-    prof = Profile(user_id=user.id, lang=lang)
+    prof = Profile(account_id=account.id, lang=lang)
     db.add(prof)
     db.flush()
     return prof
@@ -858,9 +892,9 @@ def _get_pref_row(db: Session, profile_id: int) -> ProfilePref:
 
 
 @app.get("/theme")
-def get_theme(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+def get_theme(lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     # Read-only: do not create profile or prefs on GET
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
         return {"name": None, "vars": {}}
     pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
@@ -870,8 +904,8 @@ def get_theme(lang: str, db: Session = Depends(get_db), user: User = Depends(_ge
 
 
 @app.post("/theme")
-def set_theme(payload: ThemeIn, lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    prof = _get_or_create_profile(db, user, lang)
+def set_theme(payload: ThemeIn, lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    prof = _get_or_create_profile(db, account, lang)
     pref = _get_pref_row(db, prof.id)
     data = dict(pref.data or {})
     if payload.clear:
@@ -889,9 +923,9 @@ def set_theme(payload: ThemeIn, lang: str, db: Session = Depends(get_db), user: 
 
 
 @app.get("/prefs")
-def get_ui_prefs(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+def get_ui_prefs(lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     # Read-only: do not create profile or prefs on GET
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
         return {}
     pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
@@ -900,8 +934,8 @@ def get_ui_prefs(lang: str, db: Session = Depends(get_db), user: User = Depends(
 
 
 @app.post("/prefs")
-def set_ui_prefs(payload: UIPrefsIn, lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    prof = _get_or_create_profile(db, user, lang)
+def set_ui_prefs(payload: UIPrefsIn, lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    prof = _get_or_create_profile(db, account, lang)
     pref = _get_pref_row(db, prof.id)
     data = dict(pref.data or {})
     if payload.clear:
@@ -990,23 +1024,22 @@ class GenRequest(BaseModel):
 
 
 @app.post("/gen/reading")
-def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def gen_reading(req: GenRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     # Preferred script: pick from user's profile when available
     script = None
     if req.lang.startswith("zh"):
-        prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()
+        prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
         if prof and getattr(prof, "preferred_script", None) in ("Hans", "Hant"):
             script = prof.preferred_script
         else:
             script = "Hans"
     # Comprehensible Input target (0..1)
-    ci_target = _get_ci_target(db, user, req.lang)
+    ci_target = _get_ci_target(db, account, req.lang)
     # Derive new word ratio from target (more familiar → fewer new words)
     base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
     # Auto-pick words if not provided
-    words = req.include_words or pick_words(db, user, req.lang, count=12, new_ratio=base_new_ratio)
-    level_hint = compose_level_hint(db, user, req.lang)
+    words = req.include_words or pick_words(db, account, req.lang, count=12, new_ratio=base_new_ratio)
+    level_hint = compose_level_hint(db, account, req.lang)
     # Per-language unit and default length
     unit = "chars" if req.lang.startswith("zh") else "words"
     approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)
@@ -1021,23 +1054,19 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
             base_url=req.base_url,
         )
     except Exception as e:
-        # Persist request/error for debugging
-        try:
-            db.add(LLMRequestLog(
-                user_id=user.id,
-                text_id=None,
-                kind="reading",
-                provider=(req.provider or None),
-                model=(req.model or None),
-                base_url=(req.base_url or None),
-                status="error",
-                request={"messages": messages},
-                response=None,
-                error=str(e),
-            ))
-            db.commit()
-        except Exception:
-            db.rollback()
+        # Persist request/error for debugging (isolated session)
+        _log_llm_request_safe({
+            "account_id": account.id,
+            "text_id": None,
+            "kind": "reading",
+            "provider": (req.provider or None),
+            "model": (req.model or None),
+            "base_url": (req.base_url or None),
+            "status": "error",
+            "request": {"messages": messages},
+            "response": None,
+            "error": str(e),
+        })
         # Graceful error: return a sanitized message without stack traces
         import logging
         logging.getLogger("uvicorn.error").warning("LLM generation failed: %s", e)
@@ -1055,34 +1084,30 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
         except Exception:
             retry = ""
         if not retry or retry.strip() == "":
-            # Log empty output failure
-            try:
-                db.add(LLMRequestLog(
-                    user_id=user.id,
-                    text_id=None,
-                    kind="reading",
-                    provider=(req.provider or None),
-                    model=(req.model or None),
-                    base_url=(req.base_url or None),
-                    status="error",
-                    request={"messages": messages, "note": "empty output then retry failed"},
-                    response=None,
-                    error="empty output on both providers",
-                ))
-                db.commit()
-            except Exception:
-                db.rollback()
+            # Log empty output failure (isolated session)
+            _log_llm_request_safe({
+                "account_id": account.id,
+                "text_id": None,
+                "kind": "reading",
+                "provider": (req.provider or None),
+                "model": (req.model or None),
+                "base_url": (req.base_url or None),
+                "status": "error",
+                "request": {"messages": messages, "note": "empty output then retry failed"},
+                "response": None,
+                "error": "empty output on both providers",
+            })
             raise HTTPException(status_code=503, detail="No LLM backend available")
         text = retry
     # Best-effort CI evaluation and single retry if too unfamiliar
     try:
-        share = _estimate_familiar_share(db, user, req.lang, text)
+        share = _estimate_familiar_share(db, account, req.lang, text)
     except Exception:
         share = None  # ignore estimator errors
     if isinstance(share, float) and share < (ci_target - 0.03):
         # Retry once with stronger bias towards known words
         try:
-            words2 = req.include_words or pick_words(db, user, req.lang, count=12, new_ratio=max(0.02, base_new_ratio * 0.5))
+            words2 = req.include_words or pick_words(db, account, req.lang, count=12, new_ratio=max(0.02, base_new_ratio * 0.5))
             spec2 = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words2, script=script, ci_target=ci_target)
             messages2 = build_reading_prompt(spec2)
             retry_text = chat_complete(messages2, provider=req.provider, model=req.model, base_url=req.base_url)
@@ -1095,25 +1120,25 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
 
     # Save text and generation log (unlimited tier check placeholder)
     source = "llm"
-    rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source=source)
+    rt = ReadingText(account_id=account.id, lang=req.lang, content=text, source=source)
     db.add(rt)
     db.flush()
-    pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == req.lang).scalar()
-    gl = GenerationLog(user_id=user.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages, "provider": (req.provider or None)}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
+    pid = db.query(Profile.id).filter(Profile.account_id == account.id, Profile.lang == req.lang).scalar()
+    gl = GenerationLog(account_id=account.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages, "provider": (req.provider or None)}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
     db.add(gl)
     try:
-        db.add(LLMRequestLog(
-            user_id=user.id,
-            text_id=rt.id,
-            kind="reading",
-            provider=(req.provider or None),
-            model=(req.model or None),
-            base_url=(req.base_url or None),
-            status="ok",
-            request={"messages": messages},
-            response=text,
-            error=None,
-        ))
+        _log_llm_request_safe({
+            "account_id": account.id,
+            "text_id": rt.id,
+            "kind": "reading",
+            "provider": (req.provider or None),
+            "model": (req.model or None),
+            "base_url": (req.base_url or None),
+            "status": "ok",
+            "request": {"messages": messages},
+            "response": text,
+            "error": None,
+        })
     except Exception:
         pass
     db.commit()
@@ -1122,9 +1147,8 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
 
 # -------- Urgent words (selection only) --------
 @app.get("/srs/urgent")
-def srs_urgent(lang: str, total: int = 12, new_ratio: float = 0.3, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
-    items = urgent_words_detailed(db, user, lang, total=total, new_ratio=new_ratio)
+def srs_urgent(lang: str, total: int = 12, new_ratio: float = 0.3, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    items = urgent_words_detailed(db, account, lang, total=total, new_ratio=new_ratio)
     return {"words": [it["form"] for it in items], "items": items}
 
 
@@ -1145,8 +1169,7 @@ class LexemeInfoUpsertRequest(BaseModel):
 
 
 @app.post("/dict/lexeme_info/upsert")
-def upsert_lexeme_info(req: LexemeInfoUpsertRequest, db: Session = Depends(get_db), _admin: User = Depends(require_tier({"admin"}))):
-    init_db()
+def upsert_lexeme_info(req: LexemeInfoUpsertRequest, db: Session = Depends(get_db), _admin: Account = Depends(require_tier({"admin"}))):
     updated = 0
     for it in req.items:
         lex = _resolve_lexeme(db, it.lang, it.lemma, it.pos)
@@ -1171,7 +1194,6 @@ def upsert_lexeme_info(req: LexemeInfoUpsertRequest, db: Session = Depends(get_d
 
 @app.get("/dict/lexeme_info")
 def get_lexeme_info(lang: str, lemma: str, pos: Optional[str] = None, db: Session = Depends(get_db)):
-    init_db()
     lex = db.query(Lexeme).filter(Lexeme.lang == lang, Lexeme.lemma == lemma, Lexeme.pos == pos).first()
     if not lex:
         return {}
@@ -1195,19 +1217,19 @@ class ExposuresRequest(BaseModel):
     text_id: Optional[int] = None
 
 
-def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+def _srs_exposure(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
-        prof = Profile(user_id=user.id, lang=lang)
+        prof = Profile(account_id=account.id, lang=lang)
         db.add(prof)
         db.flush()
     lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, user, prof, lex)
+    ul = _get_or_create_userlexeme(db, account, prof, lex)
     now = datetime.utcnow()
     # determine exposure weight with gating
     # 1) session collapse: skip additional weight if last exposure was recent
     recent_ev = db.query(WordEvent).filter(
-        WordEvent.user_id == user.id,
+        WordEvent.account_id == account.id,
         WordEvent.profile_id == prof.id,
         WordEvent.lexeme_id == lex.id,
         WordEvent.event_type == "exposure",
@@ -1249,7 +1271,7 @@ def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[
             db.add(UserLexemeContext(user_lexeme_id=ul.id, context_hash=context_hash))
             ul.distinct_texts = (ul.distinct_texts or 0) + 1
     # Event
-    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
+    db.add(WordEvent(ts=now, account_id=account.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
 
     # Synthetic nonlookup promotion (conservative)
     if _SYN_NL_ENABLE:
@@ -1259,21 +1281,20 @@ def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[
                 if days_seen >= _SYN_NL_MIN_DAYS:
                     # cooldown: no recent nonlookup
                     recent_nl = db.query(WordEvent).filter(
-                        WordEvent.user_id == user.id,
+                        WordEvent.account_id == account.id,
                         WordEvent.profile_id == prof.id,
                         WordEvent.lexeme_id == lex.id,
                         WordEvent.event_type == "nonlookup",
                         WordEvent.ts >= (now - timedelta(days=_SYN_NL_COOLDOWN_DAYS))
                     ).first()
                     if not recent_nl:
-                        _srs_nonlookup(db, user, lang, lemma, pos, surface, context_hash, text_id)
+                        _srs_nonlookup(db, account, lang, lemma, pos, surface, context_hash, text_id)
         except Exception:
             pass
 
 
 @app.post("/srs/event/exposures")
-def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     count = 0
     for it in req.items:
         lemma = it.lemma
@@ -1286,11 +1307,11 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
                 pos = pos or analysis.get("pos")
         if not lemma:
             continue
-        _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
+        _srs_exposure(db, account, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
     # Update bulk level estimate if stale (best-effort)
     try:
-        update_level_if_stale(db, user.id, req.lang)
+        update_level_if_stale(db, account.id, req.lang)
     except Exception:
         pass
     db.commit()
@@ -1303,15 +1324,15 @@ class NonLookupRequest(BaseModel):
     text_id: Optional[int] = None
 
 
-def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
+def _srs_nonlookup(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     # ensure profile and lexeme
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
-        prof = Profile(user_id=user.id, lang=lang)
+        prof = Profile(account_id=account.id, lang=lang)
         db.add(prof)
         db.flush()
     lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, user, prof, lex)
+    ul = _get_or_create_userlexeme(db, account, prof, lex)
     # explicit non-click success: add strong nonlookup weight and schedule
     now = datetime.utcnow()
     _decay_posterior(ul, now, _HL_NONLOOK_D)
@@ -1319,12 +1340,11 @@ def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional
     ul.beta = float((ul.beta or 9.0) + _W_NONLOOK)
     ul.last_seen_at = now
     _schedule_next(ul, 3, now)
-    db.add(WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
+    db.add(WordEvent(ts=now, account_id=account.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
 
 
 @app.post("/srs/event/nonlookup")
-def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     count = 0
     for it in req.items:
         lemma = it.lemma
@@ -1337,10 +1357,10 @@ def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), user: Us
                 pos = pos or analysis.get("pos")
         if not lemma:
             continue
-        _srs_nonlookup(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
+        _srs_nonlookup(db, account, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
     try:
-        update_level_if_stale(db, user.id, req.lang)
+        update_level_if_stale(db, account.id, req.lang)
     except Exception:
         pass
     db.commit()
@@ -1357,8 +1377,7 @@ class ClickRequest(BaseModel):
 
 
 @app.post("/srs/event/click")
-def srs_click(req: ClickRequest, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def srs_click(req: ClickRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     lemma = req.lemma
     pos = req.pos
     if not lemma and req.surface:
@@ -1369,16 +1388,16 @@ def srs_click(req: ClickRequest, db: Session = Depends(get_db), user: User = Dep
             pos = pos or analysis.get("pos")
     if not lemma:
         raise HTTPException(400, "lemma or surface required")
-    _srs_click(db, user, req.lang, lemma, pos, req.surface, _hash_context(req.context), req.text_id)
+    _srs_click(db, account, req.lang, lemma, pos, req.surface, _hash_context(req.context), req.text_id)
     try:
-        update_level_if_stale(db, user.id, req.lang)
+        update_level_if_stale(db, account.id, req.lang)
         db.commit()
     except Exception:
         pass
     # Return derived metrics
     lex = _resolve_lexeme(db, req.lang, lemma, pos)
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == req.lang).first()
-    ul = db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == (prof.id if prof else -1), UserLexeme.lexeme_id == lex.id).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
+    ul = db.query(UserLexeme).filter(UserLexeme.account_id == account.id, UserLexeme.profile_id == (prof.id if prof else -1), UserLexeme.lexeme_id == lex.id).first()
     if not ul:
         return {"ok": True}
     a = ul.a_click or 0
@@ -1410,12 +1429,11 @@ def get_srs_words(
     max_D: Optional[int] = None,
     limit: int = 50,
     db: Session = Depends(get_db),
-    user: User = Depends(_get_current_user),
+    account: Account = Depends(_get_current_account),
 ):
-    init_db()
     q = db.query(UserLexeme, Lexeme, LexemeInfo).join(Lexeme, UserLexeme.lexeme_id == Lexeme.id).outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id).filter(
-        UserLexeme.user_id == user.id,
-        UserLexeme.profile_id == db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == lang).scalar_subquery(),
+        UserLexeme.account_id == account.id,
+        UserLexeme.profile_id == db.query(Profile.id).filter(Profile.account_id == account.id, Profile.lang == lang).scalar_subquery(),
     )
     # Push simple filters into SQL
     if min_S is not None:
@@ -1462,12 +1480,11 @@ class SrsStatsOut(BaseModel):
 
 
 @app.get("/srs/stats", response_model=SrsStatsOut)
-def get_srs_stats(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
-    pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == lang).scalar()
+def get_srs_stats(lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    pid = db.query(Profile.id).filter(Profile.account_id == account.id, Profile.lang == lang).scalar()
     if not pid:
         return SrsStatsOut(total=0, by_p={}, by_S={}, by_D={})
-    rows = db.query(UserLexeme, Lexeme).join(Lexeme, UserLexeme.lexeme_id == Lexeme.id).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid).all()
+    rows = db.query(UserLexeme, Lexeme).join(Lexeme, UserLexeme.lexeme_id == Lexeme.id).filter(UserLexeme.account_id == account.id, UserLexeme.profile_id == pid).all()
     def bucketize(val: float, bounds: List[float]):
         for i, b in enumerate(bounds):
             if val < b: return f"<{b}"
@@ -1500,15 +1517,14 @@ class LevelOut(BaseModel):
 
 
 @app.get("/srs/level", response_model=LevelOut)
-def get_srs_level(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def get_srs_level(lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     # best-effort freshness
     try:
-        update_level_if_stale(db, user.id, lang)
+        update_level_if_stale(db, account.id, lang)
         db.commit()
     except Exception:
         pass
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     if not prof:
         raise HTTPException(404, "profile not found")
     summ = get_level_summary(db, prof)
@@ -1666,7 +1682,7 @@ def _parse_xml_translations(xml_text: str) -> Tuple[str, List[str]]:
         return "single", [cleaned.strip()]
 
 
-def _assemble_prev_messages(db: Session, user: User, text_id: Optional[int]) -> Optional[List[Dict[str, str]]]:
+def _assemble_prev_messages(db: Session, account: Account, text_id: Optional[int]) -> Optional[List[Dict[str, str]]]:
     if not text_id:
         return None
     msgs: List[Dict[str, str]] = []
@@ -1706,14 +1722,17 @@ def _assemble_prev_messages(db: Session, user: User, text_id: Optional[int]) -> 
 
 
 @app.post("/translate")
-def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def translate(payload: TranslateIn, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    # Get target language from profile, fallback to payload or default
+    profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == payload.lang).first()
+    target_lang = payload.target_lang or (profile.target_lang if profile else "en")
+
     # Resolve source content
     raw: Optional[str] = payload.text
     base_offset = 0
     if raw is None and payload.text_id is not None:
         rt = db.get(ReadingText, payload.text_id)
-        if not rt or rt.user_id != user.id:
+        if not rt or rt.account_id != account.id:
             raise HTTPException(404, "reading text not found")
         raw = rt.content
         if payload.start is not None or payload.end is not None:
@@ -1742,11 +1761,11 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
     # Previous conversation (optional)
     prev_msgs: Optional[List[Dict[str, str]]] = None
     if payload.continue_with_reading and payload.text_id:
-        prev_msgs = _assemble_prev_messages(db, user, payload.text_id)
+        prev_msgs = _assemble_prev_messages(db, account, payload.text_id)
 
     spec = TranslationSpec(
         lang=payload.lang,
-        target_lang=(payload.target_lang or "en"),
+        target_lang=target_lang,
         unit=unit,
         content=(segments if len(segments) > 1 else segments[0]),
         continue_with_reading=bool(payload.continue_with_reading),
@@ -1764,22 +1783,18 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
                 temperature=0.3,
             )
         except Exception as e:
-            try:
-                db.add(LLMRequestLog(
-                    user_id=user.id,
-                    text_id=(payload.text_id or None),
-                    kind="translation",
-                    provider=(payload.provider or None),
-                    model=(payload.model or None),
-                    base_url=(payload.base_url or None),
-                    status="error",
-                    request={"messages": msgs},
-                    response=None,
-                    error=str(e),
-                ))
-                db.commit()
-            except Exception:
-                db.rollback()
+            _log_llm_request_safe({
+                "account_id": account.id,
+                "text_id": (payload.text_id or None),
+                "kind": "translation",
+                "provider": (payload.provider or None),
+                "model": (payload.model or None),
+                "base_url": (payload.base_url or None),
+                "status": "error",
+                "request": {"messages": msgs},
+                "response": None,
+                "error": str(e),
+            })
             raise HTTPException(status_code=503, detail="No LLM backend available")
 
     translations: List[str]
@@ -1792,7 +1807,7 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
             # retry per-segment in XML mode
             items_parsed = []
             for seg in segments:
-                m = build_translation_prompt(TranslationSpec(lang=spec.lang, target_lang=spec.target_lang, unit="sentence", content=seg), prev_messages=prev_msgs)
+                m = build_translation_prompt(TranslationSpec(lang=spec.lang, target_lang=target_lang, unit="sentence", content=seg), prev_messages=prev_msgs)
                 r = _call_llm(m)
                 raw_response += "\n" + r
                 _, one = _parse_xml_translations(r)
@@ -1805,53 +1820,61 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
         e0 = base_offset + span[1]
         items.append({"start": s0, "end": e0, "source": src, "translation": tr})
 
-    # Log request/response for debugging
+    # Log request/response for debugging (isolated session)
     try:
-        db.add(LLMRequestLog(
-            user_id=user.id,
-            text_id=(payload.text_id or None),
-            kind="translation",
-            provider=(payload.provider or None),
-            model=(payload.model or None),
-            base_url=(payload.base_url or None),
-            status="ok",
-            request={"messages": messages},
-            response=raw_response,
-            error=None,
-        ))
-        db.commit()
+        _log_llm_request_safe({
+            "account_id": account.id,
+            "text_id": (payload.text_id or None),
+            "kind": "translation",
+            "provider": (payload.provider or None),
+            "model": (payload.model or None),
+            "base_url": (payload.base_url or None),
+            "status": "ok",
+            "request": {"messages": messages},
+            "response": raw_response,
+            "error": None,
+        })
     except Exception:
-        db.rollback()
+        pass
 
     # Persist when translating a stored reading
     if payload.text_id is not None:
-        from sqlalchemy.exc import IntegrityError  # local import
+        from sqlalchemy.dialects.sqlite import insert
+        from .models import ReadingTextTranslation as RTT
         for idx, (span, src, tr) in enumerate(zip(spans, segments, translations)):
-            row = ReadingTextTranslation(
-                user_id=user.id,
+            seg_idx = (idx if unit != "text" else None)
+            s = base_offset + span[0]
+            e = base_offset + span[1]
+            stmt = insert(RTT).values(
+                account_id=account.id,
                 text_id=payload.text_id,
                 unit=unit,
-                target_lang=(payload.target_lang or "en"),
-                segment_index=(idx if unit != "text" else None),
-                span_start=(base_offset + span[0]),
-                span_end=(base_offset + span[1]),
+                target_lang=target_lang,
+                segment_index=seg_idx,
+                span_start=s,
+                span_end=e,
                 source_text=src,
                 translated_text=tr,
                 provider=(payload.provider or "openrouter"),
                 model=payload.model,
             )
-            try:
-                db.add(row)
-                db.flush()
-            except IntegrityError:
-                db.rollback()
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[RTT.account_id, RTT.text_id, RTT.target_lang, RTT.unit, RTT.segment_index, RTT.span_start, RTT.span_end],
+                set_={
+                    "translated_text": stmt.excluded.translated_text,
+                    "source_text": stmt.excluded.source_text,
+                    "provider": stmt.excluded.provider,
+                    "model": stmt.excluded.model,
+                },
+            )
+            db.execute(stmt)
         # minimal log
         try:
             db.add(TranslationLog(
-                user_id=user.id,
+                account_id=account.id,
                 text_id=payload.text_id,
                 unit=unit,
-                target_lang=(payload.target_lang or "en"),
+                target_lang=target_lang,
                 provider=(payload.provider or "openrouter"),
                 model=payload.model,
                 prompt={"messages": messages},
@@ -1864,7 +1887,7 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
 
     return {
         "unit": unit,
-        "target_lang": (payload.target_lang or "en"),
+        "target_lang": target_lang,
         "items": items,
         "provider": (payload.provider or "openrouter"),
         "model": payload.model,
@@ -1872,16 +1895,21 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
 
 
 @app.get("/reading/{text_id}/translations")
-def get_translations(text_id: int, unit: Literal["sentence", "paragraph", "text"], target_lang: str = "en", db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def get_translations(text_id: int, unit: Literal["sentence", "paragraph", "text"], target_lang: Optional[str] = None, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.user_id != user.id:
+    if not rt or rt.account_id != account.id:
         raise HTTPException(404, "reading text not found")
+
+    # Get target language from profile if not provided
+    if target_lang is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == rt.lang).first()
+        target_lang = profile.target_lang if profile else "en"
+
     rows = (
         db.query(ReadingTextTranslation)
         .filter(
             ReadingTextTranslation.text_id == text_id,
-            ReadingTextTranslation.user_id == user.id,
+            ReadingTextTranslation.account_id == account.id,
             ReadingTextTranslation.unit == unit,
             ReadingTextTranslation.target_lang == target_lang,
         )
@@ -1905,15 +1933,20 @@ class MarkReadIn(BaseModel):
 
 
 @app.get("/reading/{text_id}/lookups")
-def get_reading_lookups(text_id: int, target_lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def get_reading_lookups(text_id: int, target_lang: Optional[str] = None, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.user_id != user.id:
+    if not rt or rt.account_id != account.id:
         raise HTTPException(404, "reading text not found")
+
+    # Get target language from profile if not provided
+    if target_lang is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == rt.lang).first()
+        target_lang = profile.target_lang if profile else "en"
+
     rows = (
         db.query(ReadingLookup)
         .filter(
-            ReadingLookup.user_id == user.id,
+            ReadingLookup.account_id == account.id,
             ReadingLookup.text_id == text_id,
             ReadingLookup.target_lang == target_lang,
         )
@@ -1934,10 +1967,9 @@ def get_reading_lookups(text_id: int, target_lang: str, db: Session = Depends(ge
 
 
 @app.post("/reading/{text_id}/mark_read")
-def mark_reading(text_id: int, payload: MarkReadIn, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def mark_reading(text_id: int, payload: MarkReadIn, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.user_id != user.id:
+    if not rt or rt.account_id != account.id:
         raise HTTPException(404, "reading text not found")
     now = datetime.utcnow()
     if payload.read:
@@ -1951,10 +1983,9 @@ def mark_reading(text_id: int, payload: MarkReadIn, db: Session = Depends(get_db
 
 
 @app.get("/reading/{text_id}/meta")
-def get_reading_meta(text_id: int, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    init_db()
+def get_reading_meta(text_id: int, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.user_id != user.id:
+    if not rt or rt.account_id != account.id:
         raise HTTPException(404, "reading text not found")
     return {
         "text_id": rt.id,
@@ -1969,10 +2000,51 @@ def get_reading_meta(text_id: int, db: Session = Depends(get_db), user: User = D
 try:
     # Optional UI libraries from libs/
     from arcadia_ui_style import ensure_templates  # type: ignore
-    from arcadia_ui_core import router as ui_router, attach_ui, mount_ui_static  # type: ignore
+    from arcadia_ui_core import router as ui_router, attach_ui, mount_ui_static, ContextMenuRegistry, MenuItem  # type: ignore
     tdir = ensure_templates(Path(__file__).resolve().parent)
     templates = Jinja2Templates(directory=tdir)
-    # Attach UI state and mount static assets
+
+    # Create context menus for word interactions
+    context_menu_registry = ContextMenuRegistry()
+
+    # Context menu for word items
+    def word_context_menu(req: ContextMenuRequest) -> List[Dict[str, Any]]:
+        lang = req.dataset.get('lang', 'zh')
+        lemma = req.dataset.get('lemma', '')
+        pos = req.dataset.get('pos', '')
+
+        return [
+            MenuItem(
+                label="Mark as known",
+                hx={
+                    "post": f"/srs/event/nonlookup",
+                    "vals": f"{{'lang': '{lang}', 'items': [{{'lemma': '{lemma}', 'pos': '{pos}'}}]}}"
+                }
+            ),
+            MenuItem(
+                label="Look up word",
+                href=f"/api/lookup?lang={lang}&lemma={lemma}"
+            ),
+            MenuItem(divider=True),
+            MenuItem(
+                label="Add to wordlist",
+                hx={
+                    "post": f"/api/wordlists/add",
+                    "vals": f"{{'lang': '{lang}', 'lemma': '{lemma}'}}"
+                }
+            ),
+        ]
+
+    context_menu_registry.add("word", word_context_menu)
+
+    # Navigation items for header
+    nav_items = [
+        {"label": "Words", "href": "/words", "active": True},
+        {"label": "Stats", "href": "/stats"},
+        {"label": "Settings", "href": "/settings"},
+    ]
+
+    # Attach UI state and mount static assets with enhanced features
     attach_ui(
         app,
         templates,
@@ -1980,6 +2052,8 @@ try:
         brand_home_url="/",
         brand_name="Arcadia Lang",
         brand_tag="",
+        nav_items=nav_items,
+        context_menus=context_menu_registry,
     )
     mount_ui_static(app)
     _templates_env = templates  # share env for project pages
@@ -1990,30 +2064,55 @@ except Exception:
 
 # Words browser page (server-rendered HTML using shared header/footer)
 @app.get("/words", response_class=HTMLResponse)
-def words_page(request: Request, lang: Optional[str] = None, user: User = Depends(_get_current_user)):
-    # Render plain template; client fetches data via /srs/words
+def words_page(request: Request, lang: Optional[str] = None, account: Account = Depends(_get_current_account)):
+    # Use render_page utility for consistent UI layout
+    from arcadia_ui_core import render_page
     t = _templates()
-    return t.TemplateResponse("words.html", {"request": request, "lang": lang or "es"})
+    return render_page(
+        request,
+        templates,
+        content_template="words.html",
+        title="My Words",
+        context={"lang": lang or "es"}
+    )
 
 # Login/Signup pages are provided by arcadia_ui_core router
 
 # Placeholder pages for account menu
 @app.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request, user: User = Depends(_get_current_user)):
+def profile_page(request: Request, account: Account = Depends(_get_current_account)):
+    from arcadia_ui_core import render_page
     t = _templates()
-    return t.TemplateResponse("profile.html", {"request": request})
+    return render_page(
+        request,
+        templates,
+        content_template="profile.html",
+        title="Profile"
+    )
 
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, user: User = Depends(_get_current_user)):
+def settings_page(request: Request, account: Account = Depends(_get_current_account)):
+    from arcadia_ui_core import render_page
     t = _templates()
-    return t.TemplateResponse("settings.html", {"request": request})
+    return render_page(
+        request,
+        templates,
+        content_template="settings.html",
+        title="Settings"
+    )
 
 
 @app.get("/stats", response_class=HTMLResponse)
-def stats_page(request: Request, user: User = Depends(_get_current_user)):
+def stats_page(request: Request, account: Account = Depends(_get_current_account)):
+    from arcadia_ui_core import render_page
     t = _templates()
-    return t.TemplateResponse("stats.html", {"request": request})
+    return render_page(
+        request,
+        templates,
+        content_template="stats.html",
+        title="Statistics"
+    )
 
 
 @app.get("/logout")

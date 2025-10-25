@@ -14,7 +14,7 @@ from server.models import Lexeme, LexemeInfo, LexemeVariant
 RAW_URL = "https://raw.githubusercontent.com/ivankra/hsk30/master/hsk30.csv"
 
 
-def fetch_csv(url: string) -> str:
+def fetch_csv(url: str) -> str:
     req = Request(url, headers={"User-Agent": "Arcadia-Lang/0.1 hsk-import"})
     with urlopen(req, timeout=60) as r:
         return r.read().decode("utf-8", errors="ignore")
