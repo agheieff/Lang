@@ -298,3 +298,23 @@ class LLMModel(Base):
     limits: Mapped[dict] = mapped_column(JSON, default=dict)
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LLMRequestLog(Base):
+    __tablename__ = "llm_request_logs"
+    __table_args__ = (
+        Index("ix_llmrl_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True, default=None)
+    text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
+    kind: Mapped[str] = mapped_column(String(32))  # reading|translation|other
+    provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    base_url: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    status: Mapped[str] = mapped_column(String(16), default="error")  # ok|error
+    request: Mapped[dict] = mapped_column(JSON, default=dict)  # typically {messages: [...]} and params
+    response: Mapped[Optional[str]] = mapped_column(String, default=None)
+    error: Mapped[Optional[str]] = mapped_column(String, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

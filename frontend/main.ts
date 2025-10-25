@@ -124,6 +124,25 @@ function renderText() {
   outEl.innerHTML = '';
   clearPopover();
   const lang = srcSel.value;
+  // Sync "Text read" button visibility from DB state when possible
+  const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
+  (async () => {
+    try {
+      const text_id = localStorage.getItem('arcadia_last_text_id');
+      if (textReadBtn && text_id) {
+        const res = await api(`/reading/${Number(text_id)}/meta`);
+        if (res.ok) {
+          const meta = await res.json();
+          textReadBtn.style.display = meta.is_read ? 'none' : '';
+        } else {
+          // If meta not available, keep button visible as default
+          textReadBtn.style.display = '';
+        }
+      }
+    } catch {
+      if (textReadBtn) textReadBtn.style.display = '';
+    }
+  })();
   // Collect exposures after a small debounce
   const exposures: { lemma?: string; surface?: string }[] = [];
   if (lang.startsWith('zh')) {
@@ -409,6 +428,9 @@ genBtn.addEventListener('click', async () => {
     if (data.text_id) localStorage.setItem('arcadia_last_text_id', String(data.text_id));
     localStorage.setItem('arcadia_text', text);
     renderText();
+    // After new text, ensure the read button is shown (new texts are unread)
+    const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
+    if (textReadBtn) textReadBtn.style.display = '';
     showMsg(true, 'Generated text inserted');
   } catch (e:any) {
     showMsg(false, `Generation error: ${String(e)}`);
@@ -481,14 +503,21 @@ document.querySelectorAll('.set-nav').forEach(btn => {
 });
 
 // Text read button: recompute word scores for current text
-const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
-textReadBtn?.addEventListener('click', async () => {
+const textReadBtn2 = document.getElementById('text-read') as HTMLButtonElement | null;
+textReadBtn2?.addEventListener('click', async () => {
   const lang = srcSel.value;
   const text = (localStorage.getItem('arcadia_text') || '').toString();
   if (!text.trim()) return;
   // Re-send exposures for all tokens to recalc scores
   try {
-    textReadBtn.disabled = true;
+    textReadBtn2.disabled = true;
+    // Mark as read in DB if we have a text_id
+    try {
+      const text_id = localStorage.getItem('arcadia_last_text_id');
+      if (text_id) {
+        await api(`/reading/${Number(text_id)}/mark_read`, { method: 'POST', body: JSON.stringify({ read: true }) });
+      }
+    } catch { /* ignore */ }
     if (lang.startsWith('zh')) {
       const data = await parse(lang, text);
       const surfaces: string[] = [];
@@ -503,7 +532,7 @@ textReadBtn?.addEventListener('click', async () => {
     }
     showMsg(true, 'Recalculated word scores for this text');
     // Hide button after confirmed recalculation
-    textReadBtn.style.display = 'none';
+    textReadBtn2.style.display = 'none';
   } catch (e:any) {
     showMsg(false, 'Failed to recalc');
   }

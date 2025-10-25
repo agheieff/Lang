@@ -20,7 +20,7 @@ from Lang.parsing.morph_format import format_morph_label
 from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
 from Lang.parsing.dicts.cedict import CedictProvider
 from .db import get_db, init_db, SessionLocal, DB_PATH
-from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel, ReadingLookup
+from .models import User, Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel, ReadingLookup, LLMRequestLog
 from .level import update_level_if_stale, update_level_for_profile
 from .level import get_level_summary
 from sqlalchemy.orm import Session
@@ -114,7 +114,8 @@ except Exception:
     pass
 
 # Simple per-minute rate limit by IP or user tier for heavy endpoints
-_RATE_LIMITS = {"free": 60, "premium": 300, "pro": 1000}  # requests/minute; admin unlimited via bypass
+# TODO(deploy): tighten rate limits per tier; for local/dev, set effectively unlimited.
+_RATE_LIMITS = {"free": 1_000_000_000, "premium": 1_000_000_000, "pro": 1_000_000_000}  # requests/minute; admin unlimited via bypass
 _RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
 
 
@@ -202,6 +203,164 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
         return h[:32]
     except Exception:
         return None
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    try:
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return lo
+
+
+def _get_ci_target(db: Session, user: User, lang: str) -> float:
+    """Return the user's comprehensible input target (0..1) for the language.
+
+    Reads ProfilePref.settings.ci_target when available; otherwise falls back to env default.
+    """
+    try:
+        default = float(os.getenv("ARC_CI_DEFAULT", "0.95"))
+    except Exception:
+        default = 0.95
+    ci_min = float(os.getenv("ARC_CI_MIN", "0.8"))
+    ci_max = float(os.getenv("ARC_CI_MAX", "0.99"))
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        return _clamp(default, ci_min, ci_max)
+    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
+    if not pref or not isinstance(pref.data, dict):
+        return _clamp(default, ci_min, ci_max)
+    ci = pref.data.get("ci_target")
+    if ci is None:
+        # also allow nested settings
+        st = pref.data.get("settings") if isinstance(pref.data.get("settings"), dict) else None
+        if st and isinstance(st.get("ci_target"), (int, float)):
+            ci = st.get("ci_target")
+    try:
+        return _clamp(float(ci) if ci is not None else default, ci_min, ci_max)
+    except Exception:
+        return _clamp(default, ci_min, ci_max)
+
+
+def _normalize_lemma_for_lang(lang: str, surface: str) -> str:
+    if lang.startswith("zh"):
+        try:
+            # Prefer simplified as canonical
+            return _OPENCC_T2S.convert(surface) if _OPENCC_T2S else surface
+        except Exception:
+            return surface
+    # Latin-like: lowercase
+    return surface.lower()
+
+
+def _estimate_familiar_share(db: Session, user: User, lang: str, text: str) -> float:
+    """Best-effort estimate of familiar token share based on user lexicon and priors.
+
+    Uses tokenizer for the language; maps tokens to lemmas; batches DB lookups for Lexeme, UserLexeme, and LexemeInfo.
+    """
+    try:
+        tok = TOKENIZERS.get(lang, TOKENIZERS.get("default"))
+    except Exception:
+        tok = TOKENIZERS["default"]
+    words = tok.tokenize(text)
+    # Collect lemmas per token (best-effort)
+    lemmas: list[str] = []
+    lemma_set: set[str] = set()
+    engine = _ENGINES.get(lang)
+    for w in words:
+        if not getattr(w, "is_word", False):
+            continue
+        s = w.text or ""
+        if not s.strip():
+            continue
+        lemma = None
+        try:
+            if engine:
+                a = engine.analyze_word(s, context=None)
+                lemma = a.get("lemma") or None
+        except Exception:
+            lemma = None
+        lemma = lemma or _normalize_lemma_for_lang(lang, s)
+        lemmas.append(lemma)
+        if len(lemma_set) < 2000:
+            lemma_set.add(lemma)
+
+    if not lemmas:
+        return 1.0
+
+    canon_lang = "zh" if lang.startswith("zh") else lang
+    # Fetch lexemes for lemmas
+    Lx = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma.in_(list(lemma_set))).all()
+    lemma_to_lx: dict[str, Lexeme] = {lx.lemma: lx for lx in Lx}
+    lx_ids = [lx.id for lx in Lx]
+    # Profile
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    pid = prof.id if prof else None
+    ul_by_id: dict[int, UserLexeme] = {}
+    if pid and lx_ids:
+        for ul in db.query(UserLexeme).filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid, UserLexeme.lexeme_id.in_(lx_ids)).all():
+            ul_by_id[ul.lexeme_id] = ul
+    li_by_id: dict[int, LexemeInfo] = {}
+    if lx_ids:
+        for li in db.query(LexemeInfo).filter(LexemeInfo.lexeme_id.in_(lx_ids)).all():
+            li_by_id[li.lexeme_id] = li
+
+    # User level
+    user_level = float(getattr(prof, "level_value", 0.0) or 0.0) if prof else 0.0
+    alpha = float(os.getenv("ARC_CI_ALPHA", "0.6"))
+    sigma = float(os.getenv("ARC_CI_SIGMA", "1.0"))
+    w1 = float(os.getenv("ARC_CI_W1", "2.0"))
+    w2 = float(os.getenv("ARC_CI_W2", "0.2"))
+    w3 = float(os.getenv("ARC_CI_W3", "0.6"))
+
+    def p_from_ul(ul: UserLexeme) -> float:
+        a = float(getattr(ul, "a_click", 0) or 0)
+        b = float(getattr(ul, "b_nonclick", 0) or 0)
+        den = max(0.0, a + b)
+        r = (a / den) if den > 0 else 0.0
+        S = float(getattr(ul, "stability", 0.0) or 0.0)
+        exp_count = float(getattr(ul, "exposures", 0) or 0)
+        s = (w1 * r) + (w2 * math.log1p(exp_count)) + (w3 * S)
+        try:
+            return 1.0 / (1.0 + math.exp(-s))
+        except Exception:
+            return 0.9 if r > 0.6 else 0.5
+
+    def p_from_prior(li: Optional[LexemeInfo], lemma: str) -> float:
+        # Level proximity (HSK for zh when available)
+        p_lvl = 0.5
+        if canon_lang == "zh" and li and getattr(li, "level_code", None):
+            try:
+                code = (li.level_code or "").upper()
+                if code.startswith("HSK"):
+                    lvl = int(code[3:])
+                    center = max(1.0, min(6.0, float(user_level) if user_level > 0 else 1.0))
+                    d = abs(float(lvl) - center)
+                    p_lvl = math.exp(-0.5 * (d / max(0.1, sigma)) ** 2)
+            except Exception:
+                p_lvl = 0.5
+        # Frequency prior when available
+        p_freq = 0.5
+        if li and getattr(li, "freq_rank", None):
+            try:
+                p_freq = 1.0 / (1.0 + (float(li.freq_rank) / 5000.0))
+            except Exception:
+                p_freq = 0.5
+        p = (alpha * p_lvl) + ((1.0 - alpha) * p_freq)
+        return _clamp(p, 0.05, 0.99)
+
+    # Precompute per-lemma probabilities
+    p_by_lemma: dict[str, float] = {}
+    for lem in lemma_set:
+        lx = lemma_to_lx.get(lem)
+        if lx and lx.id in ul_by_id:
+            p_by_lemma[lem] = p_from_ul(ul_by_id[lx.id])
+        else:
+            li = li_by_id.get(lx.id) if lx else None
+            p_by_lemma[lem] = p_from_prior(li, lem)
+
+    # Aggregate across occurrences
+    vals = [p_by_lemma.get(l, 0.2) for l in lemmas]
+    return sum(vals) / float(len(vals) or 1)
 
 
 def _decay_posterior(ul: UserLexeme, now: datetime, hl_days: float) -> None:
@@ -841,13 +1000,17 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
             script = prof.preferred_script
         else:
             script = "Hans"
+    # Comprehensible Input target (0..1)
+    ci_target = _get_ci_target(db, user, req.lang)
+    # Derive new word ratio from target (more familiar → fewer new words)
+    base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
     # Auto-pick words if not provided
-    words = req.include_words or pick_words(db, user, req.lang, count=12)
+    words = req.include_words or pick_words(db, user, req.lang, count=12, new_ratio=base_new_ratio)
     level_hint = compose_level_hint(db, user, req.lang)
     # Per-language unit and default length
     unit = "chars" if req.lang.startswith("zh") else "words"
     approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)
-    spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script)
+    spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script, ci_target=ci_target)
     messages = build_reading_prompt(spec)
     text: str
     try:
@@ -858,7 +1021,24 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
             base_url=req.base_url,
         )
     except Exception as e:
-        # Graceful error: return a sanitized message without stack traces or placeholder text
+        # Persist request/error for debugging
+        try:
+            db.add(LLMRequestLog(
+                user_id=user.id,
+                text_id=None,
+                kind="reading",
+                provider=(req.provider or None),
+                model=(req.model or None),
+                base_url=(req.base_url or None),
+                status="error",
+                request={"messages": messages},
+                response=None,
+                error=str(e),
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        # Graceful error: return a sanitized message without stack traces
         import logging
         logging.getLogger("uvicorn.error").warning("LLM generation failed: %s", e)
         raise HTTPException(status_code=503, detail="No LLM backend available")
@@ -875,8 +1055,44 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
         except Exception:
             retry = ""
         if not retry or retry.strip() == "":
+            # Log empty output failure
+            try:
+                db.add(LLMRequestLog(
+                    user_id=user.id,
+                    text_id=None,
+                    kind="reading",
+                    provider=(req.provider or None),
+                    model=(req.model or None),
+                    base_url=(req.base_url or None),
+                    status="error",
+                    request={"messages": messages, "note": "empty output then retry failed"},
+                    response=None,
+                    error="empty output on both providers",
+                ))
+                db.commit()
+            except Exception:
+                db.rollback()
             raise HTTPException(status_code=503, detail="No LLM backend available")
         text = retry
+    # Best-effort CI evaluation and single retry if too unfamiliar
+    try:
+        share = _estimate_familiar_share(db, user, req.lang, text)
+    except Exception:
+        share = None  # ignore estimator errors
+    if isinstance(share, float) and share < (ci_target - 0.03):
+        # Retry once with stronger bias towards known words
+        try:
+            words2 = req.include_words or pick_words(db, user, req.lang, count=12, new_ratio=max(0.02, base_new_ratio * 0.5))
+            spec2 = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words2, script=script, ci_target=ci_target)
+            messages2 = build_reading_prompt(spec2)
+            retry_text = chat_complete(messages2, provider=req.provider, model=req.model, base_url=req.base_url)
+            if retry_text and retry_text.strip():
+                text = retry_text
+                messages = messages2
+                words = words2
+        except Exception:
+            pass
+
     # Save text and generation log (unlimited tier check placeholder)
     source = "llm"
     rt = ReadingText(user_id=user.id, lang=req.lang, content=text, source=source)
@@ -885,6 +1101,21 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), user: User = Dep
     pid = db.query(Profile.id).filter(Profile.user_id == user.id, Profile.lang == req.lang).scalar()
     gl = GenerationLog(user_id=user.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages, "provider": (req.provider or None)}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
     db.add(gl)
+    try:
+        db.add(LLMRequestLog(
+            user_id=user.id,
+            text_id=rt.id,
+            kind="reading",
+            provider=(req.provider or None),
+            model=(req.model or None),
+            base_url=(req.base_url or None),
+            status="ok",
+            request={"messages": messages},
+            response=text,
+            error=None,
+        ))
+    except Exception:
+        pass
     db.commit()
     return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words, "text_id": rt.id}
 
@@ -1524,13 +1755,32 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
     messages = build_translation_prompt(spec, prev_messages=prev_msgs)
 
     def _call_llm(msgs: List[Dict[str, str]]) -> str:
-        return chat_complete(
-            msgs,
-            provider=payload.provider,
-            model=payload.model,
-            base_url=(payload.base_url or "http://localhost:1234/v1"),
-            temperature=0.3,
-        )
+        try:
+            return chat_complete(
+                msgs,
+                provider=payload.provider,
+                model=payload.model,
+                base_url=(payload.base_url or "http://localhost:1234/v1"),
+                temperature=0.3,
+            )
+        except Exception as e:
+            try:
+                db.add(LLMRequestLog(
+                    user_id=user.id,
+                    text_id=(payload.text_id or None),
+                    kind="translation",
+                    provider=(payload.provider or None),
+                    model=(payload.model or None),
+                    base_url=(payload.base_url or None),
+                    status="error",
+                    request={"messages": msgs},
+                    response=None,
+                    error=str(e),
+                ))
+                db.commit()
+            except Exception:
+                db.rollback()
+            raise HTTPException(status_code=503, detail="No LLM backend available")
 
     translations: List[str]
     raw_response: str
@@ -1554,6 +1804,24 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), user: User = 
         s0 = base_offset + span[0]
         e0 = base_offset + span[1]
         items.append({"start": s0, "end": e0, "source": src, "translation": tr})
+
+    # Log request/response for debugging
+    try:
+        db.add(LLMRequestLog(
+            user_id=user.id,
+            text_id=(payload.text_id or None),
+            kind="translation",
+            provider=(payload.provider or None),
+            model=(payload.model or None),
+            base_url=(payload.base_url or None),
+            status="ok",
+            request={"messages": messages},
+            response=raw_response,
+            error=None,
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
 
     # Persist when translating a stored reading
     if payload.text_id is not None:
@@ -1680,6 +1948,21 @@ def mark_reading(text_id: int, payload: MarkReadIn, db: Session = Depends(get_db
         rt.read_at = None
     db.commit()
     return {"ok": True, "is_read": rt.is_read, "read_at": (rt.read_at.isoformat() if rt.read_at else None)}
+
+
+@app.get("/reading/{text_id}/meta")
+def get_reading_meta(text_id: int, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
+    init_db()
+    rt = db.get(ReadingText, text_id)
+    if not rt or rt.user_id != user.id:
+        raise HTTPException(404, "reading text not found")
+    return {
+        "text_id": rt.id,
+        "lang": rt.lang,
+        "is_read": bool(getattr(rt, "is_read", False)),
+        "read_at": (rt.read_at.isoformat() if getattr(rt, "read_at", None) else None),
+        "created_at": (rt.created_at.isoformat() if getattr(rt, "created_at", None) else None),
+    }
 
 
 # ---- UI shell mounting (header/footer/templates) ----

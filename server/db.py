@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, event
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 
@@ -11,7 +11,33 @@ DATA_DIR = Path.cwd() / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "app.db"
 
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+# SQLite tuning for concurrent web usage: allow cross-thread access, wait for locks,
+# and prefer WAL journaling to reduce writer contention.
+engine = create_engine(
+    f"sqlite:///{DB_PATH}",
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30.0,  # seconds to wait on database locks
+    },
+)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):  # type: ignore[no-redef]
+    try:
+        cur = dbapi_connection.cursor()
+        # Enable WAL for better concurrency (one writer, many readers)
+        cur.execute("PRAGMA journal_mode=WAL")
+        # Reasonable durability vs performance
+        cur.execute("PRAGMA synchronous=NORMAL")
+        # Enforce FK constraints
+        cur.execute("PRAGMA foreign_keys=ON")
+        # Additional busy timeout at connection level (ms)
+        cur.execute("PRAGMA busy_timeout=30000")
+        cur.close()
+    except Exception:
+        # Best-effort; ignore if driver doesn't support pragmas
+        pass
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
