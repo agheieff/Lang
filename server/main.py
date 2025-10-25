@@ -332,8 +332,7 @@ def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str
     if not prof:
         prof = Profile(user_id=user.id, lang=lang)
         db.add(prof)
-        db.commit()
-        db.refresh(prof)
+        db.flush()
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, user, prof, lex)
     # Update Beta and stability
@@ -347,7 +346,7 @@ def _srs_click(db: Session, user: User, lang: str, lemma: str, pos: Optional[str
     # Event row
     ev = WordEvent(ts=now, user_id=user.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
     db.add(ev)
-    db.commit()
+    # Commit happens in caller endpoint
 
 
 @app.post("/api/lookup")
@@ -394,6 +393,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
                 user = db.get(User, uid)
                 if user:
                     _srs_click(db, user, req.source_lang, lemma=lemma, pos=analysis.get("pos"), surface=req.surface, context_hash=_hash_context(req.context))
+                    db.commit()
     except Exception:
         pass
     return resp
@@ -601,8 +601,7 @@ def _get_or_create_profile(db: Session, user: User, lang: str) -> Profile:
         return prof
     prof = Profile(user_id=user.id, lang=lang)
     db.add(prof)
-    db.commit()
-    db.refresh(prof)
+    db.flush()
     return prof
 
 
@@ -611,16 +610,18 @@ def _get_pref_row(db: Session, profile_id: int) -> ProfilePref:
     if not pref:
         pref = ProfilePref(profile_id=profile_id, data={})
         db.add(pref)
-        db.commit()
-        db.refresh(pref)
+        db.flush()
     return pref
 
 
 @app.get("/theme")
 def get_theme(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    prof = _get_or_create_profile(db, user, lang)
-    pref = _get_pref_row(db, prof.id)
-    data = dict(pref.data or {})
+    # Read-only: do not create profile or prefs on GET
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        return {"name": None, "vars": {}}
+    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
+    data = dict((pref.data or {}) if pref else {})
     theme = data.get("theme") or {}
     return {"name": theme.get("name"), "vars": theme.get("vars") or {}}
 
@@ -646,9 +647,12 @@ def set_theme(payload: ThemeIn, lang: str, db: Session = Depends(get_db), user: 
 
 @app.get("/prefs")
 def get_ui_prefs(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    prof = _get_or_create_profile(db, user, lang)
-    pref = _get_pref_row(db, prof.id)
-    data = dict(pref.data or {})
+    # Read-only: do not create profile or prefs on GET
+    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    if not prof:
+        return {}
+    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
+    data = dict((pref.data or {}) if pref else {})
     return data.get("ui_prefs") or {}
 
 
@@ -867,8 +871,7 @@ def _srs_exposure(db: Session, user: User, lang: str, lemma: str, pos: Optional[
     if not prof:
         prof = Profile(user_id=user.id, lang=lang)
         db.add(prof)
-        db.commit()
-        db.refresh(prof)
+        db.flush()
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, user, prof, lex)
     now = datetime.utcnow()
@@ -956,13 +959,12 @@ def srs_exposures(req: ExposuresRequest, db: Session = Depends(get_db), user: Us
             continue
         _srs_exposure(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
-    db.commit()
     # Update bulk level estimate if stale (best-effort)
     try:
         update_level_if_stale(db, user.id, req.lang)
-        db.commit()
     except Exception:
         pass
+    db.commit()
     return {"ok": True, "count": count}
 
 
@@ -978,8 +980,7 @@ def _srs_nonlookup(db: Session, user: User, lang: str, lemma: str, pos: Optional
     if not prof:
         prof = Profile(user_id=user.id, lang=lang)
         db.add(prof)
-        db.commit()
-        db.refresh(prof)
+        db.flush()
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, user, prof, lex)
     # explicit non-click success: add strong nonlookup weight and schedule
@@ -1009,12 +1010,11 @@ def srs_nonlookup(req: NonLookupRequest, db: Session = Depends(get_db), user: Us
             continue
         _srs_nonlookup(db, user, req.lang, lemma, pos, it.surface, _hash_context(it.context), req.text_id)
         count += 1
-    db.commit()
     try:
         update_level_if_stale(db, user.id, req.lang)
-        db.commit()
     except Exception:
         pass
+    db.commit()
     return {"ok": True, "count": count}
 
 
