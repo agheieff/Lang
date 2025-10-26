@@ -19,7 +19,8 @@ class Profile(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    # Per-account DB: store numeric account id; no cross-DB FK to accounts
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh' - language being learned
     target_lang: Mapped[str] = mapped_column(String(16), default="en")  # user's native/reference language
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -36,14 +37,15 @@ class Profile(Base):
     # Free-form preferences/topics for reading generation
     text_preferences: Mapped[Optional[str]] = mapped_column(String, default=None)
 
-    account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
+    # Relationship to Account (global DB) is not declared to avoid cross-DB FK
+    # account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
 
 
 class ReadingText(Base):
     __tablename__ = "reading_texts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     lang: Mapped[str] = mapped_column(String(16), index=True)
     content: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -58,7 +60,7 @@ class Card(Base):
     __tablename__ = "cards"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     head: Mapped[str] = mapped_column(String(256))
     lang: Mapped[str] = mapped_column(String(16), index=True)
@@ -117,7 +119,7 @@ class UserLexeme(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
 
@@ -149,7 +151,7 @@ class WordEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
     event_type: Mapped[str] = mapped_column(String(16))  # exposure|click|assign|hover
@@ -193,7 +195,7 @@ class GenerationLog(Base):
     __tablename__ = "generation_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("profiles.id", ondelete="SET NULL"), index=True, default=None)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
     model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
@@ -222,7 +224,7 @@ class ReadingTextTranslation(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
     unit: Mapped[str] = mapped_column(String(16))  # sentence|paragraph|text
     target_lang: Mapped[str] = mapped_column(String(8))
@@ -251,7 +253,7 @@ class ReadingWordGloss(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
     lang: Mapped[str] = mapped_column(String(16))
     surface: Mapped[str] = mapped_column(String(256))
@@ -270,7 +272,7 @@ class TranslationLog(Base):
     __tablename__ = "translation_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
     unit: Mapped[Optional[str]] = mapped_column(String(16), default=None)
     target_lang: Mapped[Optional[str]] = mapped_column(String(8), default=None)
@@ -292,7 +294,7 @@ class ReadingLookup(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
     lang: Mapped[str] = mapped_column(String(16))
     target_lang: Mapped[str] = mapped_column(String(8))
@@ -354,7 +356,7 @@ class LLMRequestLog(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), index=True, default=None)
+    account_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, default=None)
     text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
     kind: Mapped[str] = mapped_column(String(32))  # reading|translation|other
     provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)

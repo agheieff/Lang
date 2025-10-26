@@ -6,11 +6,12 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func
 
 from ..db import get_db
 from ..models import LanguageWordList, Lexeme, UserLexeme, Profile
-from ..deps import get_current_user
+from ..deps import get_current_account
+from arcadia_auth import Account
 
 router = APIRouter()
 
@@ -55,7 +56,7 @@ class WordListOut(BaseModel):
 def create_word_list_item(
     item: WordListCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
     """Add a word to a language word list (admin only for now)"""
     existing = db.query(LanguageWordList).filter(
@@ -105,7 +106,7 @@ def list_word_list_items(
     lang: str,
     list_name: Optional[str] = None,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
     """Get words from language word lists, optionally filtered by list name"""
     query = db.query(LanguageWordList).filter(LanguageWordList.lang == lang)
@@ -119,13 +120,13 @@ def list_word_list_items(
     ).all()
     
     # Check which words the user has learned
-    profile = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     user_lexeme_ids = set()
     learning_data = {}
     
     if profile:
         user_lexemes = db.query(UserLexeme).filter(
-            UserLexeme.user_id == user.id,
+            UserLexeme.account_id == account.id,
             UserLexeme.profile_id == profile.id
         ).all()
         
@@ -173,7 +174,7 @@ def list_word_list_items(
 def list_available_lists(
     lang: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
     """Get all available word list names for a language"""
     lists = db.query(LanguageWordList.list_name).filter(
@@ -187,7 +188,7 @@ def list_available_lists(
 def get_word_list_stats(
     lang: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
     """Get statistics about word lists for a language"""
     # Get total words in all lists for this language
@@ -198,17 +199,17 @@ def get_word_list_stats(
     # Get list names and counts
     list_counts = db.query(
         LanguageWordList.list_name,
-        db.func.count(LanguageWordList.id)
+        func.count(LanguageWordList.id)
     ).filter(
         LanguageWordList.lang == lang
     ).group_by(LanguageWordList.list_name).all()
     
     # Get user's learned words count
-    profile = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
     learned_count = 0
     if profile:
         user_lexemes = db.query(UserLexeme).filter(
-            UserLexeme.user_id == user.id,
+            UserLexeme.account_id == account.id,
             UserLexeme.profile_id == profile.id
         ).all()
         
@@ -231,7 +232,7 @@ def get_word_list_stats(
 def delete_word_list_item(
     word_list_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
     """Delete a word from a word list (admin only for now)"""
     item = db.query(LanguageWordList).filter(LanguageWordList.id == word_list_id).first()
@@ -249,7 +250,7 @@ def update_word_list_item(
     word_list_id: int,
     update: WordListUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
     """Update a word list item (admin only for now)"""
     item = db.query(LanguageWordList).filter(LanguageWordList.id == word_list_id).first()

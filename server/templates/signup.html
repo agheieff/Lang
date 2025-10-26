@@ -40,62 +40,78 @@
         </form>
     </div>
     <script>
-    function extractErrorMessage(data, fallback) {
-        if (!data) return fallback;
-        const d = data.detail;
-        if (typeof d === 'string') return d;
-        if (Array.isArray(d) && d.length) {
-            const first = d[0] || {};
-            const loc = first.loc || [];
-            if (loc.includes('password')) return 'Password must be at least 8 characters.';
-            if (loc.includes('email')) return 'Please enter a valid email address.';
-            return first.msg || fallback;
-        }
-        return fallback;
-    }
-    document.getElementById('signup-btn').addEventListener('click', async () => {
-        const email = (document.getElementById('email').value || '').trim();
-        const password = document.getElementById('password').value || '';
-        const err = document.getElementById('signup-error');
-        err.style.display = 'none';
-        try {
-            const res = await fetch('/auth/register', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ email, password })
-            });
-            if (!res.ok) {
-                const d = await res.json().catch(()=>null);
-                throw new Error(extractErrorMessage(d, 'Sign up failed'));
-            }
-            const res2 = await fetch('/auth/login', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ email, password })
-            });
-            if (!res2.ok) {
-                const d2 = await res2.json().catch(()=>null);
-                throw new Error(extractErrorMessage(d2, 'Login failed'));
-            }
-            const data = await res2.json();
-            let access = '';
-            try {
-                access = data.access_token || '';
-                if (access){
-                  document.cookie = `access_token=${access}; Path=/; SameSite=Lax`;
-                  localStorage.setItem('arcadia_access', access);
-                }
-            } catch {}
-            // Show profile setup dialog before redirecting
-            try {
-              const bd = document.getElementById('profile-setup') as HTMLDivElement;
-              if (bd) { bd.style.display = 'flex'; return; }
-            } catch {}
-            // Fallback to redirect if modal missing
-            window.location.href = '/';
-        } catch (e) {
-            err.textContent = e.message || 'Sign up failed';
-            err.style.display = 'block';
-        }
-    });
+    (function(){
+      function extractErrorMessage(data, fallback) {
+          if (!data) return fallback;
+          const d = data.detail;
+          if (typeof d === 'string') return d;
+          if (Array.isArray(d) && d.length) {
+              const first = d[0] || {};
+              const loc = first.loc || [];
+              if (loc.includes('password')) return 'Password must be at least 8 characters.';
+              if (loc.includes('email')) return 'Please enter a valid email address.';
+              return first.msg || fallback;
+          }
+          return fallback;
+      }
+      async function onSignupClick(){
+          const emailEl = document.getElementById('email');
+          const pwdEl = document.getElementById('password');
+          const err = document.getElementById('signup-error');
+          if (!emailEl || !pwdEl || !err) return;
+          const email = (emailEl.value || '').trim();
+          const password = pwdEl.value || '';
+          err.style.display = 'none';
+          try {
+              const res = await fetch('/auth/register', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ email, password })
+              });
+              if (!res.ok) {
+                  const d = await res.json().catch(()=>null);
+                  throw new Error(extractErrorMessage(d, 'Sign up failed'));
+              }
+              const res2 = await fetch('/auth/login', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ email, password })
+              });
+              if (!res2.ok) {
+                  const d2 = await res2.json().catch(()=>null);
+                  throw new Error(extractErrorMessage(d2, 'Login failed'));
+              }
+              const data = await res2.json();
+              try {
+                  const access = data.access_token || '';
+                  if (access){
+                    document.cookie = 'access_token=' + access + '; Path=/; SameSite=Lax';
+                    localStorage.setItem('arcadia_access', access);
+                  }
+              } catch {}
+              // Show profile setup dialog before redirecting
+              try {
+                const bd = document.getElementById('profile-setup');
+                if (bd) { bd.style.display = 'flex'; return; }
+              } catch {}
+              window.location.href = '/';
+          } catch (e) {
+              try{ err.textContent = (e && e.message) ? e.message : 'Sign up failed'; }catch{}
+              err.style.display = 'block';
+          }
+      }
+      function bindOnce(){
+          const btn = document.getElementById('signup-btn');
+          if (!btn) return;
+          if (btn.getAttribute('data-bound')) return;
+          btn.setAttribute('data-bound','1');
+          btn.addEventListener('click', function(ev){ ev.preventDefault(); onSignupClick(); });
+      }
+      if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', bindOnce, { once: true });
+      } else {
+          bindOnce();
+      }
+      window.addEventListener('ui:reinit', bindOnce);
+    })();
     </script>
     <!-- Profile setup modal -->
     <div id="profile-setup" class="modal-backdrop">
@@ -144,7 +160,7 @@
     <script>
       (function(){
         // Minimal i18n for this dialog based on selected target language
-        const L:any = {
+        const L = {
           en: {
             title: 'Set up your learning profile',
             lang: 'Which language are you learning?',
@@ -172,17 +188,19 @@
         };
         function applyI18n(){
           try{
-            const tgt = (document.getElementById('ps-target') as HTMLSelectElement).value || 'en';
-            const T = L[tgt] || L.en;
-            (document.getElementById('ps-title') as HTMLElement).textContent = T.title;
-            (document.getElementById('ps-lang-label') as HTMLElement).textContent = T.lang;
-            (document.getElementById('ps-level-label') as HTMLElement).textContent = T.level;
-            (document.getElementById('ps-target-label') as HTMLElement).textContent = T.target;
-            (document.getElementById('ps-tlen-label') as HTMLElement).textContent = T.tlen;
-            (document.getElementById('ps-prefs-label') as HTMLElement).textContent = T.prefs;
+            var tgtEl = document.getElementById('ps-target');
+            var tgt = (tgtEl && tgtEl.value) ? tgtEl.value : 'en';
+            var T = L[tgt] || L.en;
+            var el;
+            el = document.getElementById('ps-title'); if (el) el.textContent = T.title;
+            el = document.getElementById('ps-lang-label'); if (el) el.textContent = T.lang;
+            el = document.getElementById('ps-level-label'); if (el) el.textContent = T.level;
+            el = document.getElementById('ps-target-label'); if (el) el.textContent = T.target;
+            el = document.getElementById('ps-tlen-label'); if (el) el.textContent = T.tlen;
+            el = document.getElementById('ps-prefs-label'); if (el) el.textContent = T.prefs;
           }catch(e){}
         }
-        try{ (document.getElementById('ps-target') as HTMLSelectElement).addEventListener('change', applyI18n); }catch(e){}
+        try{ var tgtSel = document.getElementById('ps-target'); if (tgtSel) tgtSel.addEventListener('change', applyI18n); }catch(e){}
         applyI18n();
         function closeAndGo(){ try{ document.getElementById('profile-setup').style.display='none'; }catch(e){} window.location.href = '/'; }
         function authHeader(){ try{ const t=localStorage.getItem('arcadia_access')||''; return t? { 'Authorization':'Bearer '+t } : {}; }catch(e){ return {}; } }
@@ -191,20 +209,29 @@
         skip && (skip.onclick=function(){ closeAndGo(); });
         create && (create.onclick = async function(){
           try{
-            const lang = (document.getElementById('ps-lang').value||'zh');
-            const lvl = (document.getElementById('ps-level').value||'');
-            const tgt = (document.getElementById('ps-target').value||'en');
+            const langEl = document.getElementById('ps-lang');
+            const levelEl = document.getElementById('ps-level');
+            const targetEl = document.getElementById('ps-target');
+            const tlenEl = document.getElementById('ps-tlen');
+            const prefsEl = document.getElementById('ps-prefs');
+            const lang = (langEl && langEl.value) || 'zh';
+            const lvl = (levelEl && levelEl.value) || '';
+            const tgt = (targetEl && targetEl.value) || 'en';
             const body = { lang: lang, target_lang: tgt };
             if (lvl) body.level_code = lvl;
             // Also persist the selected source language for immediate use in app
             try{ localStorage.setItem('arcadia_src', lang); }catch(e){}
             try{ localStorage.setItem('arcadia_tgt', tgt); }catch(e){}
-            try{ const tlen = (document.getElementById('ps-tlen').value||'').trim(); if (tlen) body.text_length = parseInt(tlen,10); }catch(e){}
-            try{ const prefs = (document.getElementById('ps-prefs').value||'').trim(); body.text_preferences = prefs; }catch(e){}
+            try{ var tlen=(tlenEl && tlenEl.value) ? tlenEl.value.trim() : ''; if (tlen) body.text_length = parseInt(tlen,10); }catch(e){}
+            try{ var prefs=(prefsEl && prefsEl.value) ? prefsEl.value.trim() : ''; body.text_preferences = prefs; }catch(e){}
             const res = await fetch('/me/profile', { method:'POST', headers:{ 'Content-Type':'application/json', ...authHeader() }, body: JSON.stringify(body) });
             // Ignore errors (user can set later)
           }catch(e){}
           closeAndGo();
+        });
+        // Rebind after HTMX swaps
+        window.addEventListener('ui:reinit', function(){
+          try{ applyI18n(); }catch(e){}
         });
       })();
     </script>

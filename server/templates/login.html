@@ -26,44 +26,62 @@
         </form>
     </div>
     <script>
-    function extractErrorMessage(data, fallback) {
-        if (!data) return fallback;
-        const d = data.detail;
-        if (typeof d === 'string') return d;
-        if (Array.isArray(d) && d.length) {
-            const first = d[0] || {};
-            const loc = first.loc || [];
-            if (loc.includes('password')) return 'Password must be at least 8 characters.';
-            if (loc.includes('email')) return 'Please enter a valid email address.';
-            return first.msg || fallback;
-        }
-        return fallback;
-    }
-    document.getElementById('login-btn').addEventListener('click', async () => {
-        const email = (document.getElementById('email').value || '').trim();
-        const password = document.getElementById('password').value || '';
-        const err = document.getElementById('login-error');
-        err.style.display = 'none';
-        try {
-            const res = await fetch('/auth/login', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ email, password })
-            });
-            if (!res.ok) {
-                const d = await res.json().catch(()=>null);
-                throw new Error(extractErrorMessage(d, 'Login failed'));
-            }
-            const data = await res.json();
-            try {
-                document.cookie = `access_token=${data.access_token}; Path=/; SameSite=Lax`;
-                localStorage.setItem('arcadia_access', data.access_token);
-            } catch {}
-            window.location.href = '/';
-        } catch (e) {
-            err.textContent = e.message || 'Login failed';
-            err.style.display = 'block';
-        }
-    });
+    (function(){
+      function extractErrorMessage(data, fallback) {
+          if (!data) return fallback;
+          const d = data.detail;
+          if (typeof d === 'string') return d;
+          if (Array.isArray(d) && d.length) {
+              const first = d[0] || {};
+              const loc = first.loc || [];
+              if (loc.includes('password')) return 'Password must be at least 8 characters.';
+              if (loc.includes('email')) return 'Please enter a valid email address.';
+              return first.msg || fallback;
+          }
+          return fallback;
+      }
+      async function onLoginClick(){
+          const emailEl = document.getElementById('email');
+          const pwdEl = document.getElementById('password');
+          const err = document.getElementById('login-error');
+          if (!emailEl || !pwdEl || !err) return;
+          const email = (emailEl.value || '').trim();
+          const password = pwdEl.value || '';
+          err.style.display = 'none';
+          try {
+              const res = await fetch('/auth/login', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ email, password })
+              });
+              if (!res.ok) {
+                  const d = await res.json().catch(()=>null);
+                  throw new Error(extractErrorMessage(d, 'Login failed'));
+              }
+              const data = await res.json();
+              try {
+                  document.cookie = 'access_token=' + data.access_token + '; Path=/; SameSite=Lax';
+                  localStorage.setItem('arcadia_access', data.access_token);
+              } catch {}
+              window.location.href = '/';
+          } catch (e) {
+              try{ err.textContent = (e && e.message) ? e.message : 'Login failed'; }catch{}
+              err.style.display = 'block';
+          }
+      }
+      function bindOnce(){
+          const btn = document.getElementById('login-btn');
+          if (!btn) return;
+          if (btn.getAttribute('data-bound')) return;
+          btn.setAttribute('data-bound','1');
+          btn.addEventListener('click', function(ev){ ev.preventDefault(); onLoginClick(); });
+      }
+      if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', bindOnce, { once: true });
+      } else {
+          bindOnce();
+      }
+      window.addEventListener('ui:reinit', bindOnce);
+    })();
     </script>
     </div>
 </div>

@@ -7,7 +7,7 @@ import os
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from .db import get_db
+from .db import GlobalSessionLocal, get_global_db
 from arcadia_auth import Account, decode_token
 
 _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def get_current_account(
     request: Request,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     authorization: Optional[str] = Header(default=None),
 ) -> Account:
     token: Optional[str] = None

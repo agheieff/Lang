@@ -18,7 +18,7 @@ from fastapi.responses import RedirectResponse
 # Language engine
 from langs.parsing import ENGINES, format_morph_label
 from langs.dicts import DictionaryProviderChain, StarDictProvider, CedictProvider
-from .db import get_db, init_db, SessionLocal, DB_PATH
+from .db import get_db, init_db, DB_PATH
 from .deps import get_current_account as _get_current_account, require_tier
 from .api.profile import router as profile_router
 from .api.wordlists import router as wordlists_router
@@ -33,18 +33,38 @@ from arcadia_auth import Account
 from .models import Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, ReadingLookup
 from .level import update_level_if_stale, update_level_for_profile
 from .level import get_level_summary
+from .services.srs_service import (
+    srs_click as _svc_srs_click,
+    srs_exposure as _svc_srs_exposure,
+    srs_nonlookup as _svc_srs_nonlookup,
+)
+from .services.llm_service import generate_reading as _svc_generate_reading
+from .services.translation_service import (
+    sentence_spans as _svc_sentence_spans,
+    paragraph_spans as _svc_paragraph_spans,
+    assemble_prev_messages as _svc_assemble_prev_messages,
+    translate_text as _svc_translate_text,
+)
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from langs.tokenize import TOKENIZERS, Token
-from .llm import PromptSpec, build_reading_prompt, chat_complete, build_translation_prompt, TranslationSpec
-from logic.words import pick_words, compose_level_hint, urgent_words_detailed
-from logic.srs import (
-    decay_posterior as _decay_posterior,
-    retention_now as _retention_now,
-    SRSParams,
-    schedule_next,
+from .llm import (
+    PromptSpec,
+    build_reading_prompt,
+    chat_complete,
+    build_translation_prompt,
+    TranslationSpec,
+    pick_words,
+    compose_level_hint,
+    urgent_words_detailed,
 )
-from profiles.service import get_or_create as _get_or_create_profile
+# No direct SRS imports; endpoints delegate to services
+# from .repos.profiles import get_or_create_profile as _get_or_create_profile  # not needed after services split
+try:
+    from logic.mstream.saver import save_word_gloss  # type: ignore
+except Exception:
+    def save_word_gloss(*args, **kwargs):  # type: ignore
+        return None
 from arcadia_auth import decode_token, create_auth_router, AuthSettings, mount_cookie_agent_middleware  # type: ignore
 from fastapi.templating import Jinja2Templates
 
@@ -148,8 +168,8 @@ app.include_router(tiers_router)
 if MSP_ENABLE and msp_router is not None:
     app.include_router(msp_router, prefix="/msp")
 
-# Simple per-minute rate limit by IP or user tier for heavy endpoints
-# TODO(deploy): tighten rate limits per tier; for local/dev, set effectively unlimited.
+# Simple per-minute rate limit by IP or user (no DB lookups)
+# Tier is assumed 'free' until we embed it in JWTs.
 from .config import RATE_LIMITS as _RATE_LIMITS, RATE_WINDOW_SEC as _RATE_WINDOW_SEC
 _RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
 
@@ -169,13 +189,6 @@ async def _rate_limit(request, call_next):
             uid = (data or {}).get("sub")
             if uid:
                 key = f"u:{uid}:{path}"
-                db = SessionLocal()
-                try:
-                    account = db.get(Account, int(uid))
-                    if account and account.subscription_tier in _RATE_LIMITS:
-                        tier = account.subscription_tier
-                finally:
-                    db.close()
         except Exception:
             pass
     if not key:
@@ -207,6 +220,7 @@ _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")  # replace i
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _templates_env: Optional[Jinja2Templates] = None
 _ENGINES = ENGINES
+_OPENCC_T2S = None  # optional opencc converter placeholder
 
 
 def get_dict_chain() -> DictionaryProviderChain:
@@ -240,7 +254,11 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
         return None
 
 
-from logic.logs import log_llm_request as _log_llm_request_safe
+try:
+    from logic.logs import log_llm_request as _log_llm_request_safe  # type: ignore
+except Exception:
+    def _log_llm_request_safe(*args, **kwargs):  # type: ignore
+        return None
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -404,39 +422,23 @@ def _estimate_familiar_share(db: Session, account: Account, lang: str, text: str
 ## moved to logic.srs to separate math from web concerns
 
 
-_SRS_PARAMS = SRSParams(
-    target_retention=_FSRS_TARGET_R,
-    fail_factor=_FSRS_FAIL_F,
-    g_pass_weak=_G_PASS_WEAK,
-    g_pass_norm=_G_PASS_NORM,
-    g_pass_strong=_G_PASS_STRONG,
-)
+# SRS scheduling lives in services.srs_service
 
 
-def _schedule_next(ul: UserLexeme, quality: int, now: datetime) -> None:
-    schedule_next(ul, quality, now, _SRS_PARAMS)
-
-
-from logic.lexemes import resolve_lexeme as _resolve_lexeme, get_or_create_userlexeme as _get_or_create_userlexeme
+from .services.lexeme_service import resolve_lexeme as _resolve_lexeme, get_or_create_userlexeme as _get_or_create_userlexeme
 
 
 def _srs_click(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
-    # Pick or create profile for the lang
-    prof = _get_or_create_profile(db, account.id, lang)
-    lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, account, prof, lex)
-    # Update Beta and stability
-    ul.a_click = (ul.a_click or 0) + 1
-    ul.clicks = (ul.clicks or 0) + 1
-    ul.last_clicked_at = datetime.utcnow()
-    now = datetime.utcnow()
-    _decay_posterior(ul, now, _HL_CLICK_D)
-    ul.alpha = float((ul.alpha or 1.0) + _W_CLICK)
-    _schedule_next(ul, 0, now)
-    # Event row
-    ev = WordEvent(ts=now, account_id=account.id, profile_id=prof.id, lexeme_id=lex.id, event_type="click", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id)
-    db.add(ev)
-    # Commit happens in caller endpoint
+    _svc_srs_click(
+        db,
+        account_id=account.id,
+        lang=lang,
+        lemma=lemma,
+        pos=pos,
+        surface=surface,
+        context_hash=context_hash,
+        text_id=text_id,
+    )
 
 
 @app.post("/api/lookup")
@@ -454,12 +456,13 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
             data = decode_token(auth.split(" ", 1)[1], _JWT_SECRET, ["HS256"])  # type: ignore
             uid = int((data or {}).get("sub")) if data and data.get("sub") is not None else None
             if uid is not None:
-                account = db.get(Account, uid)
-                if account:
-                    user = account
-                    profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.source_lang).first()
-                    if profile and profile.target_lang:
-                        target_lang = profile.target_lang
+                # No global lookup; just use uid and local profile
+                class _U: pass
+                _tmp = _U(); _tmp.id = uid  # minimal identity
+                user = _tmp
+                profile = db.query(Profile).filter(Profile.account_id == uid, Profile.lang == req.source_lang).first()
+                if profile and profile.target_lang:
+                    target_lang = profile.target_lang
         except Exception:
             pass
 
@@ -662,137 +665,19 @@ class GenRequest(BaseModel):
 
 @app.post("/gen/reading")
 def gen_reading(req: GenRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    # Preferred script: pick from user's profile when available
-    script = None
-    if req.lang.startswith("zh"):
-        prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
-        if prof and getattr(prof, "preferred_script", None) in ("Hans", "Hant"):
-            script = prof.preferred_script
-        else:
-            script = "Hans"
-    # Comprehensible Input target (0..1)
-    ci_target = _get_ci_target(db, account, req.lang)
-    # Derive new word ratio from target (more familiar → fewer new words)
-    base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
-    # Auto-pick words if not provided
-    words = req.include_words or pick_words(db, account, req.lang, count=12, new_ratio=base_new_ratio)
-    level_hint = compose_level_hint(db, account, req.lang)
-    # Per-language unit and default length
-    unit = "chars" if req.lang.startswith("zh") else "words"
-    # Prefer user profile length when available
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
-    prof_len = None
     try:
-        if prof and isinstance(prof.text_length, int) and prof.text_length and prof.text_length > 0:
-            prof_len = int(prof.text_length)
-    except Exception:
-        prof_len = None
-    approx_len = req.length if req.length is not None else (prof_len if prof_len is not None else (300 if unit == "chars" else 180))
-    # Final clamp to sane bounds
-    try:
-        approx_len = max(50, min(2000, int(approx_len)))
-    except Exception:
-        approx_len = 300 if unit == "chars" else 180
-    spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script, ci_target=ci_target)
-    messages = build_reading_prompt(spec)
-    text: str
-    try:
-        text = chat_complete(
-            messages,
-            provider=req.provider,
+        return _svc_generate_reading(
+            db,
+            account_id=account.id,
+            lang=req.lang,
+            length=req.length,
+            include_words=req.include_words,
             model=req.model,
+            provider=req.provider,
             base_url=req.base_url,
         )
-    except Exception as e:
-        # Persist request/error for debugging (isolated session)
-        _log_llm_request_safe({
-            "account_id": account.id,
-            "text_id": None,
-            "kind": "reading",
-            "provider": (req.provider or None),
-            "model": (req.model or None),
-            "base_url": (req.base_url or None),
-            "status": "error",
-            "request": {"messages": messages},
-            "response": None,
-            "error": str(e),
-        })
-        # Graceful error: return a sanitized message without stack traces
-        import logging
-        logging.getLogger("uvicorn.error").warning("LLM generation failed: %s", e)
+    except Exception:
         raise HTTPException(status_code=503, detail="No LLM backend available")
-    # If empty, retry once with alternate provider, else return 503 without persisting
-    if not text or text.strip() == "":
-        alt_provider = "lmstudio" if (req.provider or "openrouter").lower() == "openrouter" else "openrouter"
-        try:
-            retry = chat_complete(
-                messages,
-                provider=alt_provider,
-                model=req.model,
-                base_url=req.base_url,
-            )
-        except Exception:
-            retry = ""
-        if not retry or retry.strip() == "":
-            # Log empty output failure (isolated session)
-            _log_llm_request_safe({
-                "account_id": account.id,
-                "text_id": None,
-                "kind": "reading",
-                "provider": (req.provider or None),
-                "model": (req.model or None),
-                "base_url": (req.base_url or None),
-                "status": "error",
-                "request": {"messages": messages, "note": "empty output then retry failed"},
-                "response": None,
-                "error": "empty output on both providers",
-            })
-            raise HTTPException(status_code=503, detail="No LLM backend available")
-        text = retry
-    # Best-effort CI evaluation and single retry if too unfamiliar
-    try:
-        share = _estimate_familiar_share(db, account, req.lang, text)
-    except Exception:
-        share = None  # ignore estimator errors
-    if isinstance(share, float) and share < (ci_target - 0.03):
-        # Retry once with stronger bias towards known words
-        try:
-            words2 = req.include_words or pick_words(db, account, req.lang, count=12, new_ratio=max(0.02, base_new_ratio * 0.5))
-            spec2 = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words2, script=script, ci_target=ci_target)
-            messages2 = build_reading_prompt(spec2)
-            retry_text = chat_complete(messages2, provider=req.provider, model=req.model, base_url=req.base_url)
-            if retry_text and retry_text.strip():
-                text = retry_text
-                messages = messages2
-                words = words2
-        except Exception:
-            pass
-
-    # Save text and generation log (unlimited tier check placeholder)
-    source = "llm"
-    rt = ReadingText(account_id=account.id, lang=req.lang, content=text, source=source)
-    db.add(rt)
-    db.flush()
-    pid = db.query(Profile.id).filter(Profile.account_id == account.id, Profile.lang == req.lang).scalar()
-    gl = GenerationLog(account_id=account.id, profile_id=pid, text_id=rt.id, model=req.model, base_url=req.base_url, prompt={"messages": messages, "provider": (req.provider or None)}, words={"include": words}, level_hint=level_hint, approx_len=approx_len, unit=unit)
-    db.add(gl)
-    try:
-        _log_llm_request_safe({
-            "account_id": account.id,
-            "text_id": rt.id,
-            "kind": "reading",
-            "provider": (req.provider or None),
-            "model": (req.model or None),
-            "base_url": (req.base_url or None),
-            "status": "ok",
-            "request": {"messages": messages},
-            "response": text,
-            "error": None,
-        })
-    except Exception:
-        pass
-    db.commit()
-    return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words, "text_id": rt.id}
 
 
 # -------- Urgent words (selection only) --------
@@ -868,75 +753,16 @@ class ExposuresRequest(BaseModel):
 
 
 def _srs_exposure(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
-    prof = _get_or_create_profile(db, account.id, lang)
-    lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, account, prof, lex)
-    now = datetime.utcnow()
-    # determine exposure weight with gating
-    # 1) session collapse: skip additional weight if last exposure was recent
-    recent_ev = db.query(WordEvent).filter(
-        WordEvent.account_id == account.id,
-        WordEvent.profile_id == prof.id,
-        WordEvent.lexeme_id == lex.id,
-        WordEvent.event_type == "exposure",
-    ).order_by(WordEvent.ts.desc()).first()
-    session_skip = False
-    if recent_ev:
-        try:
-            mins = (now - recent_ev.ts).total_seconds() / 60.0
-            if mins < _SESSION_MIN:
-                session_skip = True
-        except Exception:
-            session_skip = False
-    # 2) distinct texts gating (use before increment)
-    distincts_before = int(ul.distinct_texts or 0)
-    w_exp = _W_EXPOSURE
-    quality = 2  # normal pass
-    if distincts_before < _DISTINCT_PROMOTE:
-        w_exp = min(w_exp, _EXPOSURE_WEAK_W)
-        quality = 1  # weak pass
-    # 3) difficulty/frequency adjustment
-    li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lex.id).first()
-    if (getattr(ul, "difficulty", 1.0) or 1.0) >= _DIFF_HIGH or (li and li.freq_rank and li.freq_rank > _FREQ_LOW_THRESH):
-        w_exp = min(w_exp, _EXPOSURE_WEAK_W)
-        quality = min(quality, 1)
-    # 4) apply updates
-    ul.b_nonclick = (ul.b_nonclick or 0) + 1
-    ul.exposures = (ul.exposures or 0) + 1
-    if not ul.first_seen_at:
-        ul.first_seen_at = now
-    ul.last_seen_at = now
-    _decay_posterior(ul, now, _HL_EXPOSURE_D)
-    if not session_skip and w_exp > 0:
-        ul.beta = float((ul.beta or 9.0) + w_exp)
-    _schedule_next(ul, quality, now)
-    # Diversity (distinct contexts)
-    if context_hash:
-        exists = db.query(UserLexemeContext).filter(UserLexemeContext.user_lexeme_id == ul.id, UserLexemeContext.context_hash == context_hash).first()
-        if not exists:
-            db.add(UserLexemeContext(user_lexeme_id=ul.id, context_hash=context_hash))
-            ul.distinct_texts = (ul.distinct_texts or 0) + 1
-    # Event
-    db.add(WordEvent(ts=now, account_id=account.id, profile_id=prof.id, lexeme_id=lex.id, event_type="exposure", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
-
-    # Synthetic nonlookup promotion (conservative)
-    if _SYN_NL_ENABLE:
-        try:
-            if (ul.clicks or 0) == 0 and int(ul.distinct_texts or 0) >= _SYN_NL_MIN_DISTINCT and ul.first_seen_at:
-                days_seen = (now - ul.first_seen_at).total_seconds() / 86400.0
-                if days_seen >= _SYN_NL_MIN_DAYS:
-                    # cooldown: no recent nonlookup
-                    recent_nl = db.query(WordEvent).filter(
-                        WordEvent.account_id == account.id,
-                        WordEvent.profile_id == prof.id,
-                        WordEvent.lexeme_id == lex.id,
-                        WordEvent.event_type == "nonlookup",
-                        WordEvent.ts >= (now - timedelta(days=_SYN_NL_COOLDOWN_DAYS))
-                    ).first()
-                    if not recent_nl:
-                        _srs_nonlookup(db, account, lang, lemma, pos, surface, context_hash, text_id)
-        except Exception:
-            pass
+    _svc_srs_exposure(
+        db,
+        account_id=account.id,
+        lang=lang,
+        lemma=lemma,
+        pos=pos,
+        surface=surface,
+        context_hash=context_hash,
+        text_id=text_id,
+    )
 
 
 @app.post("/srs/event/exposures")
@@ -971,18 +797,16 @@ class NonLookupRequest(BaseModel):
 
 
 def _srs_nonlookup(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
-    # ensure profile and lexeme
-    prof = _get_or_create_profile(db, account.id, lang)
-    lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, account, prof, lex)
-    # explicit non-click success: add strong nonlookup weight and schedule
-    now = datetime.utcnow()
-    _decay_posterior(ul, now, _HL_NONLOOK_D)
-    ul.b_nonclick = (ul.b_nonclick or 0) + _SRS_BETA_NONLOOKUP
-    ul.beta = float((ul.beta or 9.0) + _W_NONLOOK)
-    ul.last_seen_at = now
-    _schedule_next(ul, 3, now)
-    db.add(WordEvent(ts=now, account_id=account.id, profile_id=prof.id, lexeme_id=lex.id, event_type="nonlookup", count=1, surface=surface, context_hash=context_hash, source="manual", meta={}, text_id=text_id))
+    _svc_srs_nonlookup(
+        db,
+        account_id=account.id,
+        lang=lang,
+        lemma=lemma,
+        pos=pos,
+        surface=surface,
+        context_hash=context_hash,
+        text_id=text_id,
+    )
 
 
 @app.post("/srs/event/nonlookup")
@@ -1189,62 +1013,11 @@ class TranslateIn(BaseModel):
 
 
 def _sentence_spans(text: str, lang: str) -> List[Tuple[int, int]]:
-    spans: List[Tuple[int, int]] = []
-    n = len(text)
-    i = 0
-    enders = [".", "!", "?"]
-    zh_enders = ["。", "！", "？"]
-    if lang.startswith("zh"):
-        # split on zh punctuation; include the punctuation in span
-        start = 0
-        while i < n:
-            ch = text[i]
-            if ch in zh_enders:
-                spans.append((start, i + 1))
-                start = i + 1
-            i += 1
-        if start < n:
-            spans.append((start, n))
-        return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
-    # Latin-like
-    start = 0
-    while i < n:
-        ch = text[i]
-        if ch in enders:
-            j = i + 1
-            while j < n and text[j].isspace():
-                j += 1
-            spans.append((start, j))
-            start = j
-            i = j
-            continue
-        i += 1
-    if start < n:
-        spans.append((start, n))
-    return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
+    return _svc_sentence_spans(text, lang)
 
 
 def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
-    spans: List[Tuple[int, int]] = []
-    n = len(text)
-    i = 0
-    start = 0
-    while i < n:
-        if text[i] == "\n":
-            # detect blank line
-            j = i
-            while j < n and text[j] == "\n":
-                j += 1
-            if j - i >= 2:
-                if start < i:
-                    spans.append((start, i))
-                start = j
-                i = j
-                continue
-        i += 1
-    if start < n:
-        spans.append((start, n))
-    return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
+    return _svc_paragraph_spans(text)
 
 
 def _strip_fences_json(s: str) -> str:
@@ -1285,214 +1058,33 @@ def _parse_json_translations(text: str) -> List[str]:
 
 
 def _assemble_prev_messages(db: Session, account: Account, text_id: Optional[int]) -> Optional[List[Dict[str, str]]]:
-    if not text_id:
-        return None
-    msgs: List[Dict[str, str]] = []
-    # Base conversation from reading generation
-    gl = db.query(GenerationLog).filter(GenerationLog.text_id == text_id).order_by(GenerationLog.id.asc()).all()
-    if gl:
-        # take earliest prompt (closest to generation) and assistant text as a seed
-        first = gl[0]
-        if isinstance(first.prompt, dict):
-            base = first.prompt.get("messages")
-            if isinstance(base, list):
-                for m in base[-4:]:
-                    if isinstance(m, dict) and m.get("content"):
-                        msgs.append({"role": m.get("role", "user"), "content": m.get("content", "")})
-        rt = db.get(ReadingText, text_id)
-        if rt and rt.content:
-            msgs.append({"role": "assistant", "content": rt.content})
-    # Append last few translation exchanges (user + assistant) if available
-    tlogs = db.query(TranslationLog).filter(TranslationLog.text_id == text_id).order_by(TranslationLog.id.desc()).limit(3).all()
-    for tl in reversed(tlogs):
-        try:
-            pm = tl.prompt.get("messages") if isinstance(tl.prompt, dict) else None
-            if isinstance(pm, list) and pm:
-                # take the last user content from that prompt
-                last_user = None
-                for m in reversed(pm):
-                    if isinstance(m, dict) and m.get("role") == "user":
-                        last_user = m.get("content", "")
-                        break
-                if last_user:
-                    msgs.append({"role": "user", "content": last_user})
-            if getattr(tl, 'response', None):
-                msgs.append({"role": "assistant", "content": tl.response})
-        except Exception:
-            continue
-    return msgs or None
+    return _svc_assemble_prev_messages(db, account.id, text_id)
 
 
 @app.post("/translate")
 def translate(payload: TranslateIn, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    # Get target language from profile, fallback to payload or default
     profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == payload.lang).first()
     target_lang = payload.target_lang or (profile.target_lang if profile else "en")
-
-    # Resolve source content
-    raw: Optional[str] = payload.text
-    base_offset = 0
-    if raw is None and payload.text_id is not None:
-        rt = db.get(ReadingText, payload.text_id)
-        if not rt or rt.account_id != account.id:
-            raise HTTPException(404, "reading text not found")
-        raw = rt.content
-        if payload.start is not None or payload.end is not None:
-            s = max(0, int(payload.start or 0))
-            e = min(len(raw), int(payload.end or len(raw)))
-            if e <= s:
-                raise HTTPException(400, "invalid span")
-            base_offset = s
-            raw = raw[s:e]
-    if raw is None:
-        raise HTTPException(400, "text or text_id required")
-
-    # Build segments
-    unit = payload.unit
-    spans: List[Tuple[int, int]]
-    if unit == "text":
-        spans = [(0, len(raw))]
-    elif unit == "sentence":
-        spans = _sentence_spans(raw, payload.lang)
-    elif unit == "paragraph":
-        spans = _paragraph_spans(raw)
-    else:
-        raise HTTPException(400, "invalid unit")
-    segments = [raw[s:e] for (s, e) in spans]
-
-    # Previous conversation (optional)
-    prev_msgs: Optional[List[Dict[str, str]]] = None
-    if payload.continue_with_reading and payload.text_id:
-        prev_msgs = _assemble_prev_messages(db, account, payload.text_id)
-
-    spec = TranslationSpec(
-        lang=payload.lang,
-        target_lang=target_lang,
-        unit=unit,
-        content=(segments if len(segments) > 1 else segments[0]),
-        continue_with_reading=bool(payload.continue_with_reading),
-        script=None,
-    )
-    messages = build_translation_prompt(spec, prev_messages=prev_msgs)
-
-    def _call_llm(msgs: List[Dict[str, str]]) -> str:
-        try:
-            return chat_complete(
-                msgs,
-                provider=payload.provider,
-                model=payload.model,
-                base_url=(payload.base_url or "http://localhost:1234/v1"),
-                temperature=0.3,
-            )
-        except Exception as e:
-            _log_llm_request_safe({
-                "account_id": account.id,
-                "text_id": (payload.text_id or None),
-                "kind": "translation",
-                "provider": (payload.provider or None),
-                "model": (payload.model or None),
-                "base_url": (payload.base_url or None),
-                "status": "error",
-                "request": {"messages": msgs},
-                "response": None,
-                "error": str(e),
-            })
-            raise HTTPException(status_code=503, detail="No LLM backend available")
-
-    translations: List[str]
-    raw_response: str
-    out = _call_llm(messages)
-    raw_response = out
-    items_parsed = _parse_json_translations(out)
-    if isinstance(spec.content, list) and len(items_parsed) != len(segments):
-        # retry per-segment with JSON mode
-        items_parsed = []
-        for seg in segments:
-            m = build_translation_prompt(TranslationSpec(lang=spec.lang, target_lang=target_lang, unit="sentence", content=seg), prev_messages=prev_msgs)
-            r = _call_llm(m)
-            raw_response += "\n" + r
-            ones = _parse_json_translations(r)
-            items_parsed.append(ones[0] if ones else "")
-    translations = [s.strip() for s in items_parsed]
-
-    items = []
-    for idx, (span, src, tr) in enumerate(zip(spans, segments, translations)):
-        s0 = base_offset + span[0]
-        e0 = base_offset + span[1]
-        items.append({"start": s0, "end": e0, "source": src, "translation": tr})
-
-    # Log request/response for debugging (isolated session)
     try:
-        _log_llm_request_safe({
-            "account_id": account.id,
-            "text_id": (payload.text_id or None),
-            "kind": "translation",
-            "provider": (payload.provider or None),
-            "model": (payload.model or None),
-            "base_url": (payload.base_url or None),
-            "status": "ok",
-            "request": {"messages": messages},
-            "response": raw_response,
-            "error": None,
-        })
-    except Exception:
-        pass
-
-    # Persist when translating a stored reading
-    if payload.text_id is not None:
-        from sqlalchemy.dialects.sqlite import insert
-        from .models import ReadingTextTranslation as RTT
-        for idx, (span, src, tr) in enumerate(zip(spans, segments, translations)):
-            seg_idx = (idx if unit != "text" else None)
-            s = base_offset + span[0]
-            e = base_offset + span[1]
-            stmt = insert(RTT).values(
-                account_id=account.id,
-                text_id=payload.text_id,
-                unit=unit,
-                target_lang=target_lang,
-                segment_index=seg_idx,
-                span_start=s,
-                span_end=e,
-                source_text=src,
-                translated_text=tr,
-                provider=(payload.provider or "openrouter"),
-                model=payload.model,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[RTT.account_id, RTT.text_id, RTT.target_lang, RTT.unit, RTT.segment_index, RTT.span_start, RTT.span_end],
-                set_={
-                    "translated_text": stmt.excluded.translated_text,
-                    "source_text": stmt.excluded.source_text,
-                    "provider": stmt.excluded.provider,
-                    "model": stmt.excluded.model,
-                },
-            )
-            db.execute(stmt)
-        # minimal log
-        try:
-            db.add(TranslationLog(
-                account_id=account.id,
-                text_id=payload.text_id,
-                unit=unit,
-                target_lang=target_lang,
-                provider=(payload.provider or "openrouter"),
-                model=payload.model,
-                prompt={"messages": messages},
-                segments={"count": len(segments)},
-                response=raw_response,
-            ))
-        except Exception:
-            pass
-        db.commit()
-
-    return {
-        "unit": unit,
-        "target_lang": target_lang,
-        "items": items,
-        "provider": (payload.provider or "openrouter"),
-        "model": payload.model,
-    }
+        return _svc_translate_text(
+            db,
+            account_id=account.id,
+            lang=payload.lang,
+            target_lang=target_lang,
+            unit=payload.unit,
+            text=payload.text,
+            text_id=payload.text_id,
+            start=payload.start,
+            end=payload.end,
+            continue_with_reading=bool(payload.continue_with_reading),
+            provider=payload.provider,
+            model=payload.model,
+            base_url=payload.base_url,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(503, str(e))
 
 
 @app.get("/reading/{text_id}/translations")
@@ -1581,6 +1173,42 @@ def mark_reading(text_id: int, payload: MarkReadIn, db: Session = Depends(get_db
         rt.read_at = None
     db.commit()
     return {"ok": True, "is_read": rt.is_read, "read_at": (rt.read_at.isoformat() if rt.read_at else None)}
+
+
+@app.get("/reading/{text_id}/words")
+def get_reading_words(text_id: int, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
+    """Get cached word glosses for a reading text (optimization for faster lookups)."""
+    rt = db.get(ReadingText, text_id)
+    if not rt or rt.account_id != account.id:
+        raise HTTPException(404, "reading text not found")
+    
+    rows = (
+        db.query(ReadingWordGloss)
+        .filter(
+            ReadingWordGloss.account_id == account.id,
+            ReadingWordGloss.text_id == text_id,
+        )
+        .order_by(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+        .all()
+    )
+    
+    return {
+        "text_id": text_id,
+        "words": [
+            {
+                "surface": w.surface,
+                "lemma": w.lemma,
+                "pos": w.pos,
+                "pinyin": w.pinyin,
+                "translation": w.translation,
+                "lemma_translation": w.lemma_translation,
+                "grammar": w.grammar,
+                "span_start": w.span_start,
+                "span_end": w.span_end,
+            }
+            for w in rows
+        ],
+    }
 
 
 @app.get("/reading/{text_id}/meta")
@@ -1677,7 +1305,29 @@ def words_page(request: Request, lang: Optional[str] = None, account: Account = 
         context={"lang": lang or "es"}
     )
 
-# Login/Signup pages are provided by arcadia_ui_core router
+# Login/Signup pages
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    from arcadia_ui_core import render_page
+    t = _templates()
+    return render_page(
+        request,
+        t,
+        content_template="login.html",
+        title="Log in",
+    )
+
+
+@app.get("/signup", response_class=HTMLResponse)
+def signup_page(request: Request):
+    from arcadia_ui_core import render_page
+    t = _templates()
+    return render_page(
+        request,
+        t,
+        content_template="signup.html",
+        title="Sign up",
+    )
 
 # Placeholder pages for account menu
 @app.get("/profile", response_class=HTMLResponse)

@@ -9,12 +9,12 @@ from sqlalchemy.orm import Session
 
 from langs.parsing import ENGINES
 
-from ..db import get_db
+from ..db import get_db, get_global_db
 from ..models import Profile, ProfilePref, SubscriptionTier
 from arcadia_auth import Account
 from ..deps import get_current_account
 from ..repos.tiers import ensure_default_tiers
-from profiles.service import get_or_create as get_or_create_profile, pref_row as get_pref_row
+from ..repos.profiles import get_or_create_profile, get_pref_row
 
 # Server-side guardrails for free-form profile fields
 _MIN_TEXT_LEN = 50
@@ -44,9 +44,10 @@ class ProfileRequest(BaseModel):
 def upsert_profile(
     req: ProfileRequest,
     db: Session = Depends(get_db),
+    tiers_db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
-    ensure_default_tiers(db)
+    ensure_default_tiers(tiers_db)
     if not _is_supported_lang(req.lang):
         raise HTTPException(400, "Unsupported language code")
     prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()

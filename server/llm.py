@@ -20,8 +20,8 @@ except Exception:  # pragma: no cover - optional during dev
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
+from arcadia_auth import Account as User
 from .models import (
-    User,
     Profile,
     Lexeme,
     LexemeInfo,
@@ -272,7 +272,7 @@ def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List
 
 
 def _profile_for_lang(db: Session, user: User, lang: str) -> Optional[Profile]:
-    return db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
+    return db.query(Profile).filter(Profile.account_id == user.id, Profile.lang == lang).first()
 
 
 def _script_from_lang(lang: str) -> Optional[str]:
@@ -327,7 +327,7 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
         db.query(UserLexeme, Lexeme, LexemeInfo)
         .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
         .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
-        .filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
+        .filter(UserLexeme.account_id == user.id, UserLexeme.profile_id == pid)
         .all()
     )
     known_scored: List[Tuple[float, Lexeme, Dict[str, Any]]] = []
@@ -422,7 +422,7 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             # map continuous 0..6 to integer 1..6 buckets
             v = max(0.0, min(6.0, float(user_level)))
             hsk_target = int(min(6, max(1, int(round(v))))) or 1
-        subq_known = select(UserLexeme.lexeme_id).where(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
+        subq_known = select(UserLexeme.lexeme_id).where(UserLexeme.account_id == user.id, UserLexeme.profile_id == pid)
         pool_q = (
             db.query(Lexeme, LexemeInfo)
             .join(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
@@ -496,7 +496,7 @@ def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:
         db.query(UserLexeme, Lexeme, LexemeInfo)
         .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
         .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
-        .filter(UserLexeme.user_id == user.id, UserLexeme.profile_id == pid)
+        .filter(UserLexeme.account_id == user.id, UserLexeme.profile_id == pid)
         .all()
     )
     counts: Dict[str, int] = {}
