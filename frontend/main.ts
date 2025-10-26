@@ -345,6 +345,8 @@ setSaveSettingsBtn.onclick = async () => {
   const style = setPinyinSel.value === 'tone' ? 'tone' : 'number';
   const settings = { zh_pinyin_style: style };
   const body: any = { lang, settings };
+  // Persist target language selection to server profile as well
+  try { if (tgtSel && tgtSel.value) body.target_lang = tgtSel.value; } catch {}
   if (lang.startsWith('zh') && setZhScriptSel) body.preferred_script = setZhScriptSel.value;
   const res = await api('/me/profile', { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) alert('Save failed');
