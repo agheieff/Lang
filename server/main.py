@@ -7,7 +7,7 @@ import time
 from collections import deque, defaultdict
 import math
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Query, Header
+from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,23 +16,35 @@ from pydantic import BaseModel, Field
 from fastapi.responses import RedirectResponse
 
 # Language engine
-from Lang.parsing.registry import ENGINES
-from Lang.parsing.morph_format import format_morph_label
-from Lang.parsing.dicts.provider import DictionaryProviderChain, StarDictProvider
-from Lang.parsing.dicts.cedict import CedictProvider
+from langs.parsing import ENGINES, format_morph_label
+from langs.dicts import DictionaryProviderChain, StarDictProvider, CedictProvider
 from .db import get_db, init_db, SessionLocal, DB_PATH
 from .deps import get_current_account as _get_current_account, require_tier
 from .api.profile import router as profile_router
 from .api.wordlists import router as wordlists_router
+from .api.tiers import router as tiers_router
+from .config import MSP_ENABLE
+if MSP_ENABLE:
+    try:
+        from .api.mstream import router as msp_router
+    except Exception:
+        msp_router = None  # type: ignore
 from arcadia_auth import Account
-from .models import Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, LLMModel, ReadingLookup, LLMRequestLog
+from .models import Profile, SubscriptionTier, ProfilePref, Lexeme, UserLexeme, WordEvent, UserLexemeContext, LexemeInfo, LexemeVariant, ReadingText, GenerationLog, ReadingTextTranslation, TranslationLog, ReadingLookup
 from .level import update_level_if_stale, update_level_for_profile
 from .level import get_level_summary
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from Lang.tokenize.registry import TOKENIZERS
-from Lang.tokenize.base import Token
-from .llm import PromptSpec, build_reading_prompt, chat_complete, pick_words, compose_level_hint, urgent_words_detailed, build_translation_prompt, TranslationSpec
+from langs.tokenize import TOKENIZERS, Token
+from .llm import PromptSpec, build_reading_prompt, chat_complete, build_translation_prompt, TranslationSpec
+from logic.words import pick_words, compose_level_hint, urgent_words_detailed
+from logic.srs import (
+    decay_posterior as _decay_posterior,
+    retention_now as _retention_now,
+    SRSParams,
+    schedule_next,
+)
+from profiles.service import get_or_create as _get_or_create_profile
 from arcadia_auth import decode_token, create_auth_router, AuthSettings, mount_cookie_agent_middleware  # type: ignore
 from fastapi.templating import Jinja2Templates
 
@@ -44,30 +56,37 @@ _SRS_BETA_NONLOOKUP = 2
 _SRS_GAMMA_NONLOOKUP = 0.08
 
 # SRS config (env-overridable)
-_W_CLICK = float(os.getenv("ARC_SRS_W_CLICK", "1.0"))
-_W_NONLOOK = float(os.getenv("ARC_SRS_W_NONLOOK", "1.5"))
-_W_EXPOSURE = float(os.getenv("ARC_SRS_W_EXPOSURE", "0.1"))
-_HL_CLICK_D = float(os.getenv("ARC_SRS_HL_CLICK_DAYS", "14"))
-_HL_NONLOOK_D = float(os.getenv("ARC_SRS_HL_NONLOOK_DAYS", "30"))
-_HL_EXPOSURE_D = float(os.getenv("ARC_SRS_HL_EXPOSURE_DAYS", "7"))
-_FSRS_TARGET_R = float(os.getenv("ARC_SRS_TARGET_RETENTION", "0.9"))
-_FSRS_FAIL_F = float(os.getenv("ARC_SRS_FAIL_FACTOR", "0.4"))
-_G_PASS_WEAK = float(os.getenv("ARC_SRS_G_PASS_WEAK", "0.15"))
-_G_PASS_NORM = float(os.getenv("ARC_SRS_G_PASS_NORM", "0.30"))
-_G_PASS_STRONG = float(os.getenv("ARC_SRS_G_PASS_STRONG", "0.45"))
+# Centralized SRS/config values
+from .config import (
+    _W_CLICK,
+    _W_NONLOOK,
+    _W_EXPOSURE,
+    _HL_CLICK_D,
+    _HL_NONLOOK_D,
+    _HL_EXPOSURE_D,
+    _FSRS_TARGET_R,
+    _FSRS_FAIL_F,
+    _G_PASS_WEAK,
+    _G_PASS_NORM,
+    _G_PASS_STRONG,
+)
 
 # Exposure gating
-_SESSION_MIN = int(os.getenv("ARC_SRS_SESSION_MINUTES", "30"))
-_EXPOSURE_WEAK_W = float(os.getenv("ARC_SRS_EXPOSURE_WEAK", "0.05"))
-_DISTINCT_PROMOTE = int(os.getenv("ARC_SRS_DISTINCTS_PROMOTE", "2"))
-_FREQ_LOW_THRESH = int(os.getenv("ARC_SRS_FREQ_LOW_THRESHOLD", "10000"))
-_DIFF_HIGH = float(os.getenv("ARC_SRS_DIFFICULTY_HIGH", "1.2"))
+from .config import (
+    _SESSION_MIN,
+    _EXPOSURE_WEAK_W,
+    _DISTINCT_PROMOTE,
+    _FREQ_LOW_THRESH,
+    _DIFF_HIGH,
+)
 
 # Synthetic nonlookup promotion
-_SYN_NL_ENABLE = os.getenv("ARC_SRS_SYN_NONLOOK_ENABLE", "1") != "0"
-_SYN_NL_MIN_DISTINCT = int(os.getenv("ARC_SRS_SYN_NONLOOK_MIN_DISTINCT", "3"))
-_SYN_NL_MIN_DAYS = float(os.getenv("ARC_SRS_SYN_NONLOOK_MIN_DAYS", "2"))
-_SYN_NL_COOLDOWN_DAYS = float(os.getenv("ARC_SRS_SYN_NONLOOK_COOLDOWN_DAYS", "7"))
+from .config import (
+    _SYN_NL_ENABLE,
+    _SYN_NL_MIN_DISTINCT,
+    _SYN_NL_MIN_DAYS,
+    _SYN_NL_COOLDOWN_DAYS,
+)
 
 
 class LookupRequest(BaseModel):
@@ -107,10 +126,10 @@ except Exception:
 try:
     # Ensure secret is available before using AuthSettings
     _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
-    # Use SQLite-backed auth repository from libs/auth (decoupled from app DB)
     from arcadia_auth import create_sqlite_repo  # type: ignore
-    _auth_settings = AuthSettings(secret_key=_JWT_SECRET, multi_profile=True)
-    app.include_router(create_auth_router(create_sqlite_repo("sqlite:///data/auth.db"), _auth_settings))
+    # IMPORTANT: use the same SQLite file as the app DB so Account lookups work
+    _auth_settings = AuthSettings(secret_key=_JWT_SECRET)
+    app.include_router(create_auth_router(create_sqlite_repo(f"sqlite:///{DB_PATH}"), _auth_settings))
 except Exception:
     # non-fatal during dev if auth lib unavailable
     pass
@@ -125,10 +144,13 @@ except Exception:
 # Mount API routers
 app.include_router(profile_router)
 app.include_router(wordlists_router, prefix="/api")
+app.include_router(tiers_router)
+if MSP_ENABLE and msp_router is not None:
+    app.include_router(msp_router, prefix="/msp")
 
 # Simple per-minute rate limit by IP or user tier for heavy endpoints
 # TODO(deploy): tighten rate limits per tier; for local/dev, set effectively unlimited.
-_RATE_LIMITS = {"free": 1_000_000_000, "premium": 1_000_000_000, "pro": 1_000_000_000}  # requests/minute; admin unlimited via bypass
+from .config import RATE_LIMITS as _RATE_LIMITS, RATE_WINDOW_SEC as _RATE_WINDOW_SEC
 _RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
 
 
@@ -164,7 +186,7 @@ async def _rate_limit(request, call_next):
         return await call_next(request)
     limit = _RATE_LIMITS.get(tier, _RATE_LIMITS["free"])
     now = time.time()
-    window = 60.0
+    window = float(_RATE_WINDOW_SEC)
     dq = _RATE_BUCKETS[key]
     while dq and now - dq[0] > window:
         dq.popleft()
@@ -218,24 +240,7 @@ def _hash_context(text: Optional[str]) -> Optional[str]:
         return None
 
 
-def _log_llm_request_safe(entry: dict) -> None:
-    """Log LLM request/response using an isolated short-lived DB session."""
-    from .db import SessionLocal as _SessionLocal
-    from .models import LLMRequestLog as _LLMRequestLog
-    s = _SessionLocal()
-    try:
-        s.add(_LLMRequestLog(**entry))
-        s.commit()
-    except Exception:
-        try:
-            s.rollback()
-        except Exception:
-            pass
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+from logic.logs import log_llm_request as _log_llm_request_safe
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -396,138 +401,28 @@ def _estimate_familiar_share(db: Session, account: Account, lang: str, text: str
     return sum(vals) / float(len(vals) or 1)
 
 
-def _decay_posterior(ul: UserLexeme, now: datetime, hl_days: float) -> None:
-    if not hl_days or hl_days <= 0:
-        ul.last_decay_at = now
-        return
-    ref = ul.last_decay_at or ul.last_seen_at or ul.created_at or now
-    dt = (now - ref).total_seconds() / 86400.0
-    if dt <= 0:
-        ul.last_decay_at = now
-        return
-    k = pow(0.5, dt / hl_days)
-    ul.alpha = float(max(0.0, (ul.alpha or 1.0) * k))
-    ul.beta = float(max(0.0, (ul.beta or 9.0) * k))
-    ul.last_decay_at = now
+## moved to logic.srs to separate math from web concerns
 
 
-def _retention_now(ul: UserLexeme, now: datetime) -> float:
-    S = max(0.5, float(ul.stability or 1.0))
-    ref = ul.last_seen_at or ul.first_seen_at or ul.created_at or now
-    dt = max(0.0, (now - ref).total_seconds() / 86400.0)
-    try:
-        return math.exp(-dt / S)
-    except Exception:
-        return 0.5
+_SRS_PARAMS = SRSParams(
+    target_retention=_FSRS_TARGET_R,
+    fail_factor=_FSRS_FAIL_F,
+    g_pass_weak=_G_PASS_WEAK,
+    g_pass_norm=_G_PASS_NORM,
+    g_pass_strong=_G_PASS_STRONG,
+)
 
 
 def _schedule_next(ul: UserLexeme, quality: int, now: datetime) -> None:
-    S = max(0.5, float(ul.stability or 1.0))
-    D = float(getattr(ul, "difficulty", 1.0) or 1.0)
-    if quality <= 0:
-        S = max(0.5, S * _FSRS_FAIL_F)
-        nxt = now + timedelta(days=1)
-        D = min(1.5, D + 0.05)
-    else:
-        g = _G_PASS_WEAK if quality == 1 else _G_PASS_NORM if quality == 2 else _G_PASS_STRONG
-        S = S * (1.0 + g * (2.0 - D))
-        try:
-            days = S * (-math.log(_FSRS_TARGET_R))
-        except Exception:
-            days = max(1.0, S * 0.1)
-        nxt = now + timedelta(days=days)
-        D = max(0.3, min(1.5, D - (0.02 if quality == 3 else 0.01)))
-    ul.stability = float(min(3650.0, S))
-    ul.difficulty = float(D)
-    ul.next_due_at = nxt
+    schedule_next(ul, quality, now, _SRS_PARAMS)
 
 
-# Cached OpenCC converters (graceful if unavailable)
-try:  # type: ignore
-    from opencc import OpenCC  # type: ignore
-    _OPENCC_T2S = OpenCC("t2s")
-    _OPENCC_S2T = OpenCC("s2t")
-except Exception:  # noqa: BLE001
-    _OPENCC_T2S = None  # type: ignore
-    _OPENCC_S2T = None  # type: ignore
-
-
-def _resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> Lexeme:
-    # For Chinese, normalize to unified 'zh' with simplified lemma; capture Hans/Hant variants
-    is_zh = lang.startswith("zh")
-    canon_lang = "zh" if is_zh else lang
-    canon_lemma = lemma
-    hans_form = None
-    hant_form = None
-    if is_zh:
-        try:
-            hans = _OPENCC_T2S.convert(lemma) if _OPENCC_T2S else lemma
-            hant = _OPENCC_S2T.convert(hans) if _OPENCC_S2T else None
-            canon_lemma = hans
-            hans_form = hans
-            hant_form = hant
-        except Exception:
-            hans_form = lemma
-    # Try to reuse existing lexeme via variants to avoid duplicates
-    lex = db.query(Lexeme).filter(Lexeme.lang == canon_lang, Lexeme.lemma == canon_lemma, Lexeme.pos == pos).first()
-    if not lex and is_zh:
-        # If a variant already exists globally, adopt its lexeme
-        v = None
-        if hans_form:
-            v = db.query(LexemeVariant).filter(LexemeVariant.script == "Hans", LexemeVariant.form == hans_form).first()
-        if not v and hant_form:
-            v = db.query(LexemeVariant).filter(LexemeVariant.script == "Hant", LexemeVariant.form == hant_form).first()
-        if v:
-            candidate = db.get(Lexeme, v.lexeme_id)
-            if candidate:
-                lex = candidate
-    if not lex:
-        lex = Lexeme(lang=canon_lang, lemma=canon_lemma, pos=pos)
-        db.add(lex)
-        db.flush()
-    if is_zh:
-        # Build unique target pairs to insert (avoid duplicates within same session, no autoflush)
-        to_check: set[tuple[str, str]] = set()
-        if hans_form:
-            to_check.add(("Hans", hans_form))
-        if hant_form:
-            to_check.add(("Hant", hant_form))
-        orig_script = "Hant" if lang.endswith("Hant") else "Hans"
-        if (orig_script, lemma) not in to_check:
-            to_check.add((orig_script, lemma))
-        for sc, fm in to_check:
-            exists = db.query(LexemeVariant).filter(LexemeVariant.script == sc, LexemeVariant.form == fm).first()
-            if not exists:
-                db.add(LexemeVariant(lexeme_id=lex.id, script=sc, form=fm))
-    db.flush()
-    return lex
-
-
-def _get_or_create_userlexeme(db: Session, account: Account, profile: Profile, lexeme: Lexeme) -> UserLexeme:
-    ul = db.query(UserLexeme).filter(UserLexeme.account_id == account.id, UserLexeme.profile_id == profile.id, UserLexeme.lexeme_id == lexeme.id).first()
-    if ul:
-        return ul
-    # Initialize importance from frequency when available
-    imp = 0.5
-    try:
-        li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lexeme.id).first()
-        if li and li.freq_rank:
-            imp = min(1.0, 1.0 / (1.0 + li.freq_rank / 500.0))
-    except Exception:
-        pass
-    ul = UserLexeme(account_id=account.id, profile_id=profile.id, lexeme_id=lexeme.id, importance=imp)
-    db.add(ul)
-    db.flush()
-    return ul
+from logic.lexemes import resolve_lexeme as _resolve_lexeme, get_or_create_userlexeme as _get_or_create_userlexeme
 
 
 def _srs_click(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     # Pick or create profile for the lang
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
-    if not prof:
-        prof = Profile(account_id=account.id, lang=lang)
-        db.add(prof)
-        db.flush()
+    prof = _get_or_create_profile(db, account.id, lang)
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, account, prof, lex)
     # Update Beta and stability
@@ -561,6 +456,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
             if uid is not None:
                 account = db.get(Account, uid)
                 if account:
+                    user = account
                     profile = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.source_lang).first()
                     if profile and profile.target_lang:
                         target_lang = profile.target_lang
@@ -592,7 +488,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     if req.text_id is not None and req.start is not None and req.end is not None and user is not None:
         try:
             rt = db.get(ReadingText, int(req.text_id))
-            if rt and rt.user_id == user.id:
+            if rt and rt.account_id == user.id:
                 s = max(0, int(req.start))
                 e = int(req.end)
                 if e > s:
@@ -602,7 +498,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
                     row = (
                         db.query(ReadingLookup)
                         .filter(
-                            ReadingLookup.user_id == user.id,
+                            ReadingLookup.account_id == user.id,
                             ReadingLookup.text_id == rt.id,
                             ReadingLookup.target_lang == target_lang,
                             ReadingLookup.span_start == s,
@@ -635,7 +531,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
                 from sqlalchemy.dialects.sqlite import insert
                 from .models import ReadingLookup as RL
                 stmt = insert(RL).values(
-                    user_id=user.id,
+                    account_id=user.id,
                     text_id=rt.id,
                     lang=req.source_lang,
                     target_lang=target_lang,
@@ -648,7 +544,7 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
                     translations=(translations if isinstance(translations, (dict, list)) else {}),
                 )
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=[RL.user_id, RL.text_id, RL.target_lang, RL.span_start, RL.span_end],
+                    index_elements=[RL.account_id, RL.text_id, RL.target_lang, RL.span_start, RL.span_end],
                     set_={
                         "surface": stmt.excluded.surface,
                         "lemma": stmt.excluded.lemma,
@@ -680,278 +576,19 @@ def lookup(req: LookupRequest, request: Request, db: Session = Depends(get_db)) 
     except Exception:
         pass
     return resp
-def _get_current_user(request: Request, db: Session = Depends(get_db), authorization: Optional[str] = Header(default=None)) -> User:
-    token: Optional[str] = None
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-    else:
-        token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(401, "Not authenticated")
-    try:
-        data = decode_token(token, _JWT_SECRET, ["HS256"])  # type: ignore
-        user_id = int(data.get("sub"))
-    except Exception:
-        raise HTTPException(401, "Invalid token")
-    account = db.get(Account, user_id)
-    if not account:
-        raise HTTPException(401, "Account not found")
-    return account
-def _ensure_default_tiers(db: Session) -> None:
-    existing = {t.name for t in db.query(SubscriptionTier).all()}
-    defaults = [
-        ("free", "Free plan"),
-        ("premium", "Premium plan"),
-        ("pro", "Pro plan"),
-        ("admin", "Administrator (no limits)"),
-    ]
-    created = False
-    for name, desc in defaults:
-        if name not in existing:
-            db.add(SubscriptionTier(name=name, description=desc))
-            created = True
-    if created:
-        db.commit()
+## Authentication helpers live under server.deps
+## Tier setup and endpoints live under server/api/tiers.py
 
 
-def _is_supported_lang(code: str) -> bool:
-    return code in _ENGINES
+# Authorization helpers are provided by server.deps.require_tier
+ 
 
 
-def require_tier(allowed: set[str]) -> Callable[[Account], Account]:
-    def dep(account: Account = Depends(_get_current_account)) -> Account:
-        if account.subscription_tier not in allowed:
-            raise HTTPException(403, "Insufficient subscription tier")
-        return account
-    return dep
-
-
-
-
-class ProfileRequest(BaseModel):
-    lang: str
-    subscription_tier: Optional[str] = None  # e.g., free|premium|pro from DB
-    settings: Optional[Dict[str, Any]] = None
-    level_value: Optional[float] = None
-    level_var: Optional[float] = None
-    level_code: Optional[str] = None
-    preferred_script: Optional[str] = None  # 'Hans' | 'Hant' for zh
-
-
-@app.post("/me/profile")
-def upsert_profile(req: ProfileRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    _ensure_default_tiers(db)
-    if not _is_supported_lang(req.lang):
-        raise HTTPException(400, "Unsupported language code")
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
-    if not prof:
-        prof = Profile(account_id=account.id, lang=req.lang)
-        db.add(prof)
-        db.flush()
-    if req.subscription_tier:
-        # Validate against DB-backed tiers
-        tier = db.query(SubscriptionTier).filter(SubscriptionTier.name == req.subscription_tier).first()
-        if not tier:
-            raise HTTPException(400, "Invalid subscription tier")
-        account.subscription_tier = req.subscription_tier
-    if req.settings is not None:
-        pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
-        if not pref:
-            pref = ProfilePref(profile_id=prof.id, data=req.settings)
-            db.add(pref)
-        else:
-            pref.data = req.settings
-    # Optional preferred script for Chinese
-    if req.preferred_script is not None and req.lang.startswith("zh"):
-        ps = req.preferred_script
-        if ps not in ("Hans", "Hant"):
-            raise HTTPException(400, "preferred_script must be 'Hans' or 'Hant'")
-        prof.preferred_script = ps
-    # Optional level updates
-    if req.level_value is not None:
-        prof.level_value = float(req.level_value)
-    if req.level_var is not None:
-        prof.level_var = float(req.level_var)
-    if req.level_code is not None:
-        prof.level_code = req.level_code
-    db.commit()
-    return {"ok": True, "account_id": account.id, "lang": prof.lang, "subscription_tier": account.subscription_tier, "level_value": prof.level_value, "level_var": prof.level_var, "level_code": prof.level_code}
-
-
-class ProfileOut(BaseModel):
-    lang: str
-    created_at: datetime
-    settings: Optional[Dict[str, Any]] = None
-    level_value: float
-    level_var: float
-    level_code: Optional[str] = None
-    preferred_script: Optional[str] = None
-
-
-@app.get("/me/profiles", response_model=List[ProfileOut])
-def list_profiles(db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    profiles = db.query(Profile).filter(Profile.account_id == account.id).all()
-    out: List[ProfileOut] = []
-    for p in profiles:
-        pref = db.query(ProfilePref).filter(ProfilePref.profile_id == p.id).first()
-        out.append(ProfileOut(lang=p.lang, created_at=p.created_at, settings=(pref.data if pref else None), level_value=p.level_value, level_var=p.level_var, level_code=p.level_code, preferred_script=p.preferred_script))
-    return out
-
-
-@app.delete("/me/profile")
-def delete_profile(lang: str, db: Session = Depends(get_db), user: User = Depends(_get_current_user)):
-    prof = db.query(Profile).filter(Profile.user_id == user.id, Profile.lang == lang).first()
-    if not prof:
-        raise HTTPException(404, "Profile not found")
-    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
-    if pref:
-        db.delete(pref)
-    db.delete(prof)
-    db.commit()
-    return {"ok": True}
-
-
-class TierOut(BaseModel):
-    name: str
-    description: Optional[str] = None
-
-
-@app.get("/tiers", response_model=List[TierOut])
-def list_tiers(db: Session = Depends(get_db)):
-    _ensure_default_tiers(db)
-    tiers = db.query(SubscriptionTier).order_by(SubscriptionTier.id.asc()).all()
-    return [TierOut(name=t.name, description=t.description) for t in tiers]
-
-
-class TierSetRequest(BaseModel):
-    name: str
-
-
-@app.get("/me/tier", response_model=TierOut)
-def get_my_tier(db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    _ensure_default_tiers(db)
-    t = db.query(SubscriptionTier).filter(SubscriptionTier.name == account.subscription_tier).first()
-    if not t:
-        t = db.query(SubscriptionTier).first()
-    return TierOut(name=t.name, description=t.description if t else None)
-
-
-@app.post("/me/tier", response_model=TierOut)
-def set_my_tier(req: TierSetRequest, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    _ensure_default_tiers(db)
-    t = db.query(SubscriptionTier).filter(SubscriptionTier.name == req.name).first()
-    if not t:
-        raise HTTPException(400, "Invalid subscription tier")
-    account.subscription_tier = t.name
-    db.commit()
-    return TierOut(name=t.name, description=t.description)
-
-
-class MeOut(BaseModel):
-    id: int
-    email: str
-    subscription_tier: str
-
-
-@app.get("/me", response_model=MeOut)
-def get_me(account: Account = Depends(_get_current_account)):
-    return MeOut(id=account.id, email=account.email, subscription_tier=account.subscription_tier)
+## /me endpoints are implemented in server/api/profile.py
 
 
 # ---- UI Theme and Prefs (minimal) ----
-class ThemeIn(BaseModel):
-    name: Optional[str] = None
-    vars: Optional[Dict[str, Any]] = None
-    clear: Optional[bool] = None
-
-
-class UIPrefsIn(BaseModel):
-    motion: Optional[bool] = None
-    density: Optional[str] = None  # 'comfortable' | 'compact'
-    scale: Optional[float] = None  # 0.9–1.2
-    clear: Optional[bool] = None
-
-
-def _get_or_create_profile(db: Session, account: Account, lang: str) -> Profile:
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
-    if prof:
-        return prof
-    prof = Profile(account_id=account.id, lang=lang)
-    db.add(prof)
-    db.flush()
-    return prof
-
-
-def _get_pref_row(db: Session, profile_id: int) -> ProfilePref:
-    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == profile_id).first()
-    if not pref:
-        pref = ProfilePref(profile_id=profile_id, data={})
-        db.add(pref)
-        db.flush()
-    return pref
-
-
-@app.get("/theme")
-def get_theme(lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    # Read-only: do not create profile or prefs on GET
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
-    if not prof:
-        return {"name": None, "vars": {}}
-    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
-    data = dict((pref.data or {}) if pref else {})
-    theme = data.get("theme") or {}
-    return {"name": theme.get("name"), "vars": theme.get("vars") or {}}
-
-
-@app.post("/theme")
-def set_theme(payload: ThemeIn, lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    prof = _get_or_create_profile(db, account, lang)
-    pref = _get_pref_row(db, prof.id)
-    data = dict(pref.data or {})
-    if payload.clear:
-        data.pop("theme", None)
-    else:
-        cur = data.get("theme") or {}
-        if payload.name is not None:
-            cur["name"] = payload.name
-        if payload.vars is not None:
-            cur["vars"] = payload.vars
-        data["theme"] = cur
-    pref.data = data
-    db.commit()
-    return {"ok": True}
-
-
-@app.get("/prefs")
-def get_ui_prefs(lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    # Read-only: do not create profile or prefs on GET
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
-    if not prof:
-        return {}
-    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
-    data = dict((pref.data or {}) if pref else {})
-    return data.get("ui_prefs") or {}
-
-
-@app.post("/prefs")
-def set_ui_prefs(payload: UIPrefsIn, lang: str, db: Session = Depends(get_db), account: Account = Depends(_get_current_account)):
-    prof = _get_or_create_profile(db, account, lang)
-    pref = _get_pref_row(db, prof.id)
-    data = dict(pref.data or {})
-    if payload.clear:
-        data.pop("ui_prefs", None)
-    else:
-        cur = data.get("ui_prefs") or {}
-        if payload.motion is not None:
-            cur["motion"] = bool(payload.motion)
-        if payload.density:
-            cur["density"] = payload.density
-        if payload.scale is not None:
-            cur["scale"] = float(payload.scale)
-        data["ui_prefs"] = cur
-    pref.data = data
-    db.commit()
-    return {"ok": True}
+## Theme and UI prefs endpoints live under server/api/profile.py
 
 
 class ParseRequest(BaseModel):
@@ -1218,11 +855,7 @@ class ExposuresRequest(BaseModel):
 
 
 def _srs_exposure(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
-    if not prof:
-        prof = Profile(account_id=account.id, lang=lang)
-        db.add(prof)
-        db.flush()
+    prof = _get_or_create_profile(db, account.id, lang)
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, account, prof, lex)
     now = datetime.utcnow()
@@ -1326,11 +959,7 @@ class NonLookupRequest(BaseModel):
 
 def _srs_nonlookup(db: Session, account: Account, lang: str, lemma: str, pos: Optional[str], surface: Optional[str], context_hash: Optional[str], text_id: Optional[int] = None):
     # ensure profile and lexeme
-    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == lang).first()
-    if not prof:
-        prof = Profile(account_id=account.id, lang=lang)
-        db.add(prof)
-        db.flush()
+    prof = _get_or_create_profile(db, account.id, lang)
     lex = _resolve_lexeme(db, lang, lemma, pos)
     ul = _get_or_create_userlexeme(db, account, prof, lex)
     # explicit non-click success: add strong nonlookup weight and schedule
@@ -1605,81 +1234,41 @@ def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
     return [(s, e) for (s, e) in spans if e > s and text[s:e].strip()]
 
 
-def _parse_xml_translations(xml_text: str) -> Tuple[str, List[str]]:
-    """Parse XML-like output from LLMs.
-    Returns a pair (mode, items):
-    - mode: 'single' when a single <translation> element is parsed; 'multi' when a
-      <translations> container with segments is parsed.
-    - items: list of strings (for 'single' it's a singleton list with the text).
-
-    Robustness improvements:
-    - Strip surrounding markdown code fences (``` or ```xml) and whitespace
-      before XML parsing.
-    - Accept root wrappers; descend to first <translation> or <translations>
-      node if the root differs.
-    - For multi, accept child tags in {'seg','s','item','line'}.
-    """
+def _strip_fences_json(s: str) -> str:
     import re
-    import xml.etree.ElementTree as ET
+    t = s.strip()
+    m = re.match(r"^```[ \t]*([a-zA-Z0-9_-]+)?\s*\n(?P<body>[\s\S]*?)\n?```\s*$", t)
+    return (m.group("body") if m else t).strip()
 
-    def _strip_fences(s: str) -> str:
-        t = s.strip()
-        # Regex: optional language marker; capture inner block
-        m = re.match(r"^```[ \t]*([a-zA-Z0-9_-]+)?\s*\n(?P<body>[\s\S]*?)\n?```\s*$", t)
-        return (m.group("body") if m else t).strip()
 
-    def _local(tag: Optional[str]) -> str:
-        if not tag:
-            return ""
-        # Strip XML namespace if present: {ns}local
-        return tag.split('}', 1)[-1].lower()
-
-    cleaned = _strip_fences(xml_text)
-
+def _parse_json_translations(text: str) -> List[str]:
+    import json
+    cleaned = _strip_fences_json(text)
     try:
-        root = ET.fromstring(cleaned)
-
-        wanted = {"translation", "translations"}
-
-        # Find the operative node: either root or a descendant
-        def _find_node(r: ET.Element) -> tuple[ET.Element, str] | tuple[None, None]:
-            rname = _local(r.tag)
-            if rname in wanted:
-                return r, rname
-            # If single child and that child matches, descend
-            kids = [c for c in list(r) if isinstance(getattr(c, 'tag', None), str)]
-            if len(kids) == 1:
-                k = kids[0]
-                kname = _local(k.tag)
-                if kname in wanted:
-                    return k, kname
-            # Otherwise, find first descendant
-            for el in r.iter():
-                if el is r:
-                    continue
-                name = _local(getattr(el, 'tag', None))
-                if name in wanted:
-                    return el, name
-            return None, None
-
-        node, name = _find_node(root)
-        if node is None or name is None:
-            # No recognizable tags: fallback to single with trimmed original
-            return "single", [cleaned.strip()]
-
-        if name == "translation":
-            return "single", [((node.text or "").strip())]
-
-        # name == 'translations'
-        out: List[str] = []
-        accept = {"seg", "s", "item", "line"}
-        for child in list(node):
-            if _local(child.tag) in accept:
-                out.append((child.text or "").strip())
-        return "multi", out
+        data = json.loads(cleaned)
     except Exception:
-        # Not XML — treat the cleaned text as a single translation
-        return "single", [cleaned.strip()]
+        # Some models return a bare JSON array; try to extract if present inside text
+        try:
+            # naive fallback: find first '[' ... ']' and parse
+            start = cleaned.find('[')
+            end = cleaned.rfind(']')
+            if start != -1 and end != -1 and end > start:
+                data = json.loads(cleaned[start:end+1])
+            else:
+                return [cleaned.strip()]
+        except Exception:
+            return [cleaned.strip()]
+    if isinstance(data, list):
+        return [str(x).strip() for x in data]
+    if isinstance(data, dict):
+        vals = data.get("translations")
+        if isinstance(vals, list):
+            return [str(x).strip() for x in vals]
+        # Fallback keys
+        if isinstance(data.get("translation"), str):
+            return [data.get("translation").strip()]
+    # Last resort: stringify
+    return [str(data).strip()]
 
 
 def _assemble_prev_messages(db: Session, account: Account, text_id: Optional[int]) -> Optional[List[Dict[str, str]]]:
@@ -1801,17 +1390,16 @@ def translate(payload: TranslateIn, db: Session = Depends(get_db), account: Acco
     raw_response: str
     out = _call_llm(messages)
     raw_response = out
-    mode, items_parsed = _parse_xml_translations(out)
-    if isinstance(spec.content, list):
-        if len(items_parsed) != len(segments):
-            # retry per-segment in XML mode
-            items_parsed = []
-            for seg in segments:
-                m = build_translation_prompt(TranslationSpec(lang=spec.lang, target_lang=target_lang, unit="sentence", content=seg), prev_messages=prev_msgs)
-                r = _call_llm(m)
-                raw_response += "\n" + r
-                _, one = _parse_xml_translations(r)
-                items_parsed.append(one[0] if one else "")
+    items_parsed = _parse_json_translations(out)
+    if isinstance(spec.content, list) and len(items_parsed) != len(segments):
+        # retry per-segment with JSON mode
+        items_parsed = []
+        for seg in segments:
+            m = build_translation_prompt(TranslationSpec(lang=spec.lang, target_lang=target_lang, unit="sentence", content=seg), prev_messages=prev_msgs)
+            r = _call_llm(m)
+            raw_response += "\n" + r
+            ones = _parse_json_translations(r)
+            items_parsed.append(ones[0] if ones else "")
     translations = [s.strip() for s in items_parsed]
 
     items = []
