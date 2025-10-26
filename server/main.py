@@ -679,7 +679,15 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), account: Account
     level_hint = compose_level_hint(db, account, req.lang)
     # Per-language unit and default length
     unit = "chars" if req.lang.startswith("zh") else "words"
-    approx_len = req.length if req.length is not None else (300 if unit == "chars" else 180)
+    # Prefer user profile length when available
+    prof = db.query(Profile).filter(Profile.account_id == account.id, Profile.lang == req.lang).first()
+    prof_len = None
+    try:
+        if prof and isinstance(prof.text_length, int) and prof.text_length and prof.text_length > 0:
+            prof_len = int(prof.text_length)
+    except Exception:
+        prof_len = None
+    approx_len = req.length if req.length is not None else (prof_len if prof_len is not None else (300 if unit == "chars" else 180))
     spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script, ci_target=ci_target)
     messages = build_reading_prompt(spec)
     text: str

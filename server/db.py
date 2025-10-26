@@ -55,6 +55,7 @@ def init_db() -> None:
     from . import models  # noqa: F401 - ensure models are imported
     _run_migrations()
     _ensure_tables()
+    _ensure_auth_tables()
 
 
 def _run_migrations() -> None:
@@ -84,6 +85,11 @@ def _run_migrations() -> None:
             # profiles: settings (JSON for flexible preferences)
             if not has_column("profiles", "settings"):
                 conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN settings TEXT DEFAULT '{}'")  # SQLite doesn't support JSON type natively
+            # profiles: text_length, text_preferences
+            if not has_column("profiles", "text_length"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN text_length INTEGER")
+            if not has_column("profiles", "text_preferences"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN text_preferences TEXT")
 
             # user_lexemes: importance, importance_var
             if not has_column("user_lexemes", "importance"):
@@ -146,3 +152,19 @@ def _ensure_tables() -> None:
                     table.create(bind=conn)
     except Exception:
         pass
+
+
+def _ensure_auth_tables() -> None:
+    """Ensure auth tables from arcadia_auth are created"""
+    try:
+        from arcadia_auth import create_sqlite_engine, create_tables
+
+        # Create auth tables in the same database
+        auth_engine = create_sqlite_engine(f"sqlite:///{DB_PATH}")
+        create_tables(auth_engine)
+        auth_engine.dispose()
+    except Exception as e:
+        # Best-effort; log but don't crash
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to create auth tables: {e}")

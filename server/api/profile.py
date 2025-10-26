@@ -7,14 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from Lang.parsing.registry import ENGINES
+from langs.parsing import ENGINES
 
 from ..db import get_db
 from ..models import Profile, ProfilePref, SubscriptionTier
 from arcadia_auth import Account
 from ..deps import get_current_account
 from ..repos.tiers import ensure_default_tiers
-from ..repos.profiles import get_or_create_profile, get_pref_row
+from profiles.service import get_or_create as get_or_create_profile, pref_row as get_pref_row
 
 
 router = APIRouter()
@@ -32,6 +32,8 @@ class ProfileRequest(BaseModel):
     level_var: Optional[float] = None
     level_code: Optional[str] = None
     preferred_script: Optional[str] = None  # 'Hans' | 'Hant' for zh
+    text_length: Optional[int] = None
+    text_preferences: Optional[str] = None
 
 
 @router.post("/me/profile")
@@ -62,6 +64,13 @@ def upsert_profile(
         prof.level_var = float(req.level_var)
     if req.level_code is not None:
         prof.level_code = req.level_code
+    if req.text_length is not None:
+        try:
+            prof.text_length = int(req.text_length)
+        except Exception:
+            prof.text_length = None
+    if req.text_preferences is not None:
+        prof.text_preferences = (req.text_preferences or '').strip() or None
     db.commit()
     return {
         "ok": True,
@@ -83,6 +92,8 @@ class ProfileOut(BaseModel):
     level_var: float
     level_code: Optional[str] = None
     preferred_script: Optional[str] = None
+    text_length: Optional[int] = None
+    text_preferences: Optional[str] = None
 
 
 @router.get("/me/profiles", response_model=List[ProfileOut])
@@ -104,6 +115,8 @@ def list_profiles(
                 level_var=p.level_var,
                 level_code=p.level_code,
                 preferred_script=p.preferred_script,
+                text_length=p.text_length,
+                text_preferences=p.text_preferences,
             )
         )
     return out
@@ -125,15 +138,6 @@ def delete_profile(
     db.commit()
     return {"ok": True}
 
-
-class TierOut(BaseModel):
-    name: str
-    description: Optional[str] = None
-
-
-# (Tier management functions removed - not needed for this iteration)
-
-
 class MeOut(BaseModel):
     id: int
     email: str
@@ -141,14 +145,8 @@ class MeOut(BaseModel):
 
 
 @router.get("/me", response_model=MeOut)
-def get_me(user: User = Depends(get_current_user)):
-    return MeOut(id=user.id, email=user.email, subscription_tier=user.subscription_tier)
-
-
-class ThemeIn(BaseModel):
-    name: Optional[str] = None
-    vars: Optional[Dict[str, Any]] = None
-    clear: Optional[bool] = None
+def get_me(account: Account = Depends(get_current_account)):
+    return MeOut(id=account.id, email=account.email, subscription_tier=account.subscription_tier)
 
 
 class UIPrefsIn(BaseModel):
@@ -158,50 +156,16 @@ class UIPrefsIn(BaseModel):
     clear: Optional[bool] = None
 
 
-@router.get("/theme")
-def get_theme(
-    lang: str,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    prof = get_or_create_profile(db, user.id, lang)
-    pref = get_pref_row(db, prof.id)
-    data = dict((pref.data or {}) if pref else {})
-    theme = data.get("theme") or {}
-    return {"name": theme.get("name"), "vars": theme.get("vars") or {}}
-
-
-@router.post("/theme")
-def set_theme(
-    payload: ThemeIn,
-    lang: str,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    prof = get_or_create_profile(db, user.id, lang)
-    pref = get_pref_row(db, prof.id)
-    data = dict(pref.data or {})
-    if payload.clear:
-        data.pop("theme", None)
-    else:
-        cur = data.get("theme") or {}
-        if payload.name is not None:
-            cur["name"] = payload.name
-        if payload.vars is not None:
-            cur["vars"] = payload.vars
-        data["theme"] = cur
-    pref.data = data
-    db.commit()
-    return {"ok": True}
+## Theme endpoints removed — themes come from UI libs entirely.
 
 
 @router.get("/prefs")
 def get_ui_prefs(
     lang: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
-    prof = get_or_create_profile(db, user.id, lang)
+    prof = get_or_create_profile(db, account.id, lang)
     pref = get_pref_row(db, prof.id)
     data = dict((pref.data or {}) if pref else {})
     return data.get("ui_prefs") or {}
@@ -212,9 +176,9 @@ def set_ui_prefs(
     payload: UIPrefsIn,
     lang: str,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    account: Account = Depends(get_current_account),
 ):
-    prof = get_or_create_profile(db, user.id, lang)
+    prof = get_or_create_profile(db, account.id, lang)
     pref = get_pref_row(db, prof.id)
     data = dict(pref.data or {})
     if payload.clear:

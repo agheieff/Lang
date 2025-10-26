@@ -31,8 +31,12 @@ class Profile(Base):
     preferred_script: Mapped[Optional[str]] = mapped_column(String(8), default=None)
     # Profile metadata (stored in JSON for flexibility)
     settings: Mapped[dict] = mapped_column(JSON, default=dict)  # learning preferences, topics, etc.
+    # User-configurable reading length hint (words or chars per language)
+    text_length: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Free-form preferences/topics for reading generation
+    text_preferences: Mapped[Optional[str]] = mapped_column(String, default=None)
 
-    account: Mapped[Account] = relationship("Account")
+    account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
 
 
 class ReadingText(Base):
@@ -229,6 +233,36 @@ class ReadingTextTranslation(Base):
     translated_text: Mapped[str] = mapped_column(String)
     provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
     model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReadingWordGloss(Base):
+    __tablename__ = "reading_word_glosses"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "text_id",
+            "span_start",
+            "span_end",
+            name="uq_rwg_account_text_span",
+        ),
+        Index("ix_rwg_text_id", "text_id"),
+        Index("ix_rwg_account_text", "account_id", "text_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    lang: Mapped[str] = mapped_column(String(16))
+    surface: Mapped[str] = mapped_column(String(256))
+    lemma: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    pinyin: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    translation: Mapped[Optional[str]] = mapped_column(String, default=None)
+    lemma_translation: Mapped[Optional[str]] = mapped_column(String, default=None)
+    grammar: Mapped[dict] = mapped_column(JSON, default=dict)
+    span_start: Mapped[int] = mapped_column(Integer)
+    span_end: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

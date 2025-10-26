@@ -127,6 +127,14 @@
             <option value="de">German (de)</option>
           </select>
         </div>
+        <div class="row">
+          <label for="ps-tlen">Preferred text length (optional)</label>
+          <input id="ps-tlen" type="number" min="50" max="2000" step="10" placeholder="e.g., 180"/>
+        </div>
+        <div class="row">
+          <label for="ps-prefs">Text preferences (topics, style)</label>
+          <textarea id="ps-prefs" rows="2" placeholder="e.g., travel, daily conversations"></textarea>
+        </div>
         <div class="actions">
           <button id="ps-skip" class="btn">Skip</button>
           <button id="ps-create" class="btn btn-primary">Create profile</button>
@@ -150,6 +158,8 @@
             // Also persist the selected source language for immediate use in app
             try{ localStorage.setItem('arcadia_src', lang); }catch(e){}
             try{ localStorage.setItem('arcadia_tgt', tgt); }catch(e){}
+            try{ const tlen = (document.getElementById('ps-tlen').value||'').trim(); if (tlen) body.text_length = parseInt(tlen,10); }catch(e){}
+            try{ const prefs = (document.getElementById('ps-prefs').value||'').trim(); body.text_preferences = prefs; }catch(e){}
             const res = await fetch('/me/profile', { method:'POST', headers:{ 'Content-Type':'application/json', ...authHeader() }, body: JSON.stringify(body) });
             // Ignore errors (user can set later)
           }catch(e){}
