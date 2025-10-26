@@ -16,6 +16,10 @@ from ..deps import get_current_account
 from ..repos.tiers import ensure_default_tiers
 from profiles.service import get_or_create as get_or_create_profile, pref_row as get_pref_row
 
+# Server-side guardrails for free-form profile fields
+_MIN_TEXT_LEN = 50
+_MAX_TEXT_LEN = 2000
+
 
 router = APIRouter()
 
@@ -66,7 +70,12 @@ def upsert_profile(
         prof.level_code = req.level_code
     if req.text_length is not None:
         try:
-            prof.text_length = int(req.text_length)
+            n = int(req.text_length)
+            if n < _MIN_TEXT_LEN:
+                n = _MIN_TEXT_LEN
+            if n > _MAX_TEXT_LEN:
+                n = _MAX_TEXT_LEN
+            prof.text_length = n
         except Exception:
             prof.text_length = None
     if req.text_preferences is not None:

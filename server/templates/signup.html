@@ -100,16 +100,16 @@
     <!-- Profile setup modal -->
     <div id="profile-setup" class="modal-backdrop">
       <div class="modal">
-        <h2>Set up your learning profile</h2>
+        <h2 id="ps-title">Set up your learning profile</h2>
         <div class="row">
-          <label for="ps-lang">Which language are you learning?</label>
+          <label id="ps-lang-label" for="ps-lang">Which language are you learning?</label>
           <select id="ps-lang">
             <option value="zh">Chinese (zh)</option>
             <option value="es">Spanish (es)</option>
           </select>
         </div>
         <div class="row">
-          <label for="ps-level">Estimate your current level (optional)</label>
+          <label id="ps-level-label" for="ps-level">Estimate your current level (optional)</label>
           <select id="ps-level">
             <option value="">Skip</option>
             <option value="A0">Beginner (A0/A1)</option>
@@ -120,7 +120,7 @@
           </select>
         </div>
         <div class="row">
-          <label for="ps-target">Your interface/translation language</label>
+          <label id="ps-target-label" for="ps-target">Your interface/translation language</label>
           <select id="ps-target">
             <option value="en">English (en)</option>
             <option value="ru">Russian (ru)</option>
@@ -128,11 +128,11 @@
           </select>
         </div>
         <div class="row">
-          <label for="ps-tlen">Preferred text length (optional)</label>
+          <label id="ps-tlen-label" for="ps-tlen">Preferred text length (optional)</label>
           <input id="ps-tlen" type="number" min="50" max="2000" step="10" placeholder="e.g., 180"/>
         </div>
         <div class="row">
-          <label for="ps-prefs">Text preferences (topics, style)</label>
+          <label id="ps-prefs-label" for="ps-prefs">Text preferences (topics, style)</label>
           <textarea id="ps-prefs" rows="2" placeholder="e.g., travel, daily conversations"></textarea>
         </div>
         <div class="actions">
@@ -143,6 +143,47 @@
     </div>
     <script>
       (function(){
+        // Minimal i18n for this dialog based on selected target language
+        const L:any = {
+          en: {
+            title: 'Set up your learning profile',
+            lang: 'Which language are you learning?',
+            level: 'Estimate your current level (optional)',
+            target: 'Your interface/translation language',
+            tlen: 'Preferred text length (optional)',
+            prefs: 'Text preferences (topics, style)',
+          },
+          ru: {
+            title: 'Настройка профиля обучения',
+            lang: 'Какой язык вы изучаете?',
+            level: 'Оцените текущий уровень (необязательно)',
+            target: 'Язык интерфейса/перевода',
+            tlen: 'Предпочтительная длина текста (необязательно)',
+            prefs: 'Предпочтения текста (темы, стиль)',
+          },
+          de: {
+            title: 'Lernprofil einrichten',
+            lang: 'Welche Sprache lernst du?',
+            level: 'Schätze dein aktuelles Niveau (optional)',
+            target: 'Deine Interface-/Übersetzungssprache',
+            tlen: 'Bevorzugte Textlänge (optional)',
+            prefs: 'Textpräferenzen (Themen, Stil)',
+          }
+        };
+        function applyI18n(){
+          try{
+            const tgt = (document.getElementById('ps-target') as HTMLSelectElement).value || 'en';
+            const T = L[tgt] || L.en;
+            (document.getElementById('ps-title') as HTMLElement).textContent = T.title;
+            (document.getElementById('ps-lang-label') as HTMLElement).textContent = T.lang;
+            (document.getElementById('ps-level-label') as HTMLElement).textContent = T.level;
+            (document.getElementById('ps-target-label') as HTMLElement).textContent = T.target;
+            (document.getElementById('ps-tlen-label') as HTMLElement).textContent = T.tlen;
+            (document.getElementById('ps-prefs-label') as HTMLElement).textContent = T.prefs;
+          }catch(e){}
+        }
+        try{ (document.getElementById('ps-target') as HTMLSelectElement).addEventListener('change', applyI18n); }catch(e){}
+        applyI18n();
         function closeAndGo(){ try{ document.getElementById('profile-setup').style.display='none'; }catch(e){} window.location.href = '/'; }
         function authHeader(){ try{ const t=localStorage.getItem('arcadia_access')||''; return t? { 'Authorization':'Bearer '+t } : {}; }catch(e){ return {}; } }
         const skip=document.getElementById('ps-skip');

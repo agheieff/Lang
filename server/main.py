@@ -688,6 +688,11 @@ def gen_reading(req: GenRequest, db: Session = Depends(get_db), account: Account
     except Exception:
         prof_len = None
     approx_len = req.length if req.length is not None else (prof_len if prof_len is not None else (300 if unit == "chars" else 180))
+    # Final clamp to sane bounds
+    try:
+        approx_len = max(50, min(2000, int(approx_len)))
+    except Exception:
+        approx_len = 300 if unit == "chars" else 180
     spec = PromptSpec(lang=req.lang, unit=unit, approx_len=approx_len, user_level_hint=level_hint, include_words=words, script=script, ci_target=ci_target)
     messages = build_reading_prompt(spec)
     text: str
