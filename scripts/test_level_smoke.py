@@ -3,9 +3,9 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
-from server.db import init_db, SessionLocal
-from server.models import User, Profile, Lexeme, LexemeInfo, WordEvent
-from server.level import (
+from Lang.server.db import init_db, SessionLocal
+from Lang.server.models import User, Profile, Lexeme, LexemeInfo, WordEvent
+from Lang.server.level import (
     _gaussian_kernel_weights,
     _decay_factor,
     update_level_for_profile,

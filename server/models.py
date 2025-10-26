@@ -3,33 +3,25 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float
+from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float, Boolean, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
-
-class User(Base):
-    __tablename__ = "users"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    subscription_tier: Mapped[str] = mapped_column(String(32), default="free")  # free|pro|enterprise
-
-    profiles: Mapped[list[Profile]] = relationship("Profile", back_populates="user", cascade="all, delete-orphan")
+# Import Account model from arcadia_auth to avoid duplication
+from arcadia_auth import Account
 
 
 class Profile(Base):
-    __tablename__ = "profiles"
+    __tablename__ = "profiles"  # Using existing table
     __table_args__ = (
-        UniqueConstraint("user_id", "lang", name="uq_profile_user_lang"),
+        UniqueConstraint("account_id", "lang", name="uq_profile_lang_account_lang"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh'
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh' - language being learned
+    target_lang: Mapped[str] = mapped_column(String(16), default="en")  # user's native/reference language
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     # User's level in this language
     level_value: Mapped[float] = mapped_column(Float, default=0.0)  # continuous estimate (e.g., 0..10)
@@ -37,19 +29,28 @@ class Profile(Base):
     level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., HSK3, A2, etc.
     # For Chinese, user's preferred script: Hans or Hant
     preferred_script: Mapped[Optional[str]] = mapped_column(String(8), default=None)
+    # Profile metadata (stored in JSON for flexibility)
+    settings: Mapped[dict] = mapped_column(JSON, default=dict)  # learning preferences, topics, etc.
+    # User-configurable reading length hint (words or chars per language)
+    text_length: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Free-form preferences/topics for reading generation
+    text_preferences: Mapped[Optional[str]] = mapped_column(String, default=None)
 
-    user: Mapped[User] = relationship("User", back_populates="profiles")
+    account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
 
 
 class ReadingText(Base):
     __tablename__ = "reading_texts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     lang: Mapped[str] = mapped_column(String(16), index=True)
     content: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual
+    # Read tracking
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
 
 
 # Placeholder for future SRS tables (not implemented yet)
@@ -57,7 +58,7 @@ class Card(Base):
     __tablename__ = "cards"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     head: Mapped[str] = mapped_column(String(256))
     lang: Mapped[str] = mapped_column(String(16), index=True)
@@ -112,11 +113,11 @@ class LexemeVariant(Base):
 class UserLexeme(Base):
     __tablename__ = "user_lexemes"
     __table_args__ = (
-        UniqueConstraint("user_id", "profile_id", "lexeme_id", name="uq_user_profile_lexeme"),
+        UniqueConstraint("account_id", "profile_id", "lexeme_id", name="uq_account_profile_lexeme"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
 
@@ -148,7 +149,7 @@ class WordEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
     event_type: Mapped[str] = mapped_column(String(16))  # exposure|click|assign|hover
@@ -192,7 +193,7 @@ class GenerationLog(Base):
     __tablename__ = "generation_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     profile_id: Mapped[Optional[int]] = mapped_column(ForeignKey("profiles.id", ondelete="SET NULL"), index=True, default=None)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
     model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
@@ -209,7 +210,7 @@ class ReadingTextTranslation(Base):
     __tablename__ = "reading_text_translations"
     __table_args__ = (
         UniqueConstraint(
-            "user_id",
+            "account_id",
             "text_id",
             "target_lang",
             "unit",
@@ -221,7 +222,7 @@ class ReadingTextTranslation(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
     unit: Mapped[str] = mapped_column(String(16))  # sentence|paragraph|text
     target_lang: Mapped[str] = mapped_column(String(8))
@@ -235,11 +236,41 @@ class ReadingTextTranslation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ReadingWordGloss(Base):
+    __tablename__ = "reading_word_glosses"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "text_id",
+            "span_start",
+            "span_end",
+            name="uq_rwg_account_text_span",
+        ),
+        Index("ix_rwg_text_id", "text_id"),
+        Index("ix_rwg_account_text", "account_id", "text_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    lang: Mapped[str] = mapped_column(String(16))
+    surface: Mapped[str] = mapped_column(String(256))
+    lemma: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    pinyin: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    translation: Mapped[Optional[str]] = mapped_column(String, default=None)
+    lemma_translation: Mapped[Optional[str]] = mapped_column(String, default=None)
+    grammar: Mapped[dict] = mapped_column(JSON, default=dict)
+    span_start: Mapped[int] = mapped_column(Integer)
+    span_end: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class TranslationLog(Base):
     __tablename__ = "translation_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
     unit: Mapped[Optional[str]] = mapped_column(String(16), default=None)
     target_lang: Mapped[Optional[str]] = mapped_column(String(8), default=None)
@@ -248,6 +279,30 @@ class TranslationLog(Base):
     prompt: Mapped[dict] = mapped_column(JSON, default=dict)
     segments: Mapped[dict] = mapped_column(JSON, default=dict)
     response: Mapped[Optional[str]] = mapped_column(String, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReadingLookup(Base):
+    __tablename__ = "reading_lookups"
+    __table_args__ = (
+        UniqueConstraint("account_id", "text_id", "target_lang", "span_start", "span_end", name="uq_reading_lookup_span"),
+        Index("ix_rl_text_id", "text_id"),
+        Index("ix_rl_account_text", "account_id", "text_id"),
+        Index("ix_rl_text_target", "text_id", "target_lang"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    lang: Mapped[str] = mapped_column(String(16))
+    target_lang: Mapped[str] = mapped_column(String(8))
+    surface: Mapped[str] = mapped_column(String(256))
+    lemma: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    span_start: Mapped[int] = mapped_column(Integer)
+    span_end: Mapped[int] = mapped_column(Integer)
+    context_hash: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    translations: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -270,4 +325,43 @@ class LLMModel(Base):
     pricing: Mapped[dict] = mapped_column(JSON, default=dict)
     limits: Mapped[dict] = mapped_column(JSON, default=dict)
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LanguageWordList(Base):
+    __tablename__ = "language_word_lists"
+    __table_args__ = (
+        UniqueConstraint("lang", "list_name", "word", name="uq_lang_list_word"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh'
+    list_name: Mapped[str] = mapped_column(String(64), index=True)  # e.g., 'core_1000', 'hsk1', 'a1'
+    word: Mapped[str] = mapped_column(String(256), index=True)  # the word/lemma
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    frequency_rank: Mapped[Optional[int]] = mapped_column(Integer, default=None)  # global frequency rank
+    frequency_score: Mapped[Optional[float]] = mapped_column(Float, default=None)  # frequency score (0-1)
+    level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., 'HSK1', 'A2'
+    category: Mapped[Optional[str]] = mapped_column(String(64), default=None)  # semantic category
+    tags: Mapped[dict] = mapped_column(JSON, default=dict)  # additional metadata
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LLMRequestLog(Base):
+    __tablename__ = "llm_request_logs"
+    __table_args__ = (
+        Index("ix_llmrl_account_created", "account_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), index=True, default=None)
+    text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
+    kind: Mapped[str] = mapped_column(String(32))  # reading|translation|other
+    provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
+    base_url: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    status: Mapped[str] = mapped_column(String(16), default="error")  # ok|error
+    request: Mapped[dict] = mapped_column(JSON, default=dict)  # typically {messages: [...]} and params
+    response: Mapped[Optional[str]] = mapped_column(String, default=None)
+    error: Mapped[Optional[str]] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

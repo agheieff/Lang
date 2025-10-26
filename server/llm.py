@@ -76,13 +76,23 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
 
 def _strip_thinking_blocks(text: str) -> str:
     import re
-    # Remove <think>...</think> or variants, case-insensitive, multiline
-    text = re.sub(r"<\s*(think|thinking|analysis)[^>]*>.*?<\s*/\s*\1\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    original = text or ""
+    # Remove <think>...</think> (and common variants), case-insensitive, multiline
+    cleaned = re.sub(r"<\s*(think|thinking|analysis)[^>]*>.*?<\s*/\s*\1\s*>", "", original, flags=re.IGNORECASE | re.DOTALL)
     # Drop leading lines that look like reasoning headers
-    text = re.sub(r"^(?:\s*(?:Thoughts?|Thinking|Reasoning)\s*:?\s*\n)+", "", text, flags=re.IGNORECASE)
-    # Remove fenced code blocks if the model wrapped the passage
-    text = re.sub(r"^\s*```[\s\S]*?```\s*", lambda m: m.group(0).strip('`\n '), text, flags=re.MULTILINE)
-    return text.strip()
+    cleaned = re.sub(r"^(?:\s*(?:Thoughts?|Thinking|Reasoning)\s*:?\s*\n)+", "", cleaned, flags=re.IGNORECASE)
+    # If the model wrapped the whole passage in a fenced block, unwrap and keep the inner content
+    # Support optional fence label like ```xml
+    fenced_full = re.compile(r"^\s*```[^\n]*\n([\s\S]*?)\n?```\s*$", flags=re.DOTALL)
+    m = fenced_full.match(cleaned.strip())
+    if m:
+        cleaned = m.group(1)
+    # Final trim
+    cleaned = cleaned.strip()
+    # Last-resort: if stripping produced empty but original wasn't empty, preserve original
+    if not cleaned and original.strip():
+        return original.strip()
+    return cleaned
 
 
 def chat_complete(
@@ -144,6 +154,7 @@ class PromptSpec:
     user_level_hint: Optional[str]
     include_words: List[str]
     script: Optional[str] = None  # for zh: "Hans" or "Hant"
+    ci_target: Optional[float] = None  # desired share of familiar tokens (0..1)
 
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
@@ -165,7 +176,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         "You are a tutor of {lang_display}. Please generate a text for learning and comprehensible input practice, given the following parameters."
     )
     user_tpl = _load_prompt("reading_user.txt") or (
-        "Write in {lang_display}.\n{script_line}{level_line}{length_line}{include_words_line}Constraints:\n- Do not include translations or vocabulary lists.\n- Avoid English unless the target language is English.\n- Gently reinforce the target words in context and keep the language natural and engaging.\n- Do not include meta commentary."
+        "Write in {lang_display}.\n{script_line}{level_line}{length_line}{include_words_line}{ci_line}Constraints:\n- Do not include translations or vocabulary lists.\n- Avoid English unless the target language is English.\n- Gently reinforce the target words in context and keep the language natural and engaging.\n- Do not include meta commentary."
     )
 
     lang_display = _lang_display(spec.lang)
@@ -183,6 +194,10 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     if spec.include_words:
         words = ", ".join(spec.include_words)
         include_words_line = f"Please include these words naturally: {words}.\n"
+    ci_line = ""
+    if isinstance(spec.ci_target, (int, float)) and spec.ci_target:
+        pct = int(round(float(spec.ci_target) * 100))
+        ci_line = f"Aim for about {pct}% of tokens to be familiar for the learner; limit new vocabulary.\n"
 
     sys_content = sys_tpl.format(lang_display=lang_display)
     user_content = user_tpl.format(
@@ -191,6 +206,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         level_line=level_line,
         length_line=length_line,
         include_words_line=include_words_line,
+        ci_line=ci_line,
     )
     return [
         {"role": "system", "content": sys_content},
@@ -457,9 +473,15 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
     return picked[:total]
 
 
-def pick_words(db: Session, user: User, lang: str, count: int = 12) -> List[str]:
-    # Return only forms for prompt inclusion
-    return [it["form"] for it in urgent_words_detailed(db, user, lang, total=count)]
+def pick_words(db: Session, user: User, lang: str, count: int = 12, *, new_ratio: Optional[float] = None) -> List[str]:
+    """Return only forms for prompt inclusion.
+
+    new_ratio: desired fraction of new words among picked (0..1). If None, default from urgent_words_detailed.
+    """
+    kwargs: Dict[str, Any] = {"total": count}
+    if isinstance(new_ratio, (int, float)):
+        kwargs["new_ratio"] = float(new_ratio)
+    return [it["form"] for it in urgent_words_detailed(db, user, lang, **kwargs)]
 
 
 def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:

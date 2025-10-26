@@ -5,7 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sign up - Arcadia</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <style>.hint{font-size:.85rem;color:#6b7280}</style>
+    <style>
+      .hint{font-size:.85rem;color:#6b7280}
+      /* Simple modal */
+      .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:1000}
+      .modal{background:#fff;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.2);max-width:420px;width:90%;padding:16px}
+      .modal h2{font-size:20px;font-weight:600;margin:0 0 8px}
+      .modal .row{margin:10px 0}
+      .modal label{display:block;font-size:14px;margin-bottom:4px}
+      .modal select{width:100%;border:1px solid #ddd;border-radius:6px;padding:8px}
+      .modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+      .btn{padding:8px 12px;border-radius:6px;border:1px solid #ddd}
+      .btn-primary{background:#1f6feb;color:#fff;border-color:#1f6feb}
+    </style>
 </head>
 <body class="bg-gray-100 min-h-screen" style="margin:0;">
     {% include "_header.html" ignore missing %}
@@ -64,16 +76,96 @@
                 throw new Error(extractErrorMessage(d2, 'Login failed'));
             }
             const data = await res2.json();
+            let access = '';
             try {
-                document.cookie = `access_token=${data.access_token}; Path=/; SameSite=Lax`;
-                localStorage.setItem('arcadia_access', data.access_token);
+                access = data.access_token || '';
+                if (access){
+                  document.cookie = `access_token=${access}; Path=/; SameSite=Lax`;
+                  localStorage.setItem('arcadia_access', access);
+                }
             } catch {}
+            // Show profile setup dialog before redirecting
+            try {
+              const bd = document.getElementById('profile-setup') as HTMLDivElement;
+              if (bd) { bd.style.display = 'flex'; return; }
+            } catch {}
+            // Fallback to redirect if modal missing
             window.location.href = '/';
         } catch (e) {
             err.textContent = e.message || 'Sign up failed';
             err.style.display = 'block';
         }
     });
+    </script>
+    <!-- Profile setup modal -->
+    <div id="profile-setup" class="modal-backdrop">
+      <div class="modal">
+        <h2>Set up your learning profile</h2>
+        <div class="row">
+          <label for="ps-lang">Which language are you learning?</label>
+          <select id="ps-lang">
+            <option value="zh">Chinese (zh)</option>
+            <option value="es">Spanish (es)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="ps-level">Estimate your current level (optional)</label>
+          <select id="ps-level">
+            <option value="">Skip</option>
+            <option value="A0">Beginner (A0/A1)</option>
+            <option value="A2">Elementary (A2)</option>
+            <option value="B1">Intermediate (B1)</option>
+            <option value="B2">Upper-Intermediate (B2)</option>
+            <option value="C1">Advanced (C1/C2)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="ps-target">Your interface/translation language</label>
+          <select id="ps-target">
+            <option value="en">English (en)</option>
+            <option value="ru">Russian (ru)</option>
+            <option value="de">German (de)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="ps-tlen">Preferred text length (optional)</label>
+          <input id="ps-tlen" type="number" min="50" max="2000" step="10" placeholder="e.g., 180"/>
+        </div>
+        <div class="row">
+          <label for="ps-prefs">Text preferences (topics, style)</label>
+          <textarea id="ps-prefs" rows="2" placeholder="e.g., travel, daily conversations"></textarea>
+        </div>
+        <div class="actions">
+          <button id="ps-skip" class="btn">Skip</button>
+          <button id="ps-create" class="btn btn-primary">Create profile</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function(){
+        function closeAndGo(){ try{ document.getElementById('profile-setup').style.display='none'; }catch(e){} window.location.href = '/'; }
+        function authHeader(){ try{ const t=localStorage.getItem('arcadia_access')||''; return t? { 'Authorization':'Bearer '+t } : {}; }catch(e){ return {}; } }
+        const skip=document.getElementById('ps-skip');
+        const create=document.getElementById('ps-create');
+        skip && (skip.onclick=function(){ closeAndGo(); });
+        create && (create.onclick = async function(){
+          try{
+            const lang = (document.getElementById('ps-lang').value||'zh');
+            const lvl = (document.getElementById('ps-level').value||'');
+            const tgt = (document.getElementById('ps-target').value||'en');
+            const body = { lang: lang, target_lang: tgt };
+            if (lvl) body.level_code = lvl;
+            // Also persist the selected source language for immediate use in app
+            try{ localStorage.setItem('arcadia_src', lang); }catch(e){}
+            try{ localStorage.setItem('arcadia_tgt', tgt); }catch(e){}
+            try{ const tlen = (document.getElementById('ps-tlen').value||'').trim(); if (tlen) body.text_length = parseInt(tlen,10); }catch(e){}
+            try{ const prefs = (document.getElementById('ps-prefs').value||'').trim(); body.text_preferences = prefs; }catch(e){}
+            const res = await fetch('/me/profile', { method:'POST', headers:{ 'Content-Type':'application/json', ...authHeader() }, body: JSON.stringify(body) });
+            // Ignore errors (user can set later)
+          }catch(e){}
+          closeAndGo();
+        });
+      })();
     </script>
     </div>
     </div>

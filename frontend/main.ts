@@ -19,6 +19,10 @@ const setZhScriptSel = document.getElementById('set-zh-script') as HTMLSelectEle
 const setProfileLangInput = document.getElementById('set-profile-lang') as HTMLInputElement;
 const setAddProfileBtn = document.getElementById('set-add-profile') as HTMLButtonElement;
 const setProfilesDiv = document.getElementById('set-profiles') as HTMLDivElement;
+const setCurLangLabel = document.getElementById('set-cur-lang') as HTMLSpanElement | null;
+const setTextLength = document.getElementById('set-text-length') as HTMLInputElement | null;
+const setTextPrefs = document.getElementById('set-text-prefs') as HTMLTextAreaElement | null;
+const setSaveProfileBtn = document.getElementById('set-save-profile') as HTMLButtonElement | null;
 const setUrgentCount = document.getElementById('set-urgent-count') as HTMLInputElement;
 const setUrgentNew = document.getElementById('set-urgent-new') as HTMLInputElement;
 const setUrgentList = document.getElementById('set-urgent-list') as HTMLDivElement;
@@ -124,6 +128,25 @@ function renderText() {
   outEl.innerHTML = '';
   clearPopover();
   const lang = srcSel.value;
+  // Sync "Text read" button visibility from DB state when possible
+  const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
+  (async () => {
+    try {
+      const text_id = localStorage.getItem('arcadia_last_text_id');
+      if (textReadBtn && text_id) {
+        const res = await api(`/reading/${Number(text_id)}/meta`);
+        if (res.ok) {
+          const meta = await res.json();
+          textReadBtn.style.display = meta.is_read ? 'none' : '';
+        } else {
+          // If meta not available, keep button visible as default
+          textReadBtn.style.display = '';
+        }
+      }
+    } catch {
+      if (textReadBtn) textReadBtn.style.display = '';
+    }
+  })();
   // Collect exposures after a small debounce
   const exposures: { lemma?: string; surface?: string }[] = [];
   if (lang.startsWith('zh')) {
@@ -238,6 +261,16 @@ async function refreshProfiles() {
       const cur = items.find((p:any)=>p.lang === srcSel.value);
       if (cur && cur.preferred_script) setZhScriptSel.value = cur.preferred_script;
     }
+    // Populate per-language editable fields for current source lang
+    try { if (setCurLangLabel) setCurLangLabel.textContent = srcSel.value; } catch {}
+    const curProf = items.find((p:any)=>p.lang === srcSel.value) || null;
+    if (curProf) {
+      if (setTextLength) setTextLength.value = curProf.text_length ? String(curProf.text_length) : '';
+      if (setTextPrefs) setTextPrefs.value = curProf.text_preferences || '';
+    } else {
+      if (setTextLength) setTextLength.value = '';
+      if (setTextPrefs) setTextPrefs.value = '';
+    }
   } catch {}
 }
 refreshProfiles();
@@ -326,6 +359,8 @@ setSaveSettingsBtn.onclick = async () => {
   const style = setPinyinSel.value === 'tone' ? 'tone' : 'number';
   const settings = { zh_pinyin_style: style };
   const body: any = { lang, settings };
+  // Persist target language selection to server profile as well
+  try { if (tgtSel && tgtSel.value) body.target_lang = tgtSel.value; } catch {}
   if (lang.startsWith('zh') && setZhScriptSel) body.preferred_script = setZhScriptSel.value;
   const res = await api('/me/profile', { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) alert('Save failed');
@@ -339,6 +374,18 @@ setAddProfileBtn.onclick = async () => {
   setProfileLangInput.value = '';
   await refreshProfiles();
 };
+
+setSaveProfileBtn && (setSaveProfileBtn.onclick = async () => {
+  const lang = srcSel.value;
+  const body: any = { lang };
+  const val = (setTextLength?.value || '').trim();
+  if (val) body.text_length = parseInt(val, 10);
+  const prefs = (setTextPrefs?.value || '').trim();
+  body.text_preferences = prefs;
+  const res = await api('/me/profile', { method: 'POST', body: JSON.stringify(body) });
+  if (!res.ok) { alert('Save failed'); return; }
+  showMsg(true, 'Saved profile settings');
+});
 // Delegate clicks from container to token spans
 outEl.addEventListener('click', async (e) => {
   const target = e.target as HTMLElement;
@@ -409,6 +456,9 @@ genBtn.addEventListener('click', async () => {
     if (data.text_id) localStorage.setItem('arcadia_last_text_id', String(data.text_id));
     localStorage.setItem('arcadia_text', text);
     renderText();
+    // After new text, ensure the read button is shown (new texts are unread)
+    const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
+    if (textReadBtn) textReadBtn.style.display = '';
     showMsg(true, 'Generated text inserted');
   } catch (e:any) {
     showMsg(false, `Generation error: ${String(e)}`);
@@ -481,14 +531,21 @@ document.querySelectorAll('.set-nav').forEach(btn => {
 });
 
 // Text read button: recompute word scores for current text
-const textReadBtn = document.getElementById('text-read') as HTMLButtonElement | null;
-textReadBtn?.addEventListener('click', async () => {
+const textReadBtn2 = document.getElementById('text-read') as HTMLButtonElement | null;
+textReadBtn2?.addEventListener('click', async () => {
   const lang = srcSel.value;
   const text = (localStorage.getItem('arcadia_text') || '').toString();
   if (!text.trim()) return;
   // Re-send exposures for all tokens to recalc scores
   try {
-    textReadBtn.disabled = true;
+    textReadBtn2.disabled = true;
+    // Mark as read in DB if we have a text_id
+    try {
+      const text_id = localStorage.getItem('arcadia_last_text_id');
+      if (text_id) {
+        await api(`/reading/${Number(text_id)}/mark_read`, { method: 'POST', body: JSON.stringify({ read: true }) });
+      }
+    } catch { /* ignore */ }
     if (lang.startsWith('zh')) {
       const data = await parse(lang, text);
       const surfaces: string[] = [];
@@ -503,7 +560,7 @@ textReadBtn?.addEventListener('click', async () => {
     }
     showMsg(true, 'Recalculated word scores for this text');
     // Hide button after confirmed recalculation
-    textReadBtn.style.display = 'none';
+    textReadBtn2.style.display = 'none';
   } catch (e:any) {
     showMsg(false, 'Failed to recalc');
   }

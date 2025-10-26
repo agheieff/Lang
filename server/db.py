@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, event
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 
@@ -11,7 +11,33 @@ DATA_DIR = Path.cwd() / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "app.db"
 
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+# SQLite tuning for concurrent web usage: allow cross-thread access, wait for locks,
+# and prefer WAL journaling to reduce writer contention.
+engine = create_engine(
+    f"sqlite:///{DB_PATH}",
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30.0,  # seconds to wait on database locks
+    },
+)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, connection_record):  # type: ignore[no-redef]
+    try:
+        cur = dbapi_connection.cursor()
+        # Enable WAL for better concurrency (one writer, many readers)
+        cur.execute("PRAGMA journal_mode=WAL")
+        # Reasonable durability vs performance
+        cur.execute("PRAGMA synchronous=NORMAL")
+        # Enforce FK constraints
+        cur.execute("PRAGMA foreign_keys=ON")
+        # Additional busy timeout at connection level (ms)
+        cur.execute("PRAGMA busy_timeout=30000")
+        cur.close()
+    except Exception:
+        # Best-effort; ignore if driver doesn't support pragmas
+        pass
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
@@ -29,6 +55,7 @@ def init_db() -> None:
     from . import models  # noqa: F401 - ensure models are imported
     _run_migrations()
     _ensure_tables()
+    _ensure_auth_tables()
 
 
 def _run_migrations() -> None:
@@ -52,6 +79,17 @@ def _run_migrations() -> None:
             # profiles: preferred_script (for Chinese)
             if not has_column("profiles", "preferred_script"):
                 conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN preferred_script VARCHAR(8)")
+            # profiles: target_lang
+            if not has_column("profiles", "target_lang"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN target_lang VARCHAR(16) DEFAULT 'en'")
+            # profiles: settings (JSON for flexible preferences)
+            if not has_column("profiles", "settings"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN settings TEXT DEFAULT '{}'")  # SQLite doesn't support JSON type natively
+            # profiles: text_length, text_preferences
+            if not has_column("profiles", "text_length"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN text_length INTEGER")
+            if not has_column("profiles", "text_preferences"):
+                conn.exec_driver_sql("ALTER TABLE profiles ADD COLUMN text_preferences TEXT")
 
             # user_lexemes: importance, importance_var
             if not has_column("user_lexemes", "importance"):
@@ -86,9 +124,18 @@ def _run_migrations() -> None:
                 conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_user_lexemes_due ON user_lexemes(profile_id, next_due_at)")
             except Exception:
                 pass
+            try:
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_ul_user_profile ON user_lexemes(user_id, profile_id)")
+            except Exception:
+                pass
             # translation_logs: response text (to support conversation continuation)
             if not has_column("translation_logs", "response"):
                 conn.exec_driver_sql("ALTER TABLE translation_logs ADD COLUMN response TEXT")
+            # reading_texts: is_read, read_at
+            if not has_column("reading_texts", "is_read"):
+                conn.exec_driver_sql("ALTER TABLE reading_texts ADD COLUMN is_read BOOLEAN DEFAULT 0")
+            if not has_column("reading_texts", "read_at"):
+                conn.exec_driver_sql("ALTER TABLE reading_texts ADD COLUMN read_at DATETIME")
             
             # Tables mapped by SQLAlchemy will be created in _ensure_tables
     except Exception:
@@ -105,3 +152,19 @@ def _ensure_tables() -> None:
                     table.create(bind=conn)
     except Exception:
         pass
+
+
+def _ensure_auth_tables() -> None:
+    """Ensure auth tables from arcadia_auth are created"""
+    try:
+        from arcadia_auth import create_sqlite_engine, create_tables
+
+        # Create auth tables in the same database
+        auth_engine = create_sqlite_engine(f"sqlite:///{DB_PATH}")
+        create_tables(auth_engine)
+        auth_engine.dispose()
+    except Exception as e:
+        # Best-effort; log but don't crash
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to create auth tables: {e}")
