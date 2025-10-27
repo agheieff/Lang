@@ -8,8 +8,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
-# Import Account model from arcadia_auth to avoid duplication
-from arcadia_auth import Account
+# Import Account model from local auth to avoid duplication
+from server.auth import Account
 
 
 class Language(Base):

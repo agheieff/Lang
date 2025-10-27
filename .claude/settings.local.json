@@ -1,13 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(sqlite3 data/app.db \".schema profiles\")",
-      "Bash(sqlite3 data/app.db \"ALTER TABLE profiles DROP COLUMN target_lang;\")",
-      "Bash(sqlite3 data/app.db \".schema\")",
-      "Bash(curl -X POST http://localhost:8000/auth/register )",
-      "Bash(curl -X POST http://localhost:8000/me/profile )",
-      "Bash(curl -X POST http://localhost:8000/auth/login )",
-      "Bash(uv run python -c \"\nimport requests\nimport json\n\n# Test the languages endpoint again\nresponse = requests.get(''http://localhost:8000/languages'')\nprint(''Languages endpoint status:'', response.status_code)\nif response.status_code == 200:\n    data = response.json()\n    print(''Available languages:'')\n    for lang in data.get(''languages'', []):\n        print(f''  {lang[\"\"code\"\"]}: {lang[\"\"name\"\"]}'')\nelse:\n    print(''Error:'', response.text)\n\")"
+      "Bash(tree -I '.venv|__pycache__' -a)"
     ],
     "deny": [],
     "ask": []

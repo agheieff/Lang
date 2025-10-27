@@ -7,12 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from langs.parsing import ENGINES
+from nlp.parsing import ENGINES
 
 from ..db import get_global_db
 from ..account_db import get_db
 from ..models import Profile, ProfilePref, SubscriptionTier, Language
-from arcadia_auth import Account
+from server.auth import Account
 from ..deps import get_current_account
 from ..repos.tiers import ensure_default_tiers
 from ..repos.profiles import get_or_create_profile, get_pref_row, get_user_profile

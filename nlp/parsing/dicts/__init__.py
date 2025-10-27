@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from Lang.parsing.dicts.provider import (
+from .provider import (
     DictionaryProviderChain,
     StarDictProvider,
 )
-from Lang.parsing.dicts.cedict import CedictProvider
+from .cedict import CedictProvider
 
 __all__ = [
     "DictionaryProviderChain",

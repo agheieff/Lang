@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - optional during dev
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from arcadia_auth import Account as User
+from server.auth import Account as User
 from .models import (
     Profile,
     Lexeme,

@@ -11,7 +11,7 @@ from ..account_db import get_db
 from ..models import SubscriptionTier
 from ..repos.tiers import ensure_default_tiers
 from ..deps import get_current_account
-from arcadia_auth import Account
+from server.auth import Account
 
 
 router = APIRouter()

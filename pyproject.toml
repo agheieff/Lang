@@ -10,7 +10,6 @@
    "pystardict>=0.3.1",
    "regex>=2024.7.24",
    "SQLAlchemy>=2.0.32",
-   "PyJWT>=2.9.0",
    "argon2-cffi>=23.1.0",
    "simplemma>=0.9.1",
    "beautifulsoup4>=4.12.3",
@@ -20,10 +19,12 @@
    # Local libs resolved via [tool.uv.sources] as editable installs
    "openrouter>=0.1.0",
    "arcadia-ui-core>=0.1.0",
-   "arcadia-ui-style>=0.1.0",
-   "arcadia-auth>=0.1.0",
-   "ruff>=0.6.0",
-   "requests>=2.32.5",
+  "arcadia-ui-style>=0.1.0",
+  # vendored auth
+  "passlib>=1.7.4",
+  "python-jose>=3.3.0",
+  "ruff>=0.6.0",
+  "requests>=2.32.5",
 ]
 
  [project.optional-dependencies]
@@ -57,6 +58,4 @@ serve = "uvicorn server.main:app --reload --port 8000"
 openrouter = { path = "/home/agheieff/Arcadia/libs/openrouter", editable = true }
 arcadia-ui-core = { path = "/home/agheieff/Arcadia/libs/arcadia_ui_core", editable = true }
 arcadia-ui-style = { path = "/home/agheieff/Arcadia/libs/arcadia_ui_style", editable = true }
-arcadia-auth = { path = "/home/agheieff/Arcadia/libs/auth", editable = true }
-
-
+## local auth is vendored under server/auth; external source removed

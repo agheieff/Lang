@@ -96,7 +96,7 @@ def _resolve_account_id(request: Optional[Request]) -> Optional[int]:
         pass
     # Fallback to Authorization bearer token (decode only)
     try:
-        from arcadia_auth import decode_token  # type: ignore
+        from server.auth import decode_token  # type: ignore
         auth = request.headers.get("authorization") or request.headers.get("Authorization")
         if auth and auth.lower().startswith("bearer "):
             token = auth.split(" ", 1)[1]

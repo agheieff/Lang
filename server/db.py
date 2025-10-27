@@ -79,9 +79,9 @@ def init_db() -> None:
         raise
 
 def _ensure_auth_tables() -> None:
-    """Create authentication tables from arcadia_auth"""
+    """Create authentication tables from local auth package"""
     try:
-        from arcadia_auth import create_sqlite_engine, create_tables
+        from server.auth import create_sqlite_engine, create_tables
 
         auth_engine = create_sqlite_engine(f"sqlite:///{DB_PATH}")
         create_tables(auth_engine)

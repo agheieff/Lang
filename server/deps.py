@@ -8,7 +8,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from .db import GlobalSessionLocal, get_global_db
-from arcadia_auth import Account, decode_token
+from server.auth import Account, decode_token
 
 _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
 logger = logging.getLogger(__name__)

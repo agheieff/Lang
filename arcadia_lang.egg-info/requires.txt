@@ -4,7 +4,6 @@ pydantic>=2.5
 pystardict>=0.3.1
 regex>=2024.7.24
 SQLAlchemy>=2.0.32
-PyJWT>=2.9.0
 argon2-cffi>=23.1.0
 simplemma>=0.9.1
 beautifulsoup4>=4.12.3
@@ -14,7 +13,8 @@ opencc-python-reimplemented>=0.1.7
 openrouter>=0.1.0
 arcadia-ui-core>=0.1.0
 arcadia-ui-style>=0.1.0
-arcadia-auth>=0.1.0
+passlib>=1.7.4
+python-jose>=3.3.0
 ruff>=0.6.0
 requests>=2.32.5
 

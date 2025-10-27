@@ -11,7 +11,7 @@ from sqlalchemy import or_, and_, func
 from ..account_db import get_db
 from ..models import LanguageWordList, Lexeme, UserLexeme, Profile
 from ..deps import get_current_account
-from arcadia_auth import Account
+from server.auth import Account
 
 router = APIRouter()
 
