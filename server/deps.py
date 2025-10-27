@@ -66,6 +66,15 @@ def get_current_account(
         logger.warning(f"Authentication failed: Account inactive: {account_id}")
         raise HTTPException(401, "Account inactive")
 
+    # Ensure a default tier is assigned for newly registered users
+    # We do it here because registration happens in a shared router we don't control.
+    if not getattr(account, "subscription_tier", None):
+        try:
+            account.subscription_tier = "Free"
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Could not assign default tier to account {account_id}: {e}")
+
     return account
 
 

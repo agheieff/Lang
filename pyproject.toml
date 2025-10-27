@@ -7,23 +7,24 @@
    "fastapi>=0.110",
    "uvicorn[standard]>=0.23",
    "pydantic>=2.5",
-  "pystardict>=0.3.1",
-  "regex>=2024.7.24",
-  "SQLAlchemy>=2.0.32",
-  "PyJWT>=2.9.0",
-  "argon2-cffi>=23.1.0",
-  "simplemma>=0.9.1",
-  "beautifulsoup4>=4.12.3",
-  "jieba>=0.42.1",
-  "pypinyin>=0.50.0",
-  "opencc-python-reimplemented>=0.1.7",
-  # Local libs resolved via [tool.uv.sources] as editable installs
-  "openrouter>=0.1.0",
-  "arcadia-ui-core>=0.1.0",
-  "arcadia-ui-style>=0.1.0",
-  "arcadia-auth>=0.1.0",
-  "ruff>=0.6.0",
- ]
+   "pystardict>=0.3.1",
+   "regex>=2024.7.24",
+   "SQLAlchemy>=2.0.32",
+   "PyJWT>=2.9.0",
+   "argon2-cffi>=23.1.0",
+   "simplemma>=0.9.1",
+   "beautifulsoup4>=4.12.3",
+   "jieba>=0.42.1",
+   "pypinyin>=0.50.0",
+   "opencc-python-reimplemented>=0.1.7",
+   # Local libs resolved via [tool.uv.sources] as editable installs
+   "openrouter>=0.1.0",
+   "arcadia-ui-core>=0.1.0",
+   "arcadia-ui-style>=0.1.0",
+   "arcadia-auth>=0.1.0",
+   "ruff>=0.6.0",
+   "requests>=2.32.5",
+]
 
  [project.optional-dependencies]
  # Optional heavy deps; not required for minimal MVP run

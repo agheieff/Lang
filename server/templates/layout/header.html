@@ -1,0 +1,50 @@
+<header class="bg-gradient-to-b from-gray-900 to-gray-800 text-white shadow-lg sticky top-0 z-50">
+  <div class="container mx-auto px-4 py-3 flex items-center justify-between">
+    <a class="text-xl font-bold hover:text-blue-300 transition-colors" href="/">
+      Arcadia Lang
+    </a>
+    <div class="flex items-center space-x-6">
+      {% if request.state.user %}
+        <nav class="flex space-x-4" aria-label="Primary">
+          <a href="/" class="hover:text-blue-300 transition-colors">Practice</a>
+          <a href="/words" class="hover:text-blue-300 transition-colors">Words</a>
+          <a href="/stats" class="hover:text-blue-300 transition-colors">Stats</a>
+        </nav>
+
+        <div class="relative">
+          <button class="flex items-center space-x-2 px-3 py-2 rounded-lg border border-gray-600 bg-gray-800 hover:bg-gray-700 transition-colors" onclick="toggleUserMenu()">
+            <span>Account</span>
+            <span>▾</span>
+          </button>
+          <div class="absolute right-0 top-full mt-2 w-48 bg-white text-gray-800 rounded-lg shadow-lg border border-gray-200 py-2 hidden" id="user-menu">
+            <a href="/profile" class="block px-4 py-2 hover:bg-gray-100">Profile</a>
+            <a href="/settings" class="block px-4 py-2 hover:bg-gray-100">Settings</a>
+            <hr class="my-2" />
+            <a href="/auth/logout" class="block px-4 py-2 hover:bg-gray-100">Log out</a>
+          </div>
+        </div>
+      {% else %}
+        <div class="flex space-x-3">
+          <a href="/login" class="px-4 py-2 border border-gray-600 rounded-lg hover:bg-gray-700 transition-colors">Log in</a>
+          <a href="/signup" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">Sign up</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</header>
+
+<script>
+function toggleUserMenu() {
+  const menu = document.getElementById('user-menu');
+  menu.classList.toggle('hidden');
+}
+
+// Close menu when clicking outside
+document.addEventListener('click', function(event) {
+  const menu = document.getElementById('user-menu');
+  const userBtn = document.querySelector('button[onclick="toggleUserMenu()"]');
+  if (menu && userBtn && !userBtn.contains(event.target) && !menu.contains(event.target)) {
+    menu.classList.add('hidden');
+  }
+});
+</script>

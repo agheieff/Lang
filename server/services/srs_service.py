@@ -36,7 +36,7 @@ from ..config import (
     _SYN_NL_COOLDOWN_DAYS,
 )
 from ..level import update_level_if_stale
-from logic.srs import (
+from .srs_logic import (
     decay_posterior as _decay_posterior,
     SRSParams,
     schedule_next,

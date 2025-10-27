@@ -18,6 +18,8 @@ arcadia_lang.egg-info/SOURCES.txt
 arcadia_lang.egg-info/dependency_links.txt
 arcadia_lang.egg-info/requires.txt
 arcadia_lang.egg-info/top_level.txt
+server/account_db.py
+server/config.py
 server/db.py
 server/deps.py
 server/level.py
@@ -26,11 +28,14 @@ server/main.py
 server/models.py
 server/api/__init__.py
 server/api/profile.py
+server/api/tiers.py
 server/api/wordlists.py
 server/repos/profiles.py
 server/repos/tiers.py
 server/services/level_service.py
+server/services/lexeme_service.py
 server/services/llm_service.py
+server/services/srs_logic.py
 server/services/srs_service.py
 server/services/translation_service.py
 server/services/math/bayesian.py

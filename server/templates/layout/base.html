@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title or "Arcadia Lang" }}</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+
+    <!-- Minimal initialization -->
+    <script>
+    // Enable htmx boost for SPA-like navigation
+    document.addEventListener('DOMContentLoaded', function() {
+        document.body.setAttribute('hx-boost', 'true');
+        document.body.setAttribute('hx-target', '#content');
+        document.body.setAttribute('hx-select', '#content');
+        document.body.setAttribute('hx-swap', 'innerHTML');
+    });
+    </script>
+</head>
+<body>
+    {% include "layout/header.html" %}
+
+    <main id="content">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% include "layout/footer.html" %}
+</body>
+</html>

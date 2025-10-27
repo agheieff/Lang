@@ -18,7 +18,8 @@ from fastapi.responses import RedirectResponse
 # Language engine
 from langs.parsing import ENGINES, format_morph_label
 from langs.dicts import DictionaryProviderChain, StarDictProvider, CedictProvider
-from .db import get_db, init_db, DB_PATH
+from .db import init_db, DB_PATH
+from .account_db import get_db
 from .deps import get_current_account as _get_current_account, require_tier
 from .api.profile import router as profile_router
 from .api.wordlists import router as wordlists_router
@@ -67,6 +68,7 @@ except Exception:
         return None
 from arcadia_auth import decode_token, create_auth_router, AuthSettings, mount_cookie_agent_middleware  # type: ignore
 from fastapi.templating import Jinja2Templates
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # SRS parameters
 _SRS_ALPHA_CLICK = 0.2
@@ -169,7 +171,7 @@ if MSP_ENABLE and msp_router is not None:
     app.include_router(msp_router, prefix="/msp")
 
 # Simple per-minute rate limit by IP or user (no DB lookups)
-# Tier is assumed 'free' until we embed it in JWTs.
+# Assume 'Free' until tier is embedded in JWTs.
 from .config import RATE_LIMITS as _RATE_LIMITS, RATE_WINDOW_SEC as _RATE_WINDOW_SEC
 _RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
 
@@ -179,7 +181,7 @@ async def _rate_limit(request, call_next):
     path = request.url.path
     if not (path.startswith("/api/lookup") or path.startswith("/api/parse") or path.startswith("/translate")):
         return await call_next(request)
-    tier = "free"
+    tier = "Free"
     key: Optional[str] = None
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
     if auth and auth.lower().startswith("bearer "):
@@ -197,7 +199,8 @@ async def _rate_limit(request, call_next):
     # Admin users are unlimited
     if tier == "admin":
         return await call_next(request)
-    limit = _RATE_LIMITS.get(tier, _RATE_LIMITS["free"])
+    # Use configured tier rate; fall back to Free if unknown
+    limit = _RATE_LIMITS.get(tier, _RATE_LIMITS.get("Free", 60))
     now = time.time()
     window = float(_RATE_WINDOW_SEC)
     dq = _RATE_BUCKETS[key]
@@ -1225,145 +1228,61 @@ def get_reading_meta(text_id: int, db: Session = Depends(get_db), account: Accou
     }
 
 
-# ---- UI shell mounting (header/footer/templates) ----
+# ---- Template setup ----
 try:
-    # Optional UI libraries from libs/
-    from arcadia_ui_style import ensure_templates  # type: ignore
-    from arcadia_ui_core import router as ui_router, attach_ui, mount_ui_static, ContextMenuRegistry, MenuItem  # type: ignore
-    tdir = ensure_templates(Path(__file__).resolve().parent)
-    templates = Jinja2Templates(directory=tdir)
-
-    # Create context menus for word interactions
-    context_menu_registry = ContextMenuRegistry()
-
-    # Context menu for word items
-    def word_context_menu(req: ContextMenuRequest) -> List[Dict[str, Any]]:
-        lang = req.dataset.get('lang', 'zh')
-        lemma = req.dataset.get('lemma', '')
-        pos = req.dataset.get('pos', '')
-
-        return [
-            MenuItem(
-                label="Mark as known",
-                hx={
-                    "post": f"/srs/event/nonlookup",
-                    "vals": f"{{'lang': '{lang}', 'items': [{{'lemma': '{lemma}', 'pos': '{pos}'}}]}}"
-                }
-            ),
-            MenuItem(
-                label="Look up word",
-                href=f"/api/lookup?lang={lang}&lemma={lemma}"
-            ),
-            MenuItem(divider=True),
-            MenuItem(
-                label="Add to wordlist",
-                hx={
-                    "post": f"/api/wordlists/add",
-                    "vals": f"{{'lang': '{lang}', 'lemma': '{lemma}'}}"
-                }
-            ),
-        ]
-
-    context_menu_registry.add("word", word_context_menu)
-
-    # Navigation items for header
-    nav_items = [
-        {"label": "Words", "href": "/words", "active": True},
-        {"label": "Stats", "href": "/stats"},
-        {"label": "Settings", "href": "/settings"},
-    ]
-
-    # Attach UI state and mount static assets with enhanced features
-    attach_ui(
-        app,
-        templates,
-        persist_header=True,
-        brand_home_url="/",
-        brand_name="Arcadia Lang",
-        brand_tag="",
-        nav_items=nav_items,
-        context_menus=context_menu_registry,
+    # Simple template setup for our htmx-based templates
+    env = Environment(
+        loader=FileSystemLoader([str(TEMPLATES_DIR)]),
+        autoescape=select_autoescape(["html", "xml"]),
     )
-    mount_ui_static(app)
-    _templates_env = templates  # share env for project pages
-    app.include_router(ui_router)
+    templates = Jinja2Templates(env=env)
+    _templates_env = templates
 except Exception:
     # non-fatal during dev
     pass
 
-# Words browser page (server-rendered HTML using shared header/footer)
+# Words browser page
 @app.get("/words", response_class=HTMLResponse)
 def words_page(request: Request, lang: Optional[str] = None, account: Account = Depends(_get_current_account)):
-    # Use render_page utility for consistent UI layout
-    from arcadia_ui_core import render_page
     t = _templates()
-    return render_page(
-        request,
-        templates,
-        content_template="words.html",
-        title="My Words",
-        context={"lang": lang or "es"}
-    )
+    return t.TemplateResponse("pages/words.html", {"request": request, "title": "My Words", "lang": lang or "es"})
 
 # Login/Signup pages
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
-    from arcadia_ui_core import render_page
     t = _templates()
-    return render_page(
-        request,
-        t,
-        content_template="login.html",
-        title="Log in",
-    )
+    return t.TemplateResponse("pages/login.html", {"request": request, "title": "Log in"})
 
 
 @app.get("/signup", response_class=HTMLResponse)
 def signup_page(request: Request):
-    from arcadia_ui_core import render_page
     t = _templates()
-    return render_page(
-        request,
-        t,
-        content_template="signup.html",
-        title="Sign up",
-    )
+    return t.TemplateResponse("pages/signup.html", {"request": request, "title": "Sign up"})
 
 # Placeholder pages for account menu
 @app.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, account: Account = Depends(_get_current_account)):
-    from arcadia_ui_core import render_page
     t = _templates()
-    return render_page(
-        request,
-        templates,
-        content_template="profile.html",
-        title="Profile"
-    )
+    return t.TemplateResponse("pages/profile.html", {"request": request, "title": "Profile"})
 
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, account: Account = Depends(_get_current_account)):
-    from arcadia_ui_core import render_page
     t = _templates()
-    return render_page(
-        request,
-        templates,
-        content_template="settings.html",
-        title="Settings"
-    )
+    return t.TemplateResponse("pages/settings.html", {"request": request, "title": "Settings"})
 
 
 @app.get("/stats", response_class=HTMLResponse)
 def stats_page(request: Request, account: Account = Depends(_get_current_account)):
-    from arcadia_ui_core import render_page
     t = _templates()
-    return render_page(
-        request,
-        templates,
-        content_template="stats.html",
-        title="Statistics"
-    )
+    return t.TemplateResponse("pages/stats.html", {"request": request, "title": "Statistics"})
+
+
+# Root route - serve our new htmx-based home page
+@app.get("/", response_class=HTMLResponse)
+def home_page(request: Request):
+    t = _templates()
+    return t.TemplateResponse("pages/home.html", {"request": request, "title": "Arcadia Lang"})
 
 
 @app.get("/logout")
@@ -1375,7 +1294,7 @@ def logout() -> RedirectResponse:
         pass
     return resp
 
-# Static site (frontend build output). Mount after custom HTML routes so they take precedence.
+# Static assets (CSS files). Mount at /static/ path
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 if STATIC_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

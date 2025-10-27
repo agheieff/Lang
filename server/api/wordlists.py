@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, func
 
-from ..db import get_db
+from ..account_db import get_db
 from ..models import LanguageWordList, Lexeme, UserLexeme, Profile
 from ..deps import get_current_account
 from arcadia_auth import Account

@@ -64,10 +64,18 @@ _SYN_NL_COOLDOWN_DAYS: int = _i("ARC_SRS_SYN_NL_COOLDOWN_DAYS", 7)
 # Rate limiting (per window per key)
 RATE_WINDOW_SEC: int = _i("ARC_RATE_WINDOW_SEC", 60)
 _DEFAULT_RATE_LIMITS: Dict[str, int] = {
+    # New product tiers
+    "Free": _i("ARC_RATE_FREE", 60),
+    "Standard": _i("ARC_RATE_STANDARD", 300),
+    "Pro": _i("ARC_RATE_PRO", 600),
+    "Pro+": _i("ARC_RATE_PRO_PLUS", 1200),
+    "BYOK": _i("ARC_RATE_BYOK", 100000),
+    # Ops/internal
+    "admin": _i("ARC_RATE_ADMIN", 1000000),  # effectively unlimited; middleware bypasses anyway
+    # Back-compat keys (lowercase legacy)
     "free": _i("ARC_RATE_FREE", 60),
     "pro": _i("ARC_RATE_PRO", 600),
-    "premium": _i("ARC_RATE_PREMIUM", 1200),
-    "admin": _i("ARC_RATE_ADMIN", 1000000),  # effectively unlimited; middleware bypasses anyway
+    "premium": _i("ARC_RATE_STANDARD", 300),
 }
 try:
     _rl_env = os.getenv("ARC_RATE_LIMITS_JSON")
@@ -76,4 +84,3 @@ try:
         RATE_LIMITS = _DEFAULT_RATE_LIMITS
 except Exception:
     RATE_LIMITS = _DEFAULT_RATE_LIMITS
-

@@ -21,6 +21,7 @@ Requires-Dist: arcadia-ui-core>=0.1.0
 Requires-Dist: arcadia-ui-style>=0.1.0
 Requires-Dist: arcadia-auth>=0.1.0
 Requires-Dist: ruff>=0.6.0
+Requires-Dist: requests>=2.32.5
 Provides-Extra: nlp
 Requires-Dist: spacy<4; extra == "nlp"
 Provides-Extra: dicts

@@ -1,0 +1,76 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+<div class="container mx-auto max-w-4xl p-4">
+  <div class="flex items-center gap-2 mb-4">
+    <h1 class="text-2xl font-bold">My Words</h1>
+    <span id="word-count" class="px-2 py-1 text-xs font-medium bg-gray-100 border border-gray-300 rounded">0</span>
+  </div>
+
+  <div class="bg-white rounded-lg shadow-md p-4 mb-4">
+    <div class="flex flex-wrap gap-4 items-center">
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input id="hide-new" type="checkbox" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2" />
+        <span class="text-sm text-gray-700">Hide not yet learned words</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <span class="text-sm text-gray-700">Min stability</span>
+        <input id="min-stab" type="number" step="0.01" min="0" max="1" class="border border-gray-300 rounded px-2 py-1 w-20 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="0.0"/>
+      </label>
+      <input id="search" class="border border-gray-300 rounded px-2 py-1 w-48 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Search lemma" />
+    </div>
+  </div>
+
+  <div class="bg-white rounded-lg shadow-md overflow-hidden">
+    <div class="overflow-auto max-h-96">
+      <table class="w-full text-sm text-left text-gray-700">
+        <thead class="sticky top-0 bg-gray-50">
+          <tr>
+            <th class="px-4 py-2 font-medium">Lemma</th>
+            <th class="px-4 py-2 font-medium">Freq</th>
+            <th class="px-4 py-2 font-medium">Level</th>
+            <th class="px-4 py-2 font-medium">P(click)</th>
+            <th class="px-4 py-2 font-medium">N</th>
+            <th class="px-4 py-2 font-medium">Stability</th>
+            <th class="px-4 py-2 font-medium">Diversity</th>
+            <th class="px-4 py-2 font-medium">Action</th>
+          </tr>
+        </thead>
+        <tbody id="words-table" class="bg-white divide-y divide-gray-200">
+          <!-- Words will be loaded here via htmx -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+// Load words when page loads
+document.addEventListener('DOMContentLoaded', function() {
+  loadWords();
+
+  // Set up filters
+  document.getElementById('hide-new').addEventListener('change', loadWords);
+  document.getElementById('min-stab').addEventListener('change', loadWords);
+  document.getElementById('search').addEventListener('input', function() {
+    clearTimeout(window.searchTimeout);
+    window.searchTimeout = setTimeout(loadWords, 300);
+  });
+});
+
+function loadWords() {
+  const hideNew = document.getElementById('hide-new').checked;
+  const minStab = document.getElementById('min-stab').value;
+  const search = document.getElementById('search').value.trim().toLowerCase();
+
+  let url = '/srs/words?lang=zh';
+  if (minStab) url += `&min_S=${minStab}`;
+
+  // Use htmx to load the words table
+  htmx.ajax('GET', url, {
+    target: '#words-table',
+    swap: 'innerHTML'
+  });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+<div class="container mx-auto max-w-4xl p-4">
+  <h1 class="text-3xl font-bold mb-6">Language Practice</h1>
+
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <h2 class="text-xl font-bold mb-4">Generate Reading Material</h2>
+
+    <form hx-post="/gen/reading" hx-target="#reading-output" class="space-y-4">
+      <div class="flex gap-4 items-center">
+        <label class="flex items-center gap-2">
+          <span>Language:</span>
+          <select name="lang" class="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="zh">Chinese</option>
+            <option value="es">Spanish</option>
+          </select>
+        </label>
+
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
+          Generate Text
+        </button>
+      </div>
+    </form>
+
+    <div id="reading-output" class="mt-4">
+      <!-- Generated text will appear here -->
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div class="bg-white rounded-lg shadow-md p-4">
+      <h3 class="text-lg font-bold mb-2">Your Words</h3>
+      <p class="text-sm text-gray-600 mb-4">
+        Review and manage your vocabulary
+      </p>
+      <a href="/words" class="border border-gray-300 hover:bg-gray-50 px-3 py-1 rounded-lg text-sm transition-colors">View Words</a>
+    </div>
+
+    <div class="bg-white rounded-lg shadow-md p-4">
+      <h3 class="text-lg font-bold mb-2">Progress Stats</h3>
+      <p class="text-sm text-gray-600 mb-4">
+        Track your learning progress
+      </p>
+      <a href="/stats" class="border border-gray-300 hover:bg-gray-50 px-3 py-1 rounded-lg text-sm transition-colors">View Stats</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

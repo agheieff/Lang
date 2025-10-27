@@ -73,4 +73,3 @@ def schedule_next(ul: Any, quality: int, now: datetime, params: SRSParams) -> No
         ul.next_due_at = now + timedelta(days=S2)
     except Exception:
         pass
-

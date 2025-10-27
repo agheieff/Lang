@@ -12,17 +12,30 @@ from .db import Base
 from arcadia_auth import Account
 
 
+class Language(Base):
+    __tablename__ = "languages"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_language_code"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(16), unique=True, index=True)  # e.g., 'es', 'zh', 'en'
+    name: Mapped[str] = mapped_column(String(64))  # e.g., 'Spanish', 'Chinese', 'English'
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Profile(Base):
     __tablename__ = "profiles"  # Using existing table
     __table_args__ = (
-        UniqueConstraint("account_id", "lang", name="uq_profile_lang_account_lang"),
+        UniqueConstraint("account_id", "lang", "target_lang", name="uq_profile_account_lang_target"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # Per-account DB: store numeric account id; no cross-DB FK to accounts
     account_id: Mapped[int] = mapped_column(Integer, index=True)
-    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh' - language being learned
-    target_lang: Mapped[str] = mapped_column(String(16), default="en")  # user's native/reference language
+    # Store language codes directly (not modifiable by user after creation)
+    lang: Mapped[str] = mapped_column(String(16), index=True)  # language being learned (e.g., 'es', 'zh')
+    target_lang: Mapped[str] = mapped_column(String(16), index=True)  # user's native/reference language (e.g., 'en')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     # User's level in this language
     level_value: Mapped[float] = mapped_column(Float, default=0.0)  # continuous estimate (e.g., 0..10)

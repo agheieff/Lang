@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..db import get_db, get_global_db
+from ..db import get_global_db
+from ..account_db import get_db
 from ..models import SubscriptionTier
 from ..repos.tiers import ensure_default_tiers
 from ..deps import get_current_account
@@ -24,8 +25,10 @@ class TierOut(BaseModel):
 @router.get("/tiers", response_model=List[TierOut])
 def list_tiers(db: Session = Depends(get_global_db)):
     ensure_default_tiers(db)
-    rows = db.query(SubscriptionTier).order_by(SubscriptionTier.name.asc()).all()
-    return [TierOut(name=r.name, description=r.description) for r in rows]
+    rows = db.query(SubscriptionTier).all()
+    order = ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"]
+    rows.sort(key=lambda r: (order.index(r.name) if r.name in order else len(order), r.name))
+    return [TierOut(name=r.name, description=r.description) for r in rows if r.name != "admin"]
 
 
 class TierIn(BaseModel):
@@ -34,7 +37,8 @@ class TierIn(BaseModel):
 
 @router.get("/me/tier", response_model=TierIn)
 def get_my_tier(account: Account = Depends(get_current_account)):
-    return TierIn(name=(account.subscription_tier or "free"))
+    # Default to productized baseline tier when unset
+    return TierIn(name=(account.subscription_tier or "Free"))
 
 
 @router.post("/me/tier", response_model=TierIn)
