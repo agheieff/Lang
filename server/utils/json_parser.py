@@ -73,6 +73,65 @@ def extract_text_from_llm_response(response: str) -> str:
     return response
 
 
+def extract_partial_json_string(buffer: str, key: str = "text") -> Optional[str]:
+    """Best-effort extraction of a JSON string value for a given key from a partial/incomplete buffer.
+
+    Handles unfinished JSON while streaming by locating the opening quote after "key": and
+    scanning until the next unescaped matching quote. Returns the partial contents collected so far.
+    """
+    if not buffer:
+        return None
+    try:
+        start_key = f'"{key}"'
+        i = buffer.find(start_key)
+        if i < 0:
+            return None
+        # find colon after key
+        i = buffer.find(":", i)
+        if i < 0:
+            return None
+        # skip spaces
+        n = len(buffer)
+        i += 1
+        while i < n and buffer[i].isspace():
+            i += 1
+        if i >= n:
+            return None
+        q = buffer[i]
+        if q not in ('"', "'"):
+            return None
+        i += 1
+        out: list[str] = []
+        esc = False
+        while i < n:
+            ch = buffer[i]
+            i += 1
+            if esc:
+                # rudimentary unescape for common sequences
+                if ch in ('"', "'", "\\", "/"):
+                    out.append(ch)
+                elif ch == "n":
+                    out.append("\n")
+                elif ch == "t":
+                    out.append("\t")
+                elif ch == "r":
+                    out.append("\r")
+                else:
+                    out.append(ch)
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == q:
+                # closing quote reached
+                break
+            out.append(ch)
+        return "".join(out)
+    except Exception:
+        return None
+
+
 def extract_structured_translation(response: str) -> Optional[Dict[str, Any]]:
     """
     Extract structured translation from LLM response.

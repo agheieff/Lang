@@ -61,7 +61,7 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
     1) explicit requested model
     2) env OPENROUTER_MODEL_NONREASONING (preferred override)
     3) env OPENROUTER_MODEL
-    4) fallback 'openrouter/auto'
+    4) fallback 'moonshotai/kimi-k2:free'
     """
     if requested:
         return requested
@@ -69,7 +69,7 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
     if m:
         return m
     m2 = os.getenv("OPENROUTER_MODEL")
-    return m2 or "openrouter/auto"
+    return m2 or "moonshotai/kimi-k2:free"
 
 
 def _strip_thinking_blocks(text: str) -> str:
@@ -213,45 +213,6 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         include_words_line=include_words_line,
         ci_line=ci_line,
     )
-    return [
-        {"role": "system", "content": sys_content},
-        {"role": "user", "content": user_content},
-    ]
-
-
-def build_word_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
-    """Build prompt for word-by-word translation with linguistic analysis."""
-    def _load_prompt(name: str) -> str:
-        p = Path(__file__).resolve().parent / "prompts" / name
-        try:
-            return p.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
-    def _lang_display(code: str) -> str:
-        if code.startswith("zh"):
-            return "Chinese"
-        if code.startswith("es"):
-            return "Spanish"
-        if code.startswith("fr"):
-            return "French"
-        return code
-
-    sys_tpl = _load_prompt("word_translation_system.txt") or (
-        "You are a professional linguist and translator. Please analyze the provided text and provide detailed word-by-word translations. "
-        "Return a JSON object with 'text' (original) and 'words' array containing word objects with translations, lemmas, and grammatical information."
-    )
-    user_tpl = _load_prompt("word_translation_user.txt") or (
-        "Analyze and translate each word in this {source_lang} text:\n\n{text}"
-    )
-
-    sys_content = sys_tpl
-    user_content = user_tpl.format(
-        source_lang=_lang_display(source_lang),
-        target_lang=_lang_display(target_lang),
-        text=text
-    )
-
     return [
         {"role": "system", "content": sys_content},
         {"role": "user", "content": user_content},

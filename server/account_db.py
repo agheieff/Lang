@@ -5,7 +5,7 @@ import os
 from typing import Generator, Optional, Dict
 
 from fastapi import Request
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -90,8 +90,12 @@ def _resolve_account_id(request: Optional[Request]) -> Optional[int]:
     # Prefer middleware-populated user
     try:
         user = getattr(request.state, "user", None)
-        if user is not None and hasattr(user, "id"):
-            return int(getattr(user, "id"))
+        if user is not None:
+            # Support object with .id or dict with ['id']
+            if hasattr(user, "id"):
+                return int(getattr(user, "id"))
+            if isinstance(user, dict) and ("id" in user):
+                return int(user["id"])  # type: ignore[arg-type]
     except Exception:
         pass
     # Fallback to Authorization bearer token (decode only)

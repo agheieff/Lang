@@ -10,11 +10,10 @@ from ..models import (
     ReadingText,
     GenerationLog,
 )
-from sqlalchemy import func
 from ..services.level_service import get_ci_target
 from ..llm import PromptSpec, build_reading_prompt, chat_complete
 from ..llm import pick_words as _pick_words, compose_level_hint as _compose_level_hint
-from ..config import MSP_ENABLE
+# MSP_ENABLE currently unused in this module
 try:
     from logic.mstream.saver import save_word_gloss  # type: ignore
 except Exception:
@@ -76,8 +75,10 @@ def generate_reading(
     base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
 
     # Wrap account id as a minimal identity for llm helpers
-    class _U: pass
-    user = _U(); user.id = account_id
+    class _U:
+        pass
+    user = _U()
+    user.id = account_id
 
     words = include_words or _pick_words(db, user, lang, count=12, new_ratio=base_new_ratio)
     level_hint = _compose_level_hint(db, user, lang)
@@ -135,6 +136,14 @@ def generate_reading(
     rt = ReadingText(account_id=account_id, lang=lang, content=text)
     db.add(rt)
     db.flush()
+
+    # Update profile's current_text_id to point to this new text
+    try:
+        prof_for_flag = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+        if prof_for_flag:
+            prof_for_flag.current_text_id = rt.id
+    except Exception:
+        pass
 
     # Generate structured translations (sentence-by-sentence) and word translations
     structured_translations = None

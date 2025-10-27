@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-# Language support removed - all languages are now supported
-SUPPORTED_LANGUAGES = {"es", "zh", "zh-Hans", "zh-Hant", "en"}
-
 from ..db import get_global_db
 from ..account_db import get_db
-from ..models import Profile, ProfilePref, SubscriptionTier, Language
+from ..models import Profile, ProfilePref
 from server.auth import Account
 from ..deps import get_current_account
-from ..repos.tiers import ensure_default_tiers
 from ..repos.profiles import get_or_create_profile, get_pref_row, get_user_profile
+
+# Supported languages (learning): Spanish and Chinese (Simplified/Traditional variants)
+SUPPORTED_LANGUAGES = {"es", "zh", "zh-Hans", "zh-Hant", "en"}
 
 # Server-side guardrails for free-form profile fields
 _MIN_TEXT_LEN = 50
@@ -30,12 +29,16 @@ def _is_supported_lang(code: str) -> bool:
     return code in SUPPORTED_LANGUAGES
 
 
-def _get_available_language(db: Session, code: str) -> Optional[Language]:
-    """Get language from global catalog if it exists and is supported."""
-    lang = db.query(Language).filter(Language.code == code).first()
-    if lang and _is_supported_lang(code):
-        return lang
-    return None
+def _normalize_lang_and_script(code: str) -> Tuple[str, Optional[str]]:
+    """Map UI codes to stored codes.
+
+    zh-Hans -> ("zh", "Hans"), zh-Hant -> ("zh", "Hant"), others unchanged.
+    """
+    if code == "zh-Hans":
+        return ("zh", "Hans")
+    if code == "zh-Hant":
+        return ("zh", "Hant")
+    return (code, None)
 
 
 class ProfileRequest(BaseModel):
@@ -51,61 +54,56 @@ class ProfileRequest(BaseModel):
 
 
 @router.get("/languages")
-def get_available_languages(
-    tiers_db: Session = Depends(get_global_db),
-):
-    """Get all available languages from the global catalog."""
-    ensure_default_tiers(tiers_db)
-    languages = tiers_db.query(Language).all()
-    available = []
-    for lang in languages:
-        if _is_supported_lang(lang.code):
-            available.append({
-                "code": lang.code,
-                "name": lang.name,
-                "created_at": lang.created_at
-            })
-    return {"languages": available}
+def get_available_languages(_: Session = Depends(get_global_db)):
+    """Return supported learning language options for the UI.
+
+    Chinese is exposed as two script options mapped to the same stored 'zh' language.
+    """
+    return {
+        "languages": [
+            {"code": "es", "name": "Spanish"},
+            {"code": "zh-Hans", "name": "Chinese (Simplified)"},
+            {"code": "zh-Hant", "name": "Chinese (Traditional)"},
+        ]
+    }
 
 
 @router.post("/me/profile")
 def create_profile(
     req: ProfileRequest,
     db: Session = Depends(get_db),
-    tiers_db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
-    """Create a new profile with languages from global catalog."""
-    ensure_default_tiers(tiers_db)
-
-    # Validate that languages exist in global catalog
-    lang_obj = _get_available_language(tiers_db, req.lang)
-    target_lang_obj = _get_available_language(tiers_db, req.target_lang or "en")
-
-    if not lang_obj:
+    """Create a new learning profile. Accepts 'zh-Hans'/'zh-Hant' and stores as 'zh' with script."""
+    if not _is_supported_lang(req.lang):
         raise HTTPException(400, f"Unsupported language: {req.lang}")
-    if not target_lang_obj:
+    tgt = req.target_lang or "en"
+    if not _is_supported_lang(tgt):
         raise HTTPException(400, f"Unsupported target language: {req.target_lang}")
 
+    lang_code, script_from_code = _normalize_lang_and_script(req.lang)
+
     # Check if profile already exists
-    existing_profile = get_user_profile(db, account.id, req.lang, req.target_lang or "en")
+    existing_profile = get_user_profile(db, account.id, lang_code, tgt)
     if existing_profile:
         raise HTTPException(409, "Profile already exists for this language combination")
 
     # Create profile with language codes directly (not modifiable after creation)
     prof = Profile(
         account_id=account.id,
-        lang=req.lang,
-        target_lang=req.target_lang or "en"
+        lang=lang_code,
+        target_lang=tgt,
     )
     if req.settings is not None:
         pref = get_pref_row(db, prof.id)
         pref.data = req.settings
-    if req.preferred_script is not None and req.lang.startswith("zh"):
-        ps = req.preferred_script
-        if ps not in ("Hans", "Hant"):
-            raise HTTPException(400, "preferred_script must be 'Hans' or 'Hant'")
-        prof.preferred_script = ps
+    # Preferred script handling for Chinese
+    if lang_code.startswith("zh"):
+        ps = req.preferred_script or script_from_code
+        if ps is not None:
+            if ps not in ("Hans", "Hant"):
+                raise HTTPException(400, "preferred_script must be 'Hans' or 'Hant'")
+            prof.preferred_script = ps
     if req.level_value is not None:
         prof.level_value = float(req.level_value)
     if req.level_var is not None:
@@ -139,8 +137,8 @@ def create_profile(
     return {
         "ok": True,
         "account_id": account.id,
-        "lang": req.lang,
-        "target_lang": req.target_lang or "en",
+        "lang": lang_code,
+        "target_lang": tgt,
         "level_value": prof.level_value,
         "level_var": prof.level_var,
         "level_code": prof.level_code,
@@ -180,7 +178,8 @@ def update_profile(
     account: Account = Depends(get_current_account),
 ):
     """Update an existing profile (languages cannot be changed)."""
-    prof = get_user_profile(db, account.id, lang, target_lang)
+    norm_lang, script_from_code = _normalize_lang_and_script(lang)
+    prof = get_user_profile(db, account.id, norm_lang, target_lang)
     if not prof:
         raise HTTPException(404, "Profile not found")
 
@@ -188,8 +187,8 @@ def update_profile(
     if req.settings is not None:
         pref = get_pref_row(db, prof.id)
         pref.data = req.settings
-    if req.preferred_script is not None and lang.startswith("zh"):
-        ps = req.preferred_script
+    if (req.preferred_script is not None or script_from_code is not None) and norm_lang.startswith("zh"):
+        ps = req.preferred_script or script_from_code
         if ps not in ("Hans", "Hant"):
             raise HTTPException(400, "preferred_script must be 'Hans' or 'Hant'")
         prof.preferred_script = ps

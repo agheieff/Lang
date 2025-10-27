@@ -4,9 +4,150 @@
 <div class="container mx-auto max-w-2xl p-4">
   <h1 class="text-2xl font-bold mb-6">Settings</h1>
 
+  <!-- Profile Settings Section -->
+  {% if current_profile %}
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <h2 class="text-xl font-bold mb-4">Language Learning Preferences</h2>
+    <p class="text-gray-600 mb-6">Configure your preferences for reading generation and content selection.</p>
+
+    <!-- Text Preferences Field -->
+    <div class="mb-6">
+      <label for="text-preferences" class="block text-sm font-medium text-gray-700 mb-2">
+        Reading Content Preferences
+      </label>
+      <textarea
+        id="text-preferences"
+        name="text-preferences"
+        rows="4"
+        class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+        placeholder="Describe topics, themes, or content types you'd like to see in generated readings. For example: 'travel, technology, daily life, cultural topics, business conversations'"
+        hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
+        hx-vals='js:{text_preferences: this.value}'
+        hx-trigger="change delay:500ms"
+        hx-ext="json-enc"
+        hx-target="#preferences-status"
+        hx-swap="innerHTML"
+      >{{ current_profile.text_preferences or '' }}</textarea>
+      <div id="preferences-status" class="mt-2 text-sm text-gray-500"></div>
+      <p class="mt-1 text-sm text-gray-500">
+        These preferences help customize the content of generated readings to match your interests.
+      </p>
+    </div>
+
+    <!-- Text Length Field -->
+    <div class="mb-6">
+      <label for="text-length" class="block text-sm font-medium text-gray-700 mb-2">
+        Preferred Reading Length
+      </label>
+      <input
+        type="number"
+        id="text-length"
+        name="text-length"
+        min="50"
+        max="2000"
+        value="{{ current_profile.text_length or 300 }}"
+        class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+        hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
+        hx-vals='js:{text_length: parseInt(this.value)}'
+        hx-trigger="change delay:500ms"
+        hx-ext="json-enc"
+        hx-target="#length-status"
+        hx-swap="innerHTML"
+      >
+      <div id="length-status" class="mt-2 text-sm text-gray-500"></div>
+      <p class="mt-1 text-sm text-gray-500">
+        Target length in words (50-2000 words). Shorter texts are easier for beginners.
+      </p>
+    </div>
+
+    <!-- Language Level Display -->
+    <div class="mb-6">
+      <h3 class="text-lg font-medium text-gray-900 mb-2">Current Language Level</h3>
+      <div class="flex items-center space-x-4">
+        <div class="flex-1">
+          <div class="flex justify-between text-sm text-gray-600 mb-1">
+            <span>Estimated Level</span>
+            <span>{{ "%.1f"|format(current_profile.level_value) if current_profile.level_value else '0.0' }}/10.0</span>
+          </div>
+          <div class="w-full bg-gray-200 rounded-full h-2">
+            <div
+              class="bg-blue-600 h-2 rounded-full transition-all duration-300"
+              style="width: {{ (current_profile.level_value / 10 * 100) if current_profile.level_value else 0 }}%"
+            ></div>
+          </div>
+        </div>
+        {% if current_profile.level_code %}
+        <div class="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
+          {{ current_profile.level_code }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Profile Information -->
+    <div class="border-t border-gray-200 pt-4">
+      <h3 class="text-lg font-medium text-gray-900 mb-2">Profile Information</h3>
+      <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <dt class="text-sm font-medium text-gray-500">Learning Language</dt>
+          <dd class="text-sm text-gray-900">{{ current_profile.lang }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm font-medium text-gray-500">Target Language</dt>
+          <dd class="text-sm text-gray-900">{{ current_profile.target_lang }}</dd>
+        </div>
+        {% if current_profile.preferred_script %}
+        <div>
+          <dt class="text-sm font-medium text-gray-500">Preferred Script</dt>
+          <dd class="text-sm text-gray-900">{{ current_profile.preferred_script }}</dd>
+        </div>
+        {% endif %}
+        <div>
+          <dt class="text-sm font-medium text-gray-500">Created</dt>
+          <dd class="text-sm text-gray-900">{{ current_profile.created_at.strftime('%Y-%m-%d') }}</dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+  {% else %}
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <h2 class="text-xl font-bold mb-2">Language Learning Preferences</h2>
+    <p class="text-gray-600">No profile found. Create one on the <a href="/profile" class="text-blue-600 underline">Profile</a> page to configure preferences.</p>
+  </div>
+  {% endif %}
+
+  <!-- Application Settings Section -->
   <div class="bg-white rounded-lg shadow-md p-6">
     <h2 class="text-xl font-bold mb-4">Application Settings</h2>
-    <p class="text-gray-600">Configure your language learning preferences.</p>
+    <p class="text-gray-600">General application configuration and preferences.</p>
+
+    <!-- Placeholder for future settings -->
+    <div class="mt-4 p-4 bg-gray-50 rounded-lg">
+      <p class="text-sm text-gray-500">Additional application settings will appear here.</p>
+    </div>
   </div>
 </div>
+
+<script>
+// Add visual feedback for form submissions
+function setupFormFeedback() {
+  // Success handler for text preferences
+  htmx.on('htmx:afterRequest', function(evt) {
+    const target = evt.detail.target;
+    if (target && evt.detail.xhr.status === 200) {
+      target.innerHTML = '<span class="text-green-600">✓ Preferences saved</span>';
+      setTimeout(() => {
+        target.innerHTML = '';
+      }, 3000);
+    } else if (target && evt.detail.xhr.status !== 200) {
+      target.innerHTML = '<span class="text-red-600">✗ Failed to save</span>';
+      setTimeout(() => {
+        target.innerHTML = '';
+      }, 3000);
+    }
+  });
+}
+
+document.addEventListener('DOMContentLoaded', setupFormFeedback);
+</script>
 {% endblock %}

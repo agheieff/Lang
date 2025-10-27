@@ -8,54 +8,101 @@
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
     <h2 class="text-xl font-bold mb-4">Get Started</h2>
     <p class="text-gray-600 mb-4">
+      {% if is_authenticated %}
       Create a language profile to start practicing with automatically generated texts.
+      {% else %}
+      Create an account to start practicing with automatically generated texts.
+      {% endif %}
     </p>
-    <a href="/profile" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors inline-block">
-      Create Profile
+    <a href="{% if is_authenticated %}/profile{% else %}/signup{% endif %}"
+       class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors inline-block">
+      {% if is_authenticated %}Create Profile{% else %}Sign Up{% endif %}
     </a>
   </div>
   {% else %}
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
     <h2 class="text-xl font-bold mb-4">Current Reading</h2>
-
-    {% if current_text %}
-    <div id="current-reading" class="border border-gray-200 rounded-lg p-4 bg-gray-50">
-      <div class="prose max-w-none">
-        {{ current_text.content }}
-      </div>
-      <div class="mt-4 flex gap-2">
-        <button
-          hx-post="/reading/{{ current_text_id }}/mark_opened"
-          hx-target="#current-reading"
-          hx-swap="outerHTML"
-          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-        >
-          Mark as Read
-        </button>
-        <button
-          hx-get="/reading/{{ current_text_id }}/words"
-          hx-target="#current-reading"
-          hx-swap="innerHTML"
-          class="border border-gray-300 hover:bg-gray-50 px-4 py-2 rounded-lg transition-colors"
-        >
-          View Words
-        </button>
+    <div id="current-reading"
+         class="border border-gray-200 rounded-lg p-4 bg-gray-50"
+         hx-get="/reading/current"
+         hx-trigger="load delay:200ms"
+         hx-swap="innerHTML"
+         hx-target="#current-reading"
+         hx-disinherit="*"
+         hx-select="*"
+         data-lang="{{ profile_lang or '' }}">
+      <div class="animate-pulse space-y-3">
+        <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+        <div class="h-4 bg-gray-200 rounded w-5/6"></div>
+        <div class="h-4 bg-gray-200 rounded w-2/3"></div>
+        <div class="h-4 bg-gray-200 rounded w-4/5"></div>
       </div>
     </div>
-    {% elif generation_error %}
-    <div class="bg-red-50 border border-red-200 rounded-lg p-4">
-      <p class="text-red-700">Failed to generate text: {{ generation_error }}</p>
-      <p class="text-sm text-red-600 mt-2">Please check your LLM configuration.</p>
-    </div>
-    {% else %}
-    <div class="text-center py-8">
-      <p class="text-gray-500">No reading material available at the moment.</p>
-      <p class="text-sm text-gray-400 mt-2">New texts are generated automatically when you finish reading the current ones.</p>
-    </div>
-    {% endif %}
+    <script>
+    (function(){
+      let streaming = false;
+      async function startStreamIfNeeded(){
+        const container = document.getElementById('current-reading');
+        if (!container || streaming) return;
+        const contentEl = container.querySelector('#cr-content');
+        const statusEl = container.querySelector('#cr-status');
+        if (!contentEl) return; // not in streaming state
+        streaming = true;
+        contentEl.innerHTML = '';
+        try {
+          const resp = await fetch('/reading/current/stream');
+          if (!resp.ok || !resp.body) throw new Error('stream failed');
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let gotAny = false;
+          let fallbackTimer = setTimeout(async () => {
+            if (gotAny) return;
+            // Fallback: trigger synchronous generation then reload block
+            const lang = container.dataset.lang || 'es';
+            try {
+              await fetch('/gen/reading', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lang })
+              });
+            } catch (e) {}
+            try {
+              const html = await (await fetch('/reading/current?_ts=' + Date.now())).text();
+              container.innerHTML = html;
+            } catch (e) {}
+          }, 8000);
+          while (true) {
+            const {value, done} = await reader.read();
+            if (value) {
+              const chunk = decoder.decode(value, {stream: !done});
+              contentEl.insertAdjacentText('beforeend', chunk);
+              gotAny = true;
+            }
+            if (done) break;
+          }
+          clearTimeout(fallbackTimer);
+          const html = await (await fetch('/reading/current?_ts=' + Date.now())).text();
+          container.innerHTML = html;
+        } catch (e) {
+          if (statusEl) statusEl.textContent = 'Failed to start generation.';
+        } finally {
+          streaming = false;
+        }
+      }
+      document.addEventListener('htmx:afterSwap', function(ev){
+        if (ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading') {
+          startStreamIfNeeded();
+        } else {
+          startStreamIfNeeded();
+        }
+      });
+      window.addEventListener('load', startStreamIfNeeded);
+    })();
+    </script>
   </div>
   {% endif %}
 
+  {% if is_authenticated %}
   <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
     <div class="bg-white rounded-lg shadow-md p-4">
       <h3 class="text-lg font-bold mb-2">Your Words</h3>
@@ -73,5 +120,6 @@
       <a href="/stats" class="border border-gray-300 hover:bg-gray-50 px-3 py-1 rounded-lg text-sm transition-colors">View Stats</a>
     </div>
   </div>
+  {% endif %}
 </div>
 {% endblock %}

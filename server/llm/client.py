@@ -45,7 +45,7 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
     1) explicit requested model
     2) env OPENROUTER_MODEL_NONREASONING (preferred override)
     3) env OPENROUTER_MODEL
-    4) fallback 'openrouter/auto'
+    4) fallback 'moonshotai/kimi-k2:free'
     """
     if requested:
         return requested
@@ -53,7 +53,7 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
     if m:
         return m
     m2 = os.getenv("OPENROUTER_MODEL")
-    return m2 or "openrouter/auto"
+    return m2 or "moonshotai/kimi-k2:free"
 
 
 def _strip_thinking_blocks(text: str) -> str:
@@ -90,6 +90,10 @@ def chat_complete(
         if _or_complete is None:
             raise RuntimeError("openrouter client not available")
         model_id = _pick_openrouter_model(model)
+        try:
+            print(f"[LLM] Calling provider=openrouter model={model_id} messages={len(messages)}")
+        except Exception:
+            pass
         resp = _or_complete(
             messages,
             model=model_id,
@@ -103,11 +107,19 @@ def chat_complete(
                 if isinstance(msg, dict):
                     content = msg.get("content")
                     if isinstance(content, str):
+                        try:
+                            print(f"[LLM] Received response len={len(content)}")
+                        except Exception:
+                            pass
                         return _strip_thinking_blocks(content)
         raise RuntimeError("invalid openrouter response")
 
     # Local OpenAI-compatible API
     model_id = resolve_model(base_url, model)
+    try:
+        print(f"[LLM] Calling provider=local base_url={base_url} model={model_id} messages={len(messages)}")
+    except Exception:
+        pass
     data = {
         "model": model_id,
         "messages": messages,
@@ -127,4 +139,8 @@ def chat_complete(
     content = msg.get("content")
     if not isinstance(content, str):
         raise RuntimeError("no content in message")
+    try:
+        print(f"[LLM] Received response len={len(content)}")
+    except Exception:
+        pass
     return _strip_thinking_blocks(content)

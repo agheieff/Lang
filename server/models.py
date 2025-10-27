@@ -4,12 +4,11 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float, Boolean, Index
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
 
-# Import Account model from local auth to avoid duplication
-from server.auth import Account
+# Import Account model intentionally omitted to avoid cross-DB FKs
 
 
 class Language(Base):
@@ -49,6 +48,8 @@ class Profile(Base):
     text_length: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     # Free-form preferences/topics for reading generation
     text_preferences: Mapped[Optional[str]] = mapped_column(String, default=None)
+    # Current text being read (not yet fully read). One per profile.
+    current_text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
 
     # Relationship to Account (global DB) is not declared to avoid cross-DB FK
     # account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
