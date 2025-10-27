@@ -157,6 +157,7 @@ async def _astream_generator(
     max_tokens: int = 32_768,
     thinking: bool = False,
     cancellation_event: Optional[asyncio.Event] = None,
+    on_event: Optional[Callable[[dict], None]] = None,
 ) -> AsyncIterator[Chunk]:
     """
     Internal generator that yields (kind, text) tuples while the model streams.
@@ -189,6 +190,12 @@ async def _astream_generator(
                     if chunk == "[DONE]":
                         break
                     data = json.loads(chunk)
+                    # Allow callers to capture the raw SSE JSON event
+                    try:
+                        if on_event is not None and isinstance(data, dict):
+                            on_event(data)
+                    except Exception:
+                        pass
 
                     # usage block (sent once at the end)
                     if "usage" in data:
@@ -229,6 +236,7 @@ def astream(
     *,
     max_tokens: int = 32_768,
     thinking: bool = False,
+    on_event: Optional[Callable[[dict], None]] = None,
 ) -> StreamController:
     """
     Return a controllable stream that allows stopping generation mid-stream.
@@ -237,7 +245,7 @@ def astream(
         StreamController: A stream object with stop() method to cancel generation.
     """
     return StreamController(lambda cancellation_event=None: _astream_generator(
-        messages, model, max_tokens=max_tokens, thinking=thinking, cancellation_event=cancellation_event
+        messages, model, max_tokens=max_tokens, thinking=thinking, cancellation_event=cancellation_event, on_event=on_event
     ))
 
 async def consume_and_drop(generator: AsyncIterator[Chunk]) -> None:

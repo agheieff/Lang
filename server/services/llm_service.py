@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -145,7 +146,7 @@ def generate_reading(
     except Exception:
         pass
 
-    # Generate structured translations (sentence-by-sentence) and word translations
+    # Generate structured translations and word translations IN PARALLEL, using the reading context (4 messages)
     structured_translations = None
     word_translations = None
     try:
@@ -153,73 +154,88 @@ def generate_reading(
         prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
         target_lang = prof.target_lang if prof and prof.target_lang else "en"
 
-        # Build structured translation prompt
+        # Prepare 4-message history: system + (reading user) + assistant(text) + task user
+        reading_user_content = (messages[1]["content"] if messages and len(messages) > 1 else "")
+
+        # Structured translation messages (4)
         from ..llm import build_structured_translation_prompt
-        translation_messages = build_structured_translation_prompt(lang, target_lang, text)
+        tr_msgs = build_structured_translation_prompt(lang, target_lang, text)
+        tr_system = tr_msgs[0]["content"]
+        tr_user = tr_msgs[1]["content"]
+        translation_messages = [
+            {"role": "system", "content": tr_system},
+            {"role": "user", "content": reading_user_content},
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": tr_user},
+        ]
 
-        # Call LLM for structured translation
-        translation_response = chat_complete(
-            translation_messages,
-            provider=provider,
-            model=model,
-            base_url=base_url
-        )
+        # Word translation messages (4)
+        from ..llm import build_word_translation_prompt
+        w_msgs = build_word_translation_prompt(lang, target_lang, text)
+        w_system = w_msgs[0]["content"]
+        w_user = w_msgs[1]["content"]
+        word_messages = [
+            {"role": "system", "content": w_system},
+            {"role": "user", "content": reading_user_content},
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": w_user},
+        ]
 
-        # Parse structured translation response
+        # Execute both LLM calls in parallel threads (no DB ops in threads)
+        results: Dict[str, Optional[str]] = {"structured": None, "words": None}
+        def _call(kind: str, msgs: List[Dict[str, str]]) -> None:
+            try:
+                out = chat_complete(msgs, provider=provider, model=model, base_url=base_url)
+                results[kind] = out
+            except Exception:  # pragma: no cover
+                results[kind] = None
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_tr = ex.submit(_call, "structured", translation_messages)
+            fut_wd = ex.submit(_call, "words", word_messages)
+            # wait for both to complete
+            for _ in as_completed([fut_tr, fut_wd]):
+                pass
+
+        # Parse and persist structured translation
         from ..utils.json_parser import extract_structured_translation
-        structured_translations = extract_structured_translation(translation_response)
+        tr_resp = results["structured"]
+        if tr_resp:
+            structured_translations = extract_structured_translation(tr_resp)
+            if structured_translations:
+                from ..models import ReadingTextTranslation
+                paragraph_index = 0
+                for paragraph in structured_translations.get("paragraphs", []):
+                    sentence_index = 0
+                    for sentence in paragraph.get("sentences", []):
+                        if "text" in sentence and "translation" in sentence:
+                            rtt = ReadingTextTranslation(
+                                account_id=account_id,
+                                text_id=rt.id,
+                                unit="sentence",
+                                target_lang=target_lang,
+                                segment_index=sentence_index,
+                                span_start=None,
+                                span_end=None,
+                                source_text=sentence["text"],
+                                translated_text=sentence["translation"],
+                                provider=provider,
+                                model=model,
+                            )
+                            db.add(rtt)
+                            sentence_index += 1
+                    paragraph_index += 1
 
-        # Store structured translations in database
-        if structured_translations:
-            from ..models import ReadingTextTranslation
-            paragraph_index = 0
-            for paragraph in structured_translations.get("paragraphs", []):
-                sentence_index = 0
-                for sentence in paragraph.get("sentences", []):
-                    if "text" in sentence and "translation" in sentence:
-                        # Store sentence translation
-                        rtt = ReadingTextTranslation(
-                            account_id=account_id,
-                            text_id=rt.id,
-                            unit="sentence",
-                            target_lang=target_lang,
-                            segment_index=sentence_index,
-                            span_start=None,  # We don't have position info from structured translation
-                            span_end=None,
-                            source_text=sentence["text"],
-                            translated_text=sentence["translation"],
-                            provider=provider,
-                            model=model,
-                        )
-                        db.add(rtt)
-                        sentence_index += 1
-                paragraph_index += 1
-
-        # Generate word-by-word translations
-        try:
-            # Build word translation prompt
-            from ..llm import build_word_translation_prompt
-            word_messages = build_word_translation_prompt(lang, target_lang, text)
-
-            # Call LLM for word translations
-            word_response = chat_complete(
-                word_messages,
-                provider=provider,
-                model=model,
-                base_url=base_url
-            )
-
-            # Parse word translation response
-            from ..utils.json_parser import extract_word_translations
-            word_translations = extract_word_translations(word_response)
-
-            # Store word translations in database
+        # Parse and persist word translations
+        from ..utils.json_parser import extract_word_translations
+        wd_resp = results["words"]
+        if wd_resp:
+            word_translations = extract_word_translations(wd_resp)
             if word_translations:
                 from ..models import ReadingWordGloss
                 word_index = 0
                 for word_data in word_translations.get("words", []):
                     if "word" in word_data and "translation" in word_data:
-                        # Store word gloss
                         rwg = ReadingWordGloss(
                             account_id=account_id,
                             text_id=rt.id,
@@ -230,42 +246,13 @@ def generate_reading(
                             translation=word_data["translation"],
                             lemma_translation=word_data.get("lemma_translation"),
                             grammar=word_data.get("grammar", {}),
-                            span_start=None,  # Position info not available from word analysis
+                            span_start=None,
                             span_end=None,
                         )
                         db.add(rwg)
                         word_index += 1
 
-            # Log word translation request
-            _log_llm_request_safe({
-                "account_id": account_id,
-                "text_id": rt.id,
-                "kind": "word_translation",
-                "provider": (provider or None),
-                "model": (model or None),
-                "base_url": (base_url or None),
-                "status": "ok",
-                "request": {"messages": word_messages},
-                "response": word_response,
-                "error": None,
-            })
-
-        except Exception as e:
-            # Log word translation failure but don't fail the whole request
-            _log_llm_request_safe({
-                "account_id": account_id,
-                "text_id": rt.id,
-                "kind": "word_translation",
-                "provider": (provider or None),
-                "model": (model or None),
-                "base_url": (base_url or None),
-                "status": "error",
-                "request": {"messages": word_messages if 'word_messages' in locals() else None},
-                "response": None,
-                "error": str(e),
-            })
-
-        # Log translation request
+        # Log requests
         _log_llm_request_safe({
             "account_id": account_id,
             "text_id": rt.id,
@@ -273,23 +260,35 @@ def generate_reading(
             "provider": (provider or None),
             "model": (model or None),
             "base_url": (base_url or None),
-            "status": "ok",
+            "status": ("ok" if tr_resp else "error"),
             "request": {"messages": translation_messages},
-            "response": translation_response,
-            "error": None,
+            "response": tr_resp,
+            "error": None if tr_resp else "none",
         })
-
-    except Exception as e:
-        # Log translation failure but don't fail the whole request
         _log_llm_request_safe({
             "account_id": account_id,
             "text_id": rt.id,
-            "kind": "structured_translation",
+            "kind": "word_translation",
+            "provider": (provider or None),
+            "model": (model or None),
+            "base_url": (base_url or None),
+            "status": ("ok" if wd_resp else "error"),
+            "request": {"messages": word_messages},
+            "response": wd_resp,
+            "error": None if wd_resp else "none",
+        })
+
+    except Exception as e:
+        # Log failures but don't fail main reading generation
+        _log_llm_request_safe({
+            "account_id": account_id,
+            "text_id": rt.id,
+            "kind": "post_reading",
             "provider": (provider or None),
             "model": (model or None),
             "base_url": (base_url or None),
             "status": "error",
-            "request": {"messages": translation_messages if 'translation_messages' in locals() else None},
+            "request": None,
             "response": None,
             "error": str(e),
         })

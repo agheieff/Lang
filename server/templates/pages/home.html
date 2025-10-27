@@ -31,7 +31,7 @@
          hx-disinherit="*"
          hx-select="*"
          data-lang="{{ profile_lang or '' }}">
-      <div class="animate-pulse space-y-3">
+      <div class="animate-pulse space-y-3" aria-hidden="true">
         <div class="h-4 bg-gray-200 rounded w-3/4"></div>
         <div class="h-4 bg-gray-200 rounded w-5/6"></div>
         <div class="h-4 bg-gray-200 rounded w-2/3"></div>
@@ -40,63 +40,90 @@
     </div>
     <script>
     (function(){
-      let streaming = false;
-      async function startStreamIfNeeded(){
+      async function initWordClicks(){
         const container = document.getElementById('current-reading');
-        if (!container || streaming) return;
-        const contentEl = container.querySelector('#cr-content');
-        const statusEl = container.querySelector('#cr-status');
-        if (!contentEl) return; // not in streaming state
-        streaming = true;
-        contentEl.innerHTML = '';
-        try {
-          const resp = await fetch('/reading/current/stream');
-          if (!resp.ok || !resp.body) throw new Error('stream failed');
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          let gotAny = false;
-          let fallbackTimer = setTimeout(async () => {
-            if (gotAny) return;
-            // Fallback: trigger synchronous generation then reload block
-            const lang = container.dataset.lang || 'es';
-            try {
-              await fetch('/gen/reading', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lang })
-              });
-            } catch (e) {}
-            try {
-              const html = await (await fetch('/reading/current?_ts=' + Date.now())).text();
-              container.innerHTML = html;
-            } catch (e) {}
-          }, 8000);
-          while (true) {
-            const {value, done} = await reader.read();
-            if (value) {
-              const chunk = decoder.decode(value, {stream: !done});
-              contentEl.insertAdjacentText('beforeend', chunk);
-              gotAny = true;
-            }
-            if (done) break;
+        const textEl = container && container.querySelector('#reading-text');
+        if (!textEl) return;
+        const textId = textEl.dataset.textId;
+        if (!textId) return;
+        const embedded = getEmbeddedWords();
+        let words = Array.isArray(embedded) ? embedded : [];
+        if (words && words.length) {
+          makeClickable(textEl, words);
+          attachTooltip(textEl, words);
+        }
+      }
+      function getEmbeddedWords(){
+        const el = document.getElementById('reading-words-json');
+        if (!el) return null;
+        try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
+      }
+      function makeClickable(textEl, words){
+        const text = textEl.textContent || '';
+        const frag = document.createDocumentFragment();
+        let i = 0; let wi = 0;
+        while (i < text.length && wi < words.length) {
+          const w = (words[wi].surface || '').toString();
+          if (!w) { wi++; continue; }
+          const idx = text.indexOf(w, i);
+          if (idx === -1) break;
+          if (idx > i) frag.appendChild(document.createTextNode(text.slice(i, idx)));
+          const span = document.createElement('span');
+          span.className = 'cursor-pointer underline decoration-dotted';
+          span.dataset.wordIndex = String(wi);
+          span.textContent = w;
+          frag.appendChild(span);
+          i = idx + w.length; wi++;
+        }
+        if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+        textEl.innerHTML = '';
+        textEl.appendChild(frag);
+      }
+      function attachTooltip(textEl, words){
+        const tooltip = document.getElementById('word-tooltip');
+        if (!tooltip) return;
+        function render(w){
+          const parts = [];
+          if (w.surface) parts.push(`<div class="font-semibold">${escapeHtml(w.surface)}</div>`);
+          if (w.pinyin) parts.push(`<div class="text-gray-600">${escapeHtml(w.pinyin)}</div>`);
+          if (w.lemma) parts.push(`<div class="text-gray-600">Lemma: ${escapeHtml(w.lemma)}</div>`);
+          if (w.pos) parts.push(`<div class="text-gray-600">POS: ${escapeHtml(w.pos)}</div>`);
+          if (w.translation) parts.push(`<div class="mt-1">${escapeHtml(w.translation)}</div>`);
+          if (w.grammar && typeof w.grammar === 'object') {
+            try { parts.push(`<pre class="mt-1 bg-gray-50 p-2 rounded">${escapeHtml(JSON.stringify(w.grammar, null, 2))}</pre>`); } catch {}
           }
-          clearTimeout(fallbackTimer);
-          const html = await (await fetch('/reading/current?_ts=' + Date.now())).text();
-          container.innerHTML = html;
-        } catch (e) {
-          if (statusEl) statusEl.textContent = 'Failed to start generation.';
-        } finally {
-          streaming = false;
+          return parts.join('');
+        }
+        function positionTooltip(target){
+          const rect = target.getBoundingClientRect();
+          tooltip.style.left = `${rect.left + window.scrollX}px`;
+          tooltip.style.top = `${rect.bottom + window.scrollY + 8}px`;
+        }
+        textEl.addEventListener('click', (e) => {
+          const t = e.target;
+          if (!(t instanceof Element)) return;
+          const idx = t.getAttribute('data-word-index');
+          if (idx == null) return;
+          const w = words[Number(idx)];
+          if (!w) return;
+          tooltip.innerHTML = render(w);
+          tooltip.classList.remove('hidden');
+          positionTooltip(t);
+        });
+        document.addEventListener('click', (e) => {
+          const el = e.target;
+          if (tooltip.contains(el) || (textEl.contains(el) && el.getAttribute && el.getAttribute('data-word-index') != null)) return;
+          tooltip.classList.add('hidden');
+        });
+        function escapeHtml(s){
+          return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
         }
       }
       document.addEventListener('htmx:afterSwap', function(ev){
         if (ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading') {
-          startStreamIfNeeded();
-        } else {
-          startStreamIfNeeded();
+          initWordClicks();
         }
       });
-      window.addEventListener('load', startStreamIfNeeded);
     })();
     </script>
   </div>
