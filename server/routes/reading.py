@@ -40,6 +40,34 @@ def gen_reading(
     account: Account = Depends(_get_current_account),
 ):
     try:
+        # Check if we should generate a new text
+        from ..services.llm_service import should_generate_new_text
+        if not should_generate_new_text(db, account.id, req.lang):
+            # Return the most recent unopened text
+            unopened_text = (
+                db.query(ReadingText)
+                .filter(
+                    ReadingText.account_id == account.id,
+                    ReadingText.lang == req.lang,
+                    ReadingText.opened_at.is_(None)
+                )
+                .order_by(ReadingText.created_at.desc())
+                .first()
+            )
+            if unopened_text:
+                return {
+                    "text": unopened_text.content,
+                    "text_id": unopened_text.id,
+                    "level_hint": None,
+                    "words": [],
+                    "prompt": None,
+                    "structured_translations": None,
+                    "word_translations": None
+                }
+            else:
+                # Fallback: generate anyway
+                pass
+
         return _svc_generate_reading(
             db,
             account_id=account.id,
@@ -50,8 +78,14 @@ def gen_reading(
             provider=req.provider,
             base_url=req.base_url,
         )
-    except Exception:
-        raise HTTPException(status_code=503, detail="No LLM backend available")
+    except Exception as e:
+        error_msg = str(e)
+        if "credits exhausted" in error_msg or "add credits" in error_msg:
+            raise HTTPException(status_code=402, detail=error_msg)
+        elif "rate limit" in error_msg:
+            raise HTTPException(status_code=429, detail=error_msg)
+        else:
+            raise HTTPException(status_code=503, detail="No LLM backend available")
 
 
 @router.get("/reading/{text_id}/translations")
@@ -165,6 +199,84 @@ def mark_reading(
         rt.read_at = None
     db.commit()
     return {"ok": True, "is_read": rt.is_read, "read_at": (rt.read_at.isoformat() if rt.read_at else None)}
+
+
+@router.post("/reading/{text_id}/mark_opened")
+def mark_opened(
+    text_id: int,
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    """Mark a text as opened (first time user views it)"""
+    rt = db.get(ReadingText, text_id)
+    if not rt or rt.account_id != account.id:
+        raise HTTPException(404, "reading text not found")
+
+    # Only set opened_at if it's not already set
+    if rt.opened_at is None:
+        rt.opened_at = datetime.utcnow()
+        db.commit()
+
+        # Check if we should automatically generate a new text
+        from ..services.llm_service import should_generate_new_text
+        if should_generate_new_text(db, account.id, rt.lang):
+            # Trigger automatic generation
+            from ..services.llm_service import generate_reading
+            try:
+                # Generate a new text with default parameters
+                result = generate_reading(
+                    db,
+                    account_id=account.id,
+                    lang=rt.lang,
+                    length=None,
+                    include_words=None,
+                    model=None,
+                    provider="openrouter",
+                    base_url="http://localhost:1234/v1"
+                )
+                # Return HTML for the new text that was generated
+                from fastapi.responses import HTMLResponse
+                new_text_html = f'''
+                <div id="current-reading" class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                  <div class="prose max-w-none">
+                    {result.get("text", "")}
+                  </div>
+                  <div class="mt-4 flex gap-2">
+                    <button
+                      hx-post="/reading/{result.get('text_id')}/mark_opened"
+                      hx-target="#current-reading"
+                      hx-swap="outerHTML"
+                      class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                    >
+                      Mark as Read
+                    </button>
+                    <button
+                      hx-get="/reading/{result.get('text_id')}/words"
+                      hx-target="#current-reading"
+                      hx-swap="innerHTML"
+                      class="border border-gray-300 hover:bg-gray-50 px-4 py-2 rounded-lg transition-colors"
+                    >
+                      View Words
+                    </button>
+                  </div>
+                </div>
+                '''
+                return HTMLResponse(content=new_text_html)
+            except Exception as e:
+                # Log error but don't fail the mark_opened operation
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to auto-generate text after mark_opened: {e}")
+
+    # Return a simple success message when no new text is generated
+    from fastapi.responses import HTMLResponse
+    success_html = '''
+    <div class="text-center py-8">
+      <p class="text-gray-500">Text marked as read.</p>
+      <p class="text-sm text-gray-400 mt-2">A new text will be generated automatically when available.</p>
+    </div>
+    '''
+    return HTMLResponse(content=success_html)
 
 
 @router.get("/reading/{text_id}/words")

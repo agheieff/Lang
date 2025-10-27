@@ -74,6 +74,9 @@ def init_db() -> None:
         # Create auth tables
         _ensure_auth_tables()
 
+        # Run any pending migrations
+        _run_migrations()
+
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
@@ -91,6 +94,26 @@ def _ensure_auth_tables() -> None:
     except Exception as e:
         logger.warning(f"Failed to create auth tables: {e}")
         # Don't raise - auth might be optional
+
+
+def _run_migrations() -> None:
+    """Run any pending database migrations"""
+    try:
+        # Check if reading_texts table has opened_at column
+        from sqlalchemy import inspect
+
+        inspector = inspect(global_engine)
+        if "reading_texts" in inspector.get_table_names():
+            columns = [col["name"] for col in inspector.get_columns("reading_texts")]
+            if "opened_at" not in columns:
+                logger.info("Adding opened_at column to reading_texts table")
+                with global_engine.connect() as conn:
+                    conn.execute("ALTER TABLE reading_texts ADD COLUMN opened_at DATETIME")
+                    conn.commit()
+                logger.info("Successfully added opened_at column")
+    except Exception as e:
+        logger.warning(f"Migration failed: {e}")
+        # Don't raise - migration failures shouldn't break the app
 
 # ---- Utilities ----
 def drop_all_tables() -> None:

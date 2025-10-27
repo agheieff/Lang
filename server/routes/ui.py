@@ -76,9 +76,67 @@ def stats_page(request: Request, account: Account = Depends(_get_current_account
 
 
 @router.get("/", response_class=HTMLResponse)
-def home_page(request: Request):
+def home_page(
+    request: Request,
+    account: Account = Depends(_get_current_account),
+):
     t = _templates()
-    return t.TemplateResponse("pages/home.html", {"request": request, "title": "Arcadia Lang"})
+
+    # Get the user's default language (first profile)
+    from ..account_db import get_db
+    from ..models import Profile, ReadingText
+
+    db = next(get_db(request))
+    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    context = {
+        "request": request,
+        "title": "Arcadia Lang",
+        "has_profile": profile is not None
+    }
+
+    if profile:
+        # Get the most recent unopened text
+        unopened_text = (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.account_id == account.id,
+                ReadingText.lang == profile.lang,
+                ReadingText.opened_at.is_(None)
+            )
+            .order_by(ReadingText.created_at.desc())
+            .first()
+        )
+
+        if unopened_text:
+            context["current_text"] = unopened_text
+            context["current_text_id"] = unopened_text.id
+        else:
+            # No unopened texts - check if we should generate one
+            from ..services.llm_service import should_generate_new_text
+            if should_generate_new_text(db, account.id, profile.lang):
+                # Generate a new text
+                try:
+                    from ..services.llm_service import generate_reading
+                    result = generate_reading(
+                        db,
+                        account_id=account.id,
+                        lang=profile.lang,
+                        length=None,
+                        include_words=None,
+                        model=None,
+                        provider="openrouter",
+                        base_url="http://localhost:1234/v1"
+                    )
+                    context["current_text"] = {
+                        "id": result.get("text_id"),
+                        "content": result.get("text", "")
+                    }
+                    context["current_text_id"] = result.get("text_id")
+                except Exception as e:
+                    context["generation_error"] = str(e)
+
+    return t.TemplateResponse("pages/home.html", context)
 
 
 @router.get("/logout")

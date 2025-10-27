@@ -125,7 +125,14 @@ def chat_complete(
             content = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
             return _strip_thinking_blocks(content)
         except Exception as e:  # pragma: no cover
-            raise RuntimeError(f"LLM request (openrouter) failed: {e}")
+            error_msg = str(e)
+            # Check for common OpenRouter credit exhaustion patterns
+            if "insufficient credits" in error_msg.lower() or "quota" in error_msg.lower() or "balance" in error_msg.lower():
+                raise RuntimeError("OpenRouter credits exhausted. Please add credits to your OpenRouter account or use a local LLM provider.")
+            elif "rate limit" in error_msg.lower():
+                raise RuntimeError("OpenRouter rate limit exceeded. Please try again later or use a local LLM provider.")
+            else:
+                raise RuntimeError(f"LLM request (openrouter) failed: {e}")
     else:
         # LM Studio / OpenAI-compatible local endpoint
         url = base_url.rstrip("/") + "/chat/completions"
@@ -459,25 +466,22 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             hsk_target = int(min(6, max(1, int(round(v))))) or 1
         subq_known = select(Lexeme.id).where(Lexeme.account_id == user.id, Lexeme.profile_id == pid)
         pool_q = (
-            db.query(Lexeme, LexemeInfo)
-            .join(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
+            db.query(Lexeme)
             .filter(Lexeme.lang == ("zh" if lang.startswith("zh") else lang))
             .filter(Lexeme.id.notin_(subq_known))
         )
         pool = pool_q.limit(5000).all()
         scored_new: List[Tuple[float, Lexeme, str]] = []
-        for lx, li in pool:
-            if not li:
-                continue
+        for lx in pool:
             # prefer close to target level (HSK delta small) and good frequency (low rank)
-            level_num = _hsk_numeric(li.level_code) if lang.startswith("zh") else None
+            level_num = _hsk_numeric(lx.level_code) if lang.startswith("zh") else None
             level_closeness = 0.0
             if hsk_target and level_num:
                 delta = abs(level_num - hsk_target)
                 level_closeness = 1.0 / (1.0 + delta)
             freq = 0.0
-            if li.freq_rank:
-                freq = 1.0 / (1.0 + li.freq_rank)
+            if lx.frequency_rank:
+                freq = 1.0 / (1.0 + lx.frequency_rank)
             score = 0.6 * level_closeness + 0.4 * freq
             form = _variant_form_for_lang(db, user, lx, lang)
             scored_new.append((score, lx, form))

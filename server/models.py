@@ -66,6 +66,8 @@ class ReadingText(Base):
     # Read tracking
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    # First time the text was opened by the user
+    opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
 
 
 # Placeholder for future SRS tables (not implemented yet)

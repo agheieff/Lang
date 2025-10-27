@@ -10,6 +10,7 @@ from ..models import (
     ReadingText,
     GenerationLog,
 )
+from sqlalchemy import func
 from ..services.level_service import get_ci_target
 from ..llm import PromptSpec, build_reading_prompt, chat_complete
 from ..llm import pick_words as _pick_words, compose_level_hint as _compose_level_hint
@@ -24,6 +25,30 @@ try:
 except Exception:
     def _log_llm_request_safe(*args, **kwargs):  # type: ignore
         return None
+
+
+def should_generate_new_text(db: Session, account_id: int, lang: str) -> bool:
+    """Check if a new text should be generated.
+
+    Returns True if all existing texts for this account/language have been opened.
+    """
+    # Count total texts and texts that have been opened
+    total_texts = db.query(ReadingText).filter(
+        ReadingText.account_id == account_id,
+        ReadingText.lang == lang
+    ).count()
+
+    if total_texts == 0:
+        return True  # No texts exist, generate one
+
+    opened_texts = db.query(ReadingText).filter(
+        ReadingText.account_id == account_id,
+        ReadingText.lang == lang,
+        ReadingText.opened_at.isnot(None)
+    ).count()
+
+    # Generate new text only when all existing texts have been opened
+    return opened_texts >= total_texts
 
 
 def generate_reading(

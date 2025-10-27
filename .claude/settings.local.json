@@ -1,19 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(tree -I '.venv|__pycache__' -a)",
-      "Bash(python -c \"from server.llm import chat_complete, build_reading_prompt; from server.services.word_selection import urgent_words_detailed; print(''All imports successful'')\")",
-      "Bash(uv run python -c \"from server.llm import chat_complete, build_reading_prompt; from server.services.word_selection import urgent_words_detailed; print(''All imports successful'')\")",
-      "Bash(uv run python -c \"from server.main import app; print(''Application imports successfully with simplified schema'')\")",
-      "Bash(uv run python -c \"from server.main import app; print(''✅ Application imports successfully with simplified schema'')\")",
-      "Bash(uv run python -c \"from server.models import Lexeme; print(''✅ Unified Lexeme model imports successfully'')\")",
-      "Bash(uv run python -c \"from server.main import app; print(''✅ Application imports with unified schema'')\")",
-      "Bash(uv run python -c \"from server.main import app; print(''✅ Application imports successfully with updated Lexeme schema'')\")",
-      "Bash(uv run python -c \"from server.llm import chat_complete, build_reading_prompt; from server.services.word_selection import urgent_words_detailed; print(''✅ All imports successful'')\")",
-      "Bash(uv run python -c \"from server.api.wordlists import router; print(''✅ Wordlists API imports successfully'')\")",
-      "Bash(uv run python -c \"from server.services.srs_service import srs_click, srs_exposure; print(''✅ SRS service imports successfully'')\")",
-      "Bash(uv run python -c \"from server.services.lexeme_service import resolve_lexeme, get_or_create_userlexeme; print(''✅ Lexeme service imports successfully'')\")",
-      "Bash(uv run python -c \"\nfrom server.main import app\nfrom server.llm import chat_complete, build_reading_prompt\nfrom server.services.word_selection import urgent_words_detailed\nfrom server.services.srs_service import srs_click, srs_exposure\nfrom server.services.lexeme_service import resolve_lexeme, get_or_create_userlexeme\nfrom server.services.srs_logic import retention_now, decay_posterior, schedule_next\nprint(''✅ All core modules import successfully with updated Lexeme schema'')\n\")"
+      "Bash(python -m py_compile server/llm.py)",
+      "Bash(python -c \"from server.models import Base; from server.db import engine; print(''Database models imported successfully'')\")",
+      "Bash(uv run python -c \"from server.models import Base; from server.db import SessionLocal; print(''Database models imported successfully'')\")",
+      "Bash(uv run python -c \"from server.main import app; print(''FastAPI app imported successfully'')\")",
+      "Bash(uv run python -m py_compile server/routes/srs.py)",
+      "Bash(uv run python -m py_compile server/deps.py)",
+      "Bash(uv run python -m py_compile server/routes/reading.py)",
+      "Bash(uv run python -m py_compile server/routes/ui.py)",
+      "Bash(uv run python -m py_compile server/templates/pages/home.html)"
     ],
     "deny": [],
     "ask": []

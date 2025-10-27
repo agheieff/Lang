@@ -68,7 +68,7 @@ def get_current_account(
 
     # Ensure a default tier is assigned for newly registered users
     # We do it here because registration happens in a shared router we don't control.
-    if not getattr(account, "subscription_tier", None):
+    if account.subscription_tier is None:
         try:
             account.subscription_tier = "Free"
             db.commit()

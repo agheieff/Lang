@@ -4,29 +4,57 @@
 <div class="container mx-auto max-w-4xl p-4">
   <h1 class="text-3xl font-bold mb-6">Language Practice</h1>
 
+  {% if not has_profile %}
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-    <h2 class="text-xl font-bold mb-4">Generate Reading Material</h2>
+    <h2 class="text-xl font-bold mb-4">Get Started</h2>
+    <p class="text-gray-600 mb-4">
+      Create a language profile to start practicing with automatically generated texts.
+    </p>
+    <a href="/profile" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors inline-block">
+      Create Profile
+    </a>
+  </div>
+  {% else %}
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <h2 class="text-xl font-bold mb-4">Current Reading</h2>
 
-    <form hx-post="/gen/reading" hx-target="#reading-output" class="space-y-4">
-      <div class="flex gap-4 items-center">
-        <label class="flex items-center gap-2">
-          <span>Language:</span>
-          <select name="lang" class="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="zh">Chinese</option>
-            <option value="es">Spanish</option>
-          </select>
-        </label>
-
-        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
-          Generate Text
+    {% if current_text %}
+    <div id="current-reading" class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+      <div class="prose max-w-none">
+        {{ current_text.content }}
+      </div>
+      <div class="mt-4 flex gap-2">
+        <button
+          hx-post="/reading/{{ current_text_id }}/mark_opened"
+          hx-target="#current-reading"
+          hx-swap="outerHTML"
+          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+        >
+          Mark as Read
+        </button>
+        <button
+          hx-get="/reading/{{ current_text_id }}/words"
+          hx-target="#current-reading"
+          hx-swap="innerHTML"
+          class="border border-gray-300 hover:bg-gray-50 px-4 py-2 rounded-lg transition-colors"
+        >
+          View Words
         </button>
       </div>
-    </form>
-
-    <div id="reading-output" class="mt-4">
-      <!-- Generated text will appear here -->
     </div>
+    {% elif generation_error %}
+    <div class="bg-red-50 border border-red-200 rounded-lg p-4">
+      <p class="text-red-700">Failed to generate text: {{ generation_error }}</p>
+      <p class="text-sm text-red-600 mt-2">Please check your LLM configuration.</p>
+    </div>
+    {% else %}
+    <div class="text-center py-8">
+      <p class="text-gray-500">No reading material available at the moment.</p>
+      <p class="text-sm text-gray-400 mt-2">New texts are generated automatically when you finish reading the current ones.</p>
+    </div>
+    {% endif %}
   </div>
+  {% endif %}
 
   <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
     <div class="bg-white rounded-lg shadow-md p-4">
