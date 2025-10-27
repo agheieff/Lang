@@ -16,8 +16,8 @@
    "jieba>=0.42.1",
    "pypinyin>=0.50.0",
    "opencc-python-reimplemented>=0.1.7",
+   "httpx>=0.20.0",
    # Local libs resolved via [tool.uv.sources] as editable installs
-   "openrouter>=0.1.0",
    "arcadia-ui-core>=0.1.0",
   "arcadia-ui-style>=0.1.0",
   # vendored auth
@@ -55,7 +55,6 @@ managed = true
 serve = "uvicorn server.main:app --reload --port 8000"
 
 [tool.uv.sources]
-openrouter = { path = "/home/agheieff/Arcadia/libs/openrouter", editable = true }
 arcadia-ui-core = { path = "/home/agheieff/Arcadia/libs/arcadia_ui_core", editable = true }
 arcadia-ui-style = { path = "/home/agheieff/Arcadia/libs/arcadia_ui_style", editable = true }
 ## local auth is vendored under server/auth; external source removed

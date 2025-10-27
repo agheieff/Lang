@@ -11,8 +11,8 @@ from server.auth import Account  # type: ignore
 from ..account_db import get_db
 from ..deps import get_current_account as _get_current_account, require_tier
 from ..level import get_level_summary, update_level_if_stale
-from ..llm import urgent_words_detailed
-from ..models import Lexeme, LexemeInfo, Profile, UserLexeme
+from ..services.word_selection import urgent_words_detailed
+from ..models import Lexeme, Profile
 from ..services.lexeme_service import (
     get_or_create_userlexeme as _get_or_create_userlexeme,
     resolve_lexeme as _resolve_lexeme,
@@ -79,74 +79,10 @@ def srs_urgent(
     return {"words": [it["form"] for it in items], "items": items}
 
 
-class LexemeInfoItem(BaseModel):
-    lang: str
-    lemma: str
-    pos: Optional[str] = None
-    freq_rank: Optional[int] = None
-    freq_score: Optional[float] = None
-    level_code: Optional[str] = None
-    source: Optional[str] = None
-    tags: Optional[Dict[str, Any]] = None
+# LexemeInfo upsert endpoint removed - frequency and level data now stored directly in Lexeme model
 
 
-class LexemeInfoUpsertRequest(BaseModel):
-    items: List[LexemeInfoItem]
-
-
-@router.post("/dict/lexeme_info/upsert")
-def upsert_lexeme_info(
-    req: LexemeInfoUpsertRequest,
-    db: Session = Depends(get_db),
-    _admin: Account = Depends(require_tier({"admin"})),
-):
-    updated = 0
-    for it in req.items:
-        lex = _resolve_lexeme(db, it.lang, it.lemma, it.pos)
-        li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lex.id).first()
-        if not li:
-            li = LexemeInfo(lexeme_id=lex.id)
-            db.add(li)
-        if it.freq_rank is not None:
-            li.freq_rank = it.freq_rank
-        if it.freq_score is not None:
-            li.freq_score = it.freq_score
-        if it.level_code is not None:
-            li.level_code = it.level_code
-        if it.source is not None:
-            li.source = it.source
-        if it.tags is not None:
-            li.tags = it.tags
-        updated += 1
-    db.commit()
-    return {"ok": True, "updated": updated}
-
-
-@router.get("/dict/lexeme_info")
-def get_lexeme_info(
-    lang: str,
-    lemma: str,
-    pos: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    lex = (
-        db.query(Lexeme)
-        .filter(Lexeme.lang == lang, Lexeme.lemma == lemma, Lexeme.pos == pos)
-        .first()
-    )
-    if not lex:
-        return {}
-    li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lex.id).first()
-    if not li:
-        return {}
-    return {
-        "lexeme_id": lex.id,
-        "freq_rank": li.freq_rank,
-        "freq_score": li.freq_score,
-        "level_code": li.level_code,
-        "source": li.source,
-        "tags": li.tags,
-    }
+# LexemeInfo get endpoint removed - frequency and level data now stored directly in Lexeme model
 
 
 @router.post("/srs/event/exposures")
@@ -160,13 +96,8 @@ def srs_exposures(
         lemma = it.lemma
         pos = it.pos
         if not lemma and it.surface:
-            from nlp.parsing import ENGINES as _ENGINES
-
-            engine = _ENGINES.get(req.lang)
-            if engine:
-                analysis = engine.analyze_word(it.surface, context=None)
-                lemma = analysis.get("lemma") or it.surface
-                pos = pos or analysis.get("pos")
+            # Fallback: use surface form as lemma when no lemma provided
+            lemma = it.surface
         if not lemma:
             continue
         _svc_srs_exposure(
@@ -199,13 +130,8 @@ def srs_nonlookup(
         lemma = it.lemma
         pos = it.pos
         if not lemma and it.surface:
-            from nlp.parsing import ENGINES as _ENGINES
-
-            engine = _ENGINES.get(req.lang)
-            if engine:
-                analysis = engine.analyze_word(it.surface, context=None)
-                lemma = analysis.get("lemma") or it.surface
-                pos = pos or analysis.get("pos")
+            # Fallback: use surface form as lemma when no lemma provided
+            lemma = it.surface
         if not lemma:
             continue
         _svc_srs_nonlookup(
@@ -236,13 +162,8 @@ def srs_click(
     lemma = req.lemma
     pos = req.pos
     if not lemma and req.surface:
-        from nlp.parsing import ENGINES as _ENGINES
-
-        engine = _ENGINES.get(req.lang)
-        if engine:
-            analysis = engine.analyze_word(req.surface, context=None)
-            lemma = analysis.get("lemma") or req.surface
-            pos = pos or analysis.get("pos")
+        # Fallback: use surface form as lemma when no lemma provided
+        lemma = req.surface
     if not lemma:
         raise HTTPException(400, "lemma or surface required")
     _svc_srs_click(
@@ -261,32 +182,17 @@ def srs_click(
     except Exception:
         pass
     lex = _resolve_lexeme(db, req.lang, lemma, pos)
-    prof = (
-        db.query(Profile)
-        .filter(Profile.account_id == account.id, Profile.lang == req.lang)
-        .first()
-    )
-    ul = (
-        db.query(UserLexeme)
-        .filter(
-            UserLexeme.account_id == account.id,
-            UserLexeme.profile_id == (prof.id if prof else -1),
-            UserLexeme.lexeme_id == lex.id,
-        )
-        .first()
-    )
-    if not ul:
-        return {"ok": True}
-    a = ul.a_click or 0
-    b = ul.b_nonclick or 0
+    # Since lexemes are now user-specific, we can use them directly
+    a = lex.a_click or 0
+    b = lex.b_nonclick or 0
     p_click = a / (a + b) if (a + b) > 0 else 0.0
     return {
         "ok": True,
         "lexeme_id": lex.id,
         "p_click": p_click,
         "n": a + b,
-        "stability": ul.stability,
-        "diversity": ul.distinct_texts,
+        "stability": lex.stability,
+        "diversity": lex.distinct_texts,
     }
 
 
@@ -316,40 +222,38 @@ def get_srs_words(
     account: Account = Depends(_get_current_account),
 ):
     q = (
-        db.query(UserLexeme, Lexeme, LexemeInfo)
-        .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
-        .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
+        db.query(Lexeme)
         .filter(
-            UserLexeme.account_id == account.id,
-            UserLexeme.profile_id
+            Lexeme.account_id == account.id,
+            Lexeme.profile_id
             == db.query(Profile.id)
             .filter(Profile.account_id == account.id, Profile.lang == lang)
             .scalar_subquery(),
         )
     )
     if min_S is not None:
-        q = q.filter(UserLexeme.stability >= float(min_S))
+        q = q.filter(Lexeme.stability >= float(min_S))
     if max_S is not None:
-        q = q.filter(UserLexeme.stability <= float(max_S))
+        q = q.filter(Lexeme.stability <= float(max_S))
     if min_D is not None:
-        q = q.filter(UserLexeme.distinct_texts >= int(min_D))
+        q = q.filter(Lexeme.distinct_texts >= int(min_D))
     if max_D is not None:
-        q = q.filter(UserLexeme.distinct_texts <= int(max_D))
+        q = q.filter(Lexeme.distinct_texts <= int(max_D))
     if min_p is not None or max_p is not None:
-        denom = (UserLexeme.a_click + UserLexeme.b_nonclick)
+        denom = (Lexeme.a_click + Lexeme.b_nonclick)
         q = q.filter(denom > 0)
         if min_p is not None:
-            q = q.filter((UserLexeme.a_click * 1.0) / (denom * 1.0) >= float(min_p))
+            q = q.filter((Lexeme.a_click * 1.0) / (denom * 1.0) >= float(min_p))
         if max_p is not None:
-            q = q.filter((UserLexeme.a_click * 1.0) / (denom * 1.0) <= float(max_p))
+            q = q.filter((Lexeme.a_click * 1.0) / (denom * 1.0) <= float(max_p))
     rows = q.limit(1000).all()
     out: List[SrsWordsOut] = []
-    for ul, lx, li in rows:
-        a = ul.a_click or 0
-        b = ul.b_nonclick or 0
+    for lex in rows:
+        a = lex.a_click or 0
+        b = lex.b_nonclick or 0
         p = (a / (a + b)) if (a + b) > 0 else 0.0
-        S = float(ul.stability or 0.0)
-        D = int(ul.distinct_texts or 0)
+        S = float(lex.stability or 0.0)
+        D = int(lex.distinct_texts or 0)
         if min_p is not None and p < min_p:
             continue
         if max_p is not None and p > max_p:
@@ -364,15 +268,15 @@ def get_srs_words(
             continue
         out.append(
             SrsWordsOut(
-                lexeme_id=lx.id,
-                lemma=lx.lemma,
-                pos=lx.pos,
+                lexeme_id=lex.id,
+                lemma=lex.lemma,
+                pos=lex.pos,
                 p_click=p,
                 n=(a + b),
                 stability=S,
                 diversity=D,
-                freq_rank=(li.freq_rank if li else None),
-                level_code=(li.level_code if li else None),
+                freq_rank=lex.frequency_rank,
+                level_code=lex.level_code,
             )
         )
         if len(out) >= limit:
@@ -401,9 +305,8 @@ def get_srs_stats(
     if not pid:
         return SrsStatsOut(total=0, by_p={}, by_S={}, by_D={})
     rows = (
-        db.query(UserLexeme, Lexeme)
-        .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
-        .filter(UserLexeme.account_id == account.id, UserLexeme.profile_id == pid)
+        db.query(Lexeme)
+        .filter(Lexeme.account_id == account.id, Lexeme.profile_id == pid)
         .all()
     )
 
@@ -416,12 +319,12 @@ def get_srs_stats(
     by_p: Dict[str, int] = {}
     by_S: Dict[str, int] = {}
     by_D: Dict[str, int] = {}
-    for ul, lx in rows:
-        a = ul.a_click or 0
-        b = ul.b_nonclick or 0
+    for lex in rows:
+        a = lex.a_click or 0
+        b = lex.b_nonclick or 0
         p = (a / (a + b)) if (a + b) > 0 else 0.0
-        S = float(ul.stability or 0.0)
-        D = int(ul.distinct_texts or 0)
+        S = float(lex.stability or 0.0)
+        D = int(lex.distinct_texts or 0)
         pb = bucketize(p, [0.2, 0.4, 0.6, 0.8])
         Sb = bucketize(S, [0.33, 0.66, 0.85])
         Db = bucketize(min(1.0, 1 - pow(2.71828, -D / 8.0)), [0.25, 0.5, 0.75])

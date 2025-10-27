@@ -1,0 +1,3 @@
+Analyze and translate each word in this {source_lang} text:
+
+{text}

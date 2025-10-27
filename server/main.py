@@ -10,16 +10,13 @@ from fastapi.staticfiles import StaticFiles
 from .db import DB_PATH, init_db
 from .api.profile import router as profile_router
 from .api.tiers import router as tiers_router
-from .api.wordlists import router as wordlists_router
+# from .api.wordlists import router as wordlists_router  # Disabled - word lists are generated dynamically
 from .config import MSP_ENABLE
 from .middleware.auth import install_auth
 from .middleware.rate_limit import install_rate_limit
 from .routes.health import router as health_router
-from .routes.lookup import router as lookup_router
-from .routes.parse import router as parse_router
 from .routes.reading import router as reading_router
 from .routes.srs import router as srs_router
-from .routes.translation import router as translation_router
 from .routes.ui import router as ui_router
 
 
@@ -65,14 +62,11 @@ except Exception:
 # Built-in routers
 app.include_router(health_router)
 app.include_router(profile_router)
-app.include_router(wordlists_router, prefix="/api")
+# app.include_router(wordlists_router, prefix="/api")  # Disabled - word lists are generated dynamically
 app.include_router(tiers_router)
 
 # Feature routers
-app.include_router(lookup_router)
-app.include_router(parse_router)
 app.include_router(reading_router)
-app.include_router(translation_router)
 app.include_router(srs_router)
 app.include_router(ui_router)
 

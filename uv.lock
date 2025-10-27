@@ -41,9 +41,9 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "beautifulsoup4" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "jieba" },
     { name = "opencc-python-reimplemented" },
-    { name = "openrouter" },
     { name = "passlib" },
     { name = "pydantic" },
     { name = "pypinyin" },
@@ -77,11 +77,11 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.3" },
     { name = "fastapi", specifier = ">=0.110" },
+    { name = "httpx", specifier = ">=0.20.0" },
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "jieba", marker = "extra == 'zh'", specifier = ">=0.42.1" },
     { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
     { name = "opencc-python-reimplemented", marker = "extra == 'zh'", specifier = ">=0.1.7" },
-    { name = "openrouter", editable = "../libs/openrouter" },
     { name = "passlib", specifier = ">=1.7.4" },
     { name = "pydantic", specifier = ">=2.5" },
     { name = "pypinyin", specifier = ">=0.50.0" },
@@ -1089,17 +1089,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/8d/6d/c6f37eed651dd6b75
 wheels = [
     { url = "https://files.pythonhosted.org/packages/30/6b/055b7806f320cc8f2cdf23c5f70221c0dc1683fca9ffaf76dfc2ad4b91b6/opencc_python_reimplemented-0.1.7-py2.py3-none-any.whl", hash = "sha256:41b3b92943c7bed291f448e9c7fad4b577c8c2eae30fcfe5a74edf8818493aa6", size = 481813, upload-time = "2023-02-11T03:58:39.66Z" },
 ]
-
-[[package]]
-name = "openrouter"
-version = "0.1.0"
-source = { editable = "../libs/openrouter" }
-dependencies = [
-    { name = "httpx" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "httpx", specifier = ">=0.20.0" }]
 
 [[package]]
 name = "packaging"

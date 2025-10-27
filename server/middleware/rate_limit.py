@@ -17,13 +17,8 @@ _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
 
 
 async def rate_limit(request, call_next):
-    path = request.url.path
-    if not (
-        path.startswith("/api/lookup")
-        or path.startswith("/api/parse")
-        or path.startswith("/translate")
-    ):
-        return await call_next(request)
+    # No rate limiting needed since parsing/translation endpoints are removed
+    return await call_next(request)
 
     tier = "Free"
     key: Optional[str] = None

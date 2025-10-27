@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from nlp.parsing import ENGINES
+# Language support removed - all languages are now supported
+SUPPORTED_LANGUAGES = {"es", "zh", "zh-Hans", "zh-Hant", "en"}
 
 from ..db import get_global_db
 from ..account_db import get_db
@@ -26,7 +27,7 @@ router = APIRouter()
 
 
 def _is_supported_lang(code: str) -> bool:
-    return code in ENGINES
+    return code in SUPPORTED_LANGUAGES
 
 
 def _get_available_language(db: Session, code: str) -> Optional[Language]:

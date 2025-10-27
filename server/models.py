@@ -102,40 +102,24 @@ class ProfilePref(Base):
 class Lexeme(Base):
     __tablename__ = "lexemes"
     __table_args__ = (
-        UniqueConstraint("lang", "lemma", "pos", name="uq_lexeme_lang_lemma_pos"),
+        UniqueConstraint("account_id", "profile_id", "lang", "lemma", "pos", name="uq_lexeme_account_profile_lang_lemma_pos"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # User-specific lexeme tracking
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
+
+    # Lexeme data
     lang: Mapped[str] = mapped_column(String(16), index=True)
     lemma: Mapped[str] = mapped_column(String(256), index=True)
     pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Global word properties
+    frequency_rank: Mapped[Optional[int]] = mapped_column(Integer, default=None)  # Global frequency rank
+    level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., 'HSK1', 'A2'
 
-class LexemeVariant(Base):
-    __tablename__ = "lexeme_variants"
-    __table_args__ = (
-        UniqueConstraint("script", "form", name="uq_variant_script_form"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
-    script: Mapped[str] = mapped_column(String(8), index=True)  # Hans | Hant
-    form: Mapped[str] = mapped_column(String(256), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
-class UserLexeme(Base):
-    __tablename__ = "user_lexemes"
-    __table_args__ = (
-        UniqueConstraint("account_id", "profile_id", "lexeme_id", name="uq_account_profile_lexeme"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(Integer, index=True)
-    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
-    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
-
+    # SRS tracking (from UserLexeme)
     a_click: Mapped[int] = mapped_column(Integer, default=1)
     b_nonclick: Mapped[int] = mapped_column(Integer, default=4)
     stability: Mapped[float] = mapped_column(Float, default=0.2)  # 0..1
@@ -155,8 +139,28 @@ class UserLexeme(Base):
     last_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     next_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     last_decay_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    # Familiarity tracking for word selection
+    familiarity: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LexemeVariant(Base):
+    __tablename__ = "lexeme_variants"
+    __table_args__ = (
+        UniqueConstraint("script", "form", name="uq_variant_script_form"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
+    script: Mapped[str] = mapped_column(String(8), index=True)  # Hans | Hant
+    form: Mapped[str] = mapped_column(String(256), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# UserLexeme removed - merged into Lexeme model
 
 
 class WordEvent(Base):
@@ -166,7 +170,7 @@ class WordEvent(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     account_id: Mapped[int] = mapped_column(Integer, index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
-    lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
+    # Note: lexeme_id removed since lexemes are now user-specific and contain account/profile info
     event_type: Mapped[str] = mapped_column(String(16))  # exposure|click|assign|hover
     count: Mapped[int] = mapped_column(Integer, default=1)
     surface: Mapped[Optional[str]] = mapped_column(String(256), default=None)
@@ -179,29 +183,16 @@ class WordEvent(Base):
 class UserLexemeContext(Base):
     __tablename__ = "user_lexeme_contexts"
     __table_args__ = (
-        UniqueConstraint("user_lexeme_id", "context_hash", name="uq_ul_ctx"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_lexeme_id: Mapped[int] = mapped_column(ForeignKey("user_lexemes.id", ondelete="CASCADE"), index=True)
-    context_hash: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
-class LexemeInfo(Base):
-    __tablename__ = "lexeme_info"
-    __table_args__ = (
-        UniqueConstraint("lexeme_id", name="uq_lexeme_info_lexeme_id"),
+        UniqueConstraint("lexeme_id", "context_hash", name="uq_lexeme_ctx"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
-    freq_rank: Mapped[Optional[int]] = mapped_column(Integer, default=None)
-    freq_score: Mapped[Optional[float]] = mapped_column(Float, default=None)
-    level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., HSK1..HSK6
-    source: Mapped[Optional[str]] = mapped_column(String(64), default=None)
-    tags: Mapped[dict] = mapped_column(JSON, default=dict)
+    context_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# LexemeInfo removed - frequency and level data moved directly to Lexeme model
 
 
 class GenerationLog(Base):
@@ -343,23 +334,7 @@ class LLMModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class LanguageWordList(Base):
-    __tablename__ = "language_word_lists"
-    __table_args__ = (
-        UniqueConstraint("lang", "list_name", "word", name="uq_lang_list_word"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    lang: Mapped[str] = mapped_column(String(16), index=True)  # e.g., 'es', 'zh'
-    list_name: Mapped[str] = mapped_column(String(64), index=True)  # e.g., 'core_1000', 'hsk1', 'a1'
-    word: Mapped[str] = mapped_column(String(256), index=True)  # the word/lemma
-    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
-    frequency_rank: Mapped[Optional[int]] = mapped_column(Integer, default=None)  # global frequency rank
-    frequency_score: Mapped[Optional[float]] = mapped_column(Float, default=None)  # frequency score (0-1)
-    level_code: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # e.g., 'HSK1', 'A2'
-    category: Mapped[Optional[str]] = mapped_column(String(64), default=None)  # semantic category
-    tags: Mapped[dict] = mapped_column(JSON, default=dict)  # additional metadata
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+# LanguageWordList removed - word lists are generated dynamically from user lexemes
 
 
 class LLMRequestLog(Base):

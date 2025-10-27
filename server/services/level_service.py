@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from ..models import Profile, ProfilePref, WordEvent, LexemeInfo, Lexeme
+from ..models import Profile, ProfilePref, WordEvent, Lexeme
 from .math.decay import decay_factor
 from .math.kernel import gaussian_kernel_weights
 from .math.bayesian import compute_level_from_counts
@@ -159,17 +159,18 @@ def _bin_from_freq_rank(rank: Optional[int]) -> Optional[int]:
 
 
 def _resolve_bin_for_lexeme(db: Session, lexeme_id: int, lang: str) -> Optional[int]:
-    li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lexeme_id).first()
-    if li:
-        b = _bin_from_level_code(lang, li.level_code)
+    lx = db.query(Lexeme).filter(Lexeme.id == lexeme_id).first()
+    if lx:
+        # Use level_code from Lexeme directly
+        b = _bin_from_level_code(lang, lx.level_code)
         if b:
             return b
-        b2 = _bin_from_freq_rank(li.freq_rank)
+        # Use frequency_rank from Lexeme directly
+        b2 = _bin_from_freq_rank(lx.frequency_rank)
         if b2:
             return b2
-    if lang.startswith("zh"):
-        lx = db.query(Lexeme).filter(Lexeme.id == lexeme_id).first()
-        if lx and lx.lemma:
+        # Fallback for Chinese based on character length
+        if lang.startswith("zh") and lx.lemma:
             L = len(lx.lemma)
             return 1 if L <= 2 else 3 if L <= 4 else 5
     return None

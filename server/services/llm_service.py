@@ -102,10 +102,163 @@ def generate_reading(
     if not text or text.strip() == "":
         raise RuntimeError("empty llm output")
 
+    # Extract text from JSON response if present
+    from ..utils.json_parser import extract_text_from_llm_response
+    text = extract_text_from_llm_response(text)
+
     # Persist reading + generation log
     rt = ReadingText(account_id=account_id, lang=lang, content=text)
     db.add(rt)
     db.flush()
+
+    # Generate structured translations (sentence-by-sentence) and word translations
+    structured_translations = None
+    word_translations = None
+    try:
+        # Get target language from profile
+        prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+        target_lang = prof.target_lang if prof and prof.target_lang else "en"
+
+        # Build structured translation prompt
+        from ..llm import build_structured_translation_prompt
+        translation_messages = build_structured_translation_prompt(lang, target_lang, text)
+
+        # Call LLM for structured translation
+        translation_response = chat_complete(
+            translation_messages,
+            provider=provider,
+            model=model,
+            base_url=base_url
+        )
+
+        # Parse structured translation response
+        from ..utils.json_parser import extract_structured_translation
+        structured_translations = extract_structured_translation(translation_response)
+
+        # Store structured translations in database
+        if structured_translations:
+            from ..models import ReadingTextTranslation
+            paragraph_index = 0
+            for paragraph in structured_translations.get("paragraphs", []):
+                sentence_index = 0
+                for sentence in paragraph.get("sentences", []):
+                    if "text" in sentence and "translation" in sentence:
+                        # Store sentence translation
+                        rtt = ReadingTextTranslation(
+                            account_id=account_id,
+                            text_id=rt.id,
+                            unit="sentence",
+                            target_lang=target_lang,
+                            segment_index=sentence_index,
+                            span_start=None,  # We don't have position info from structured translation
+                            span_end=None,
+                            source_text=sentence["text"],
+                            translated_text=sentence["translation"],
+                            provider=provider,
+                            model=model,
+                        )
+                        db.add(rtt)
+                        sentence_index += 1
+                paragraph_index += 1
+
+        # Generate word-by-word translations
+        try:
+            # Build word translation prompt
+            from ..llm import build_word_translation_prompt
+            word_messages = build_word_translation_prompt(lang, target_lang, text)
+
+            # Call LLM for word translations
+            word_response = chat_complete(
+                word_messages,
+                provider=provider,
+                model=model,
+                base_url=base_url
+            )
+
+            # Parse word translation response
+            from ..utils.json_parser import extract_word_translations
+            word_translations = extract_word_translations(word_response)
+
+            # Store word translations in database
+            if word_translations:
+                from ..models import ReadingWordGloss
+                word_index = 0
+                for word_data in word_translations.get("words", []):
+                    if "word" in word_data and "translation" in word_data:
+                        # Store word gloss
+                        rwg = ReadingWordGloss(
+                            account_id=account_id,
+                            text_id=rt.id,
+                            surface=word_data["word"],
+                            lemma=word_data.get("lemma", word_data["word"]),
+                            pos=word_data.get("part_of_speech"),
+                            pinyin=word_data.get("pinyin"),
+                            translation=word_data["translation"],
+                            lemma_translation=word_data.get("lemma_translation"),
+                            grammar=word_data.get("grammar", {}),
+                            span_start=None,  # Position info not available from word analysis
+                            span_end=None,
+                        )
+                        db.add(rwg)
+                        word_index += 1
+
+            # Log word translation request
+            _log_llm_request_safe({
+                "account_id": account_id,
+                "text_id": rt.id,
+                "kind": "word_translation",
+                "provider": (provider or None),
+                "model": (model or None),
+                "base_url": (base_url or None),
+                "status": "ok",
+                "request": {"messages": word_messages},
+                "response": word_response,
+                "error": None,
+            })
+
+        except Exception as e:
+            # Log word translation failure but don't fail the whole request
+            _log_llm_request_safe({
+                "account_id": account_id,
+                "text_id": rt.id,
+                "kind": "word_translation",
+                "provider": (provider or None),
+                "model": (model or None),
+                "base_url": (base_url or None),
+                "status": "error",
+                "request": {"messages": word_messages if 'word_messages' in locals() else None},
+                "response": None,
+                "error": str(e),
+            })
+
+        # Log translation request
+        _log_llm_request_safe({
+            "account_id": account_id,
+            "text_id": rt.id,
+            "kind": "structured_translation",
+            "provider": (provider or None),
+            "model": (model or None),
+            "base_url": (base_url or None),
+            "status": "ok",
+            "request": {"messages": translation_messages},
+            "response": translation_response,
+            "error": None,
+        })
+
+    except Exception as e:
+        # Log translation failure but don't fail the whole request
+        _log_llm_request_safe({
+            "account_id": account_id,
+            "text_id": rt.id,
+            "kind": "structured_translation",
+            "provider": (provider or None),
+            "model": (model or None),
+            "base_url": (base_url or None),
+            "status": "error",
+            "request": {"messages": translation_messages if 'translation_messages' in locals() else None},
+            "response": None,
+            "error": str(e),
+        })
     gl = GenerationLog(
         account_id=account_id,
         profile_id=(prof.id if prof else None),
@@ -162,4 +315,12 @@ def generate_reading(
         pass
 
     db.commit()
-    return {"prompt": messages, "text": text, "level_hint": level_hint, "words": words, "text_id": rt.id}
+    return {
+        "prompt": messages,
+        "text": text,
+        "level_hint": level_hint,
+        "words": words,
+        "text_id": rt.id,
+        "structured_translations": structured_translations,
+        "word_translations": word_translations
+    }

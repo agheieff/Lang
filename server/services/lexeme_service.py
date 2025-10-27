@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import Lexeme, LexemeVariant, UserLexeme, Profile
+from ..models import Lexeme, LexemeVariant, Profile
 
 
 def _canon_lang(code: str) -> str:
@@ -31,20 +31,8 @@ def resolve_lexeme(db: Session, lang: str, lemma: str, pos: Optional[str]) -> Le
     return lx
 
 
-def get_or_create_userlexeme(db: Session, account_id: int, prof: Profile, lex: Lexeme) -> UserLexeme:
-    ul = (
-        db.query(UserLexeme)
-        .filter(
-            UserLexeme.account_id == account_id,
-            UserLexeme.profile_id == prof.id,
-            UserLexeme.lexeme_id == lex.id,
-        )
-        .first()
-    )
-    if ul:
-        return ul
-    ul = UserLexeme(account_id=account_id, profile_id=prof.id, lexeme_id=lex.id)
-    db.add(ul)
-    db.flush()
-    return ul
+def get_or_create_userlexeme(db: Session, account_id: int, prof: Profile, lex: Lexeme) -> Lexeme:
+    # Since lexemes are now user-specific, we just return the lexeme itself
+    # This function now serves as a compatibility wrapper
+    return lex
 

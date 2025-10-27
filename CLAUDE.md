@@ -48,7 +48,7 @@ Arcadia Lang is a click-to-translate web application for language learning, buil
 
 ### Database Schema
 - **SQLite** with SQLAlchemy ORM
-- **Models**: `server/models.py` - Profiles, Lexemes, UserLexemes, ReadingTexts, etc.
+- **Models**: `server/models.py` - Profiles, Lexemes, ReadingTexts, etc. (UserLexemes merged into Lexeme model)
 - **Authentication**: Uses shared `arcadia_auth` library with Account model
 
 ### Service Layer Architecture

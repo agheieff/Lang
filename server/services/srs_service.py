@@ -8,8 +8,6 @@ from sqlalchemy.orm import Session
 from ..models import (
     Profile,
     Lexeme,
-    LexemeInfo,
-    UserLexeme,
     UserLexemeContext,
     WordEvent,
 )
@@ -45,7 +43,6 @@ from .srs_logic import (
 # Optional resolver helpers (kept to preserve behavior)
 from .lexeme_service import (
     resolve_lexeme as _resolve_lexeme,
-    get_or_create_userlexeme as _get_or_create_userlexeme,
 )
 
 
@@ -68,8 +65,8 @@ def _ensure_profile(db: Session, account_id: int, lang: str) -> Profile:
     return prof
 
 
-def _schedule_next(ul: UserLexeme, quality: int, now: datetime) -> None:
-    schedule_next(ul, quality, now, _SRS_PARAMS)
+def _schedule_next(lex: Lexeme, quality: int, now: datetime) -> None:
+    schedule_next(lex, quality, now, _SRS_PARAMS)
 
 
 def srs_click(
@@ -85,19 +82,18 @@ def srs_click(
 ) -> None:
     prof = _ensure_profile(db, account_id, lang)
     lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, account_id, prof, lex)
-    ul.a_click = (ul.a_click or 0) + 1
-    ul.clicks = (ul.clicks or 0) + 1
-    ul.last_clicked_at = datetime.utcnow()
+    # Since lexemes are now user-specific, we can use them directly
+    lex.a_click = (lex.a_click or 0) + 1
+    lex.clicks = (lex.clicks or 0) + 1
+    lex.last_clicked_at = datetime.utcnow()
     now = datetime.utcnow()
-    _decay_posterior(ul, now, _HL_CLICK_D)
-    ul.alpha = float((ul.alpha or 1.0) + _W_CLICK)
-    _schedule_next(ul, 0, now)
+    _decay_posterior(lex, now, _HL_CLICK_D)
+    lex.alpha = float((lex.alpha or 1.0) + _W_CLICK)
+    _schedule_next(lex, 0, now)
     db.add(WordEvent(
         ts=now,
         account_id=account_id,
         profile_id=prof.id,
-        lexeme_id=lex.id,
         event_type="click",
         count=1,
         surface=surface,
@@ -121,7 +117,7 @@ def srs_exposure(
 ) -> None:
     prof = _ensure_profile(db, account_id, lang)
     lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, account_id, prof, lex)
+    # Since lexemes are now user-specific, we can use them directly
     now = datetime.utcnow()
     # 1) session collapse
     recent_ev = (
@@ -129,7 +125,6 @@ def srs_exposure(
         .filter(
             WordEvent.account_id == account_id,
             WordEvent.profile_id == prof.id,
-            WordEvent.lexeme_id == lex.id,
             WordEvent.event_type == "exposure",
         )
         .order_by(WordEvent.ts.desc())
@@ -147,45 +142,43 @@ def srs_exposure(
     # 2) distinct gating
     w_exp = _W_EXPOSURE
     quality = 2
-    if int(ul.distinct_texts or 0) < _DISTINCT_PROMOTE:
+    if int(lex.distinct_texts or 0) < _DISTINCT_PROMOTE:
         w_exp = min(w_exp, _EXPOSURE_WEAK_W)
         quality = 1
 
     # 3) difficulty/frequency adj
-    li = db.query(LexemeInfo).filter(LexemeInfo.lexeme_id == lex.id).first()
-    if (getattr(ul, "difficulty", 1.0) or 1.0) >= _DIFF_HIGH or (
-        li and li.freq_rank and li.freq_rank > _FREQ_LOW_THRESH
+    if (getattr(lex, "difficulty", 1.0) or 1.0) >= _DIFF_HIGH or (
+        lex.frequency_rank and lex.frequency_rank > _FREQ_LOW_THRESH
     ):
         w_exp = min(w_exp, _EXPOSURE_WEAK_W)
         quality = min(quality, 1)
 
     # 4) apply updates
-    ul.b_nonclick = (ul.b_nonclick or 0) + 1
-    ul.exposures = (ul.exposures or 0) + 1
-    if not ul.first_seen_at:
-        ul.first_seen_at = now
-    ul.last_seen_at = now
-    _decay_posterior(ul, now, _HL_EXPOSURE_D)
+    lex.b_nonclick = (lex.b_nonclick or 0) + 1
+    lex.exposures = (lex.exposures or 0) + 1
+    if not lex.first_seen_at:
+        lex.first_seen_at = now
+    lex.last_seen_at = now
+    _decay_posterior(lex, now, _HL_EXPOSURE_D)
     if not session_skip and w_exp > 0:
-        ul.beta = float((ul.beta or 9.0) + w_exp)
-    _schedule_next(ul, quality, now)
+        lex.beta = float((lex.beta or 9.0) + w_exp)
+    _schedule_next(lex, quality, now)
     if context_hash:
         exists = (
             db.query(UserLexemeContext)
             .filter(
-                UserLexemeContext.user_lexeme_id == ul.id,
+                UserLexemeContext.lexeme_id == lex.id,
                 UserLexemeContext.context_hash == context_hash,
             )
             .first()
         )
         if not exists:
-            db.add(UserLexemeContext(user_lexeme_id=ul.id, context_hash=context_hash))
-            ul.distinct_texts = (ul.distinct_texts or 0) + 1
+            db.add(UserLexemeContext(lexeme_id=lex.id, context_hash=context_hash))
+            lex.distinct_texts = (lex.distinct_texts or 0) + 1
     db.add(WordEvent(
         ts=now,
         account_id=account_id,
         profile_id=prof.id,
-        lexeme_id=lex.id,
         event_type="exposure",
         count=1,
         surface=surface,
@@ -196,16 +189,15 @@ def srs_exposure(
     ))
 
     # Synthetic nonlookup
-    if _SYN_NL_ENABLE and (ul.clicks or 0) == 0 and int(ul.distinct_texts or 0) >= _SYN_NL_MIN_DISTINCT and ul.first_seen_at:
+    if _SYN_NL_ENABLE and (lex.clicks or 0) == 0 and int(lex.distinct_texts or 0) >= _SYN_NL_MIN_DISTINCT and lex.first_seen_at:
         try:
-            days_seen = (now - ul.first_seen_at).total_seconds() / 86400.0
+            days_seen = (now - lex.first_seen_at).total_seconds() / 86400.0
             if days_seen >= _SYN_NL_MIN_DAYS:
                 recent_nl = (
                     db.query(WordEvent)
                     .filter(
                         WordEvent.account_id == account_id,
                         WordEvent.profile_id == prof.id,
-                        WordEvent.lexeme_id == lex.id,
                         WordEvent.event_type == "nonlookup",
                         WordEvent.ts >= (now - timedelta(days=_SYN_NL_COOLDOWN_DAYS)),
                     )
@@ -239,18 +231,17 @@ def srs_nonlookup(
 ) -> None:
     prof = _ensure_profile(db, account_id, lang)
     lex = _resolve_lexeme(db, lang, lemma, pos)
-    ul = _get_or_create_userlexeme(db, account_id, prof, lex)
+    # Since lexemes are now user-specific, we can use them directly
     now = datetime.utcnow()
-    _decay_posterior(ul, now, _HL_NONLOOK_D)
-    ul.b_nonclick = (ul.b_nonclick or 0) + 2
-    ul.beta = float((ul.beta or 9.0) + _W_NONLOOK)
-    ul.last_seen_at = now
-    _schedule_next(ul, 3, now)
+    _decay_posterior(lex, now, _HL_NONLOOK_D)
+    lex.b_nonclick = (lex.b_nonclick or 0) + 2
+    lex.beta = float((lex.beta or 9.0) + _W_NONLOOK)
+    lex.last_seen_at = now
+    _schedule_next(lex, 3, now)
     db.add(WordEvent(
         ts=now,
         account_id=account_id,
         profile_id=prof.id,
-        lexeme_id=lex.id,
         event_type="nonlookup",
         count=1,
         surface=surface,

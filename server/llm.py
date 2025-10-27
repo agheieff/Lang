@@ -24,8 +24,6 @@ from server.auth import Account as User
 from .models import (
     Profile,
     Lexeme,
-    LexemeInfo,
-    UserLexeme,
     LexemeVariant,
 )
 from .level import update_level_if_stale
@@ -214,6 +212,45 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     ]
 
 
+def build_word_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
+    """Build prompt for word-by-word translation with linguistic analysis."""
+    def _load_prompt(name: str) -> str:
+        p = Path(__file__).resolve().parent / "prompts" / name
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _lang_display(code: str) -> str:
+        if code.startswith("zh"):
+            return "Chinese"
+        if code.startswith("es"):
+            return "Spanish"
+        if code.startswith("fr"):
+            return "French"
+        return code
+
+    sys_tpl = _load_prompt("word_translation_system.txt") or (
+        "You are a professional linguist and translator. Please analyze the provided text and provide detailed word-by-word translations. "
+        "Return a JSON object with 'text' (original) and 'words' array containing word objects with translations, lemmas, and grammatical information."
+    )
+    user_tpl = _load_prompt("word_translation_user.txt") or (
+        "Analyze and translate each word in this {source_lang} text:\n\n{text}"
+    )
+
+    sys_content = sys_tpl
+    user_content = user_tpl.format(
+        source_lang=_lang_display(source_lang),
+        target_lang=_lang_display(target_lang),
+        text=text
+    )
+
+    return [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
+    ]
+
+
 @dataclass
 class TranslationSpec:
     lang: str
@@ -239,11 +276,11 @@ def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List
         except Exception:
             return ""
 
-    # XML-only output mode
-    sys_tpl = _load_prompt("translation_system_xml.txt") or (
-        "You are a professional translator from {src_lang} to {tgt_lang}. Respond with a single well-formed XML document only. {line_mode_line}{script_line}"
+    # Use regular translation prompts
+    sys_tpl = _load_prompt("translation_system.txt") or (
+        "You are a professional translator from {src_lang} to {tgt_lang}. Output only the translation, no explanations. {line_mode_line}{script_line}"
     )
-    user_tpl = _load_prompt("translation_user_xml.txt") or ("{content}")
+    user_tpl = _load_prompt("translation_user.txt") or ("{content}")
 
     src_lang = _lang_display(spec.lang)
     tgt_lang = _lang_display(spec.target_lang)
@@ -324,24 +361,22 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
     total = max(1, int(total))
     # Known words scoring
     rows = (
-        db.query(UserLexeme, Lexeme, LexemeInfo)
-        .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
-        .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
-        .filter(UserLexeme.account_id == user.id, UserLexeme.profile_id == pid)
+        db.query(Lexeme)
+        .filter(Lexeme.account_id == user.id, Lexeme.profile_id == pid)
         .all()
     )
     known_scored: List[Tuple[float, Lexeme, Dict[str, Any]]] = []
     now_ts = 0.0
-    for ul, lx, li in rows:
+    for lex in rows:
         # decayed Beta metrics
-        alpha = float(getattr(ul, "alpha", None) or 1.0)
-        beta = float(getattr(ul, "beta", None) or 9.0)
+        alpha = float(getattr(lex, "alpha", None) or 1.0)
+        beta = float(getattr(lex, "beta", None) or 9.0)
         mu = alpha / (alpha + beta) if (alpha + beta) > 0 else 0.0
         var = (alpha * beta) / (((alpha + beta) ** 2) * (alpha + beta + 1)) if (alpha + beta + 1) > 0 else 0.0
         ucb = mu + math.sqrt(var)
         # retention
-        S = max(0.5, float(getattr(ul, "stability", 1.0) or 1.0))
-        ref = ul.last_seen_at or ul.first_seen_at or ul.created_at
+        S = max(0.5, float(getattr(lex, "stability", 1.0) or 1.0))
+        ref = lex.last_seen_at or lex.first_seen_at or lex.created_at
         dt = 0.0
         if ref:
             try:
@@ -352,17 +387,17 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             R_now = math.exp(-dt / S)
         except Exception:
             R_now = 0.5
-        imp = float(getattr(ul, "importance", 0.5) or 0.5)
-        d_div = 1.0 - math.exp(- float(getattr(ul, "distinct_texts", 0) or 0) / 8.0)
+        imp = float(getattr(lex, "importance", 0.5) or 0.5)
+        d_div = 1.0 - math.exp(- float(getattr(lex, "distinct_texts", 0) or 0) / 8.0)
         rec_pen = 0.0
-        if ul.last_clicked_at:
+        if lex.last_clicked_at:
             try:
-                rec_sec = (datetime.utcnow() - ul.last_clicked_at).total_seconds()
+                rec_sec = (datetime.utcnow() - lex.last_clicked_at).total_seconds()
                 rec_pen = max(0.0, 1.0 - rec_sec / 600.0)  # 10 min decay
             except Exception:
                 rec_pen = 0.0
         base = 0.6 * (1.0 - R_now) + 0.3 * ucb + 0.1 * (0.5 + 0.5 * imp) + 0.05 * d_div - 0.1 * rec_pen
-        known_scored.append((base, lx, {"ucb": ucb, "R_now": R_now, "pos": lx.pos}))
+        known_scored.append((base, lex, {"ucb": ucb, "R_now": R_now, "pos": lex.pos}))
     known_scored.sort(key=lambda t: t[0], reverse=True)
 
     # dynamic new ratio by due backlog (approx via R_now)
@@ -422,7 +457,7 @@ def urgent_words_detailed(db: Session, user: User, lang: str, total: int = 12, n
             # map continuous 0..6 to integer 1..6 buckets
             v = max(0.0, min(6.0, float(user_level)))
             hsk_target = int(min(6, max(1, int(round(v))))) or 1
-        subq_known = select(UserLexeme.lexeme_id).where(UserLexeme.account_id == user.id, UserLexeme.profile_id == pid)
+        subq_known = select(Lexeme.id).where(Lexeme.account_id == user.id, Lexeme.profile_id == pid)
         pool_q = (
             db.query(Lexeme, LexemeInfo)
             .join(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
@@ -493,19 +528,17 @@ def estimate_level(db: Session, user: User, lang: str) -> Optional[str]:
         return None
     pid = prof.id
     rows = (
-        db.query(UserLexeme, Lexeme, LexemeInfo)
-        .join(Lexeme, UserLexeme.lexeme_id == Lexeme.id)
-        .outerjoin(LexemeInfo, LexemeInfo.lexeme_id == Lexeme.id)
-        .filter(UserLexeme.account_id == user.id, UserLexeme.profile_id == pid)
+        db.query(Lexeme)
+        .filter(Lexeme.account_id == user.id, Lexeme.profile_id == pid)
         .all()
     )
     counts: Dict[str, int] = {}
-    for ul, lx, li in rows:
-        if not li or not li.level_code:
+    for lex in rows:
+        if not lex.level_code:
             continue
-        S = float(ul.stability or 0.0)
+        S = float(lex.stability or 0.0)
         if S >= 0.3:  # seen at least somewhat
-            counts[li.level_code] = counts.get(li.level_code, 0) + 1
+            counts[lex.level_code] = counts.get(lex.level_code, 0) + 1
     if not counts:
         return None
     top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[0][0]
@@ -570,3 +603,79 @@ def compose_level_hint(db: Session, user: User, lang: str) -> Optional[str]:
         return f"{code}: {desc}"
     # Fallback to inferred level codes
     return estimate_level(db, user, lang)
+
+
+def build_structured_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
+    """Build prompt for structured sentence-by-sentence translation."""
+    def _load_prompt(name: str) -> str:
+        p = Path(__file__).resolve().parent / "prompts" / name
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _lang_display(code: str) -> str:
+        if code.startswith("zh"):
+            return "Chinese"
+        if code.startswith("es"):
+            return "Spanish"
+        return code
+
+    sys_tpl = _load_prompt("structured_translation_system.txt") or (
+        "You are a professional translator. Please translate the provided text sentence-by-sentence, preserving paragraph structure. "
+        "Return a JSON object with 'text' (original), 'paragraphs' array containing 'sentences' arrays with 'text' and 'translation'."
+    )
+    user_tpl = _load_prompt("structured_translation_user.txt") or (
+        "Translate this text from {source_lang} to {target_lang}:\n\n{text}"
+    )
+
+    sys_content = sys_tpl
+    user_content = user_tpl.format(
+        source_lang=_lang_display(source_lang),
+        target_lang=_lang_display(target_lang),
+        text=text
+    )
+
+    return [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def build_word_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
+    """Build prompt for word-by-word translation with linguistic analysis."""
+    def _load_prompt(name: str) -> str:
+        p = Path(__file__).resolve().parent / "prompts" / name
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _lang_display(code: str) -> str:
+        if code.startswith("zh"):
+            return "Chinese"
+        if code.startswith("es"):
+            return "Spanish"
+        if code.startswith("fr"):
+            return "French"
+        return code
+
+    sys_tpl = _load_prompt("word_translation_system.txt") or (
+        "You are a professional linguist and translator. Please analyze the provided text and provide detailed word-by-word translations. "
+        "Return a JSON object with 'text' (original) and 'words' array containing word objects with translations, lemmas, and grammatical information."
+    )
+    user_tpl = _load_prompt("word_translation_user.txt") or (
+        "Analyze and translate each word in this {source_lang} text:\n\n{text}"
+    )
+
+    sys_content = sys_tpl
+    user_content = user_tpl.format(
+        source_lang=_lang_display(source_lang),
+        target_lang=_lang_display(target_lang),
+        text=text
+    )
+
+    return [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": user_content},
+    ]

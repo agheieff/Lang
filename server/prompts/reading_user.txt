@@ -4,3 +4,4 @@ Write in {lang_display}.
 - Avoid English unless the target language is English.
 - Gently reinforce the target words in context and keep the language natural and engaging.
 - Do not include meta commentary.
+- Separate paragraphs with double newlines (\n\n).
