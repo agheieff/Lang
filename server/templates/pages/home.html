@@ -210,7 +210,7 @@
           if (w.lemma) parts.push(`<div class="text-gray-600">Lemma: ${escapeHtml(w.lemma)}</div>`);
           if (w.pos) parts.push(`<div class="text-gray-600">POS: ${escapeHtml(w.pos)}</div>`);
           if (w.translation) parts.push(`<div class="mt-1">${escapeHtml(w.translation)}</div>`);
-          if (w.grammar && typeof w.grammar === 'object') {
+          if (w.grammar && typeof w.grammar === 'object' && Object.keys(w.grammar).length > 0) {
             try { parts.push(`<pre class="mt-1 bg-gray-50 p-2 rounded">${escapeHtml(JSON.stringify(w.grammar, null, 2))}</pre>`); } catch {}
           }
           return parts.join('');
