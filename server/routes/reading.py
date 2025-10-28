@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 import json
 import time
 import asyncio
@@ -172,7 +172,11 @@ async def current_reading_block(
     if text_obj is None:
         return HTMLResponse(
             content='''
-              <div class="text-center py-8">
+              <div class="text-center py-8"
+                   hx-get="/reading/current"
+                   hx-trigger="load, every:2s"
+                   hx-swap="innerHTML"
+                   hx-target="#current-reading">
                 <div class="animate-pulse space-y-3">
                   <div class="h-4 bg-gray-200 rounded w-3/4"></div>
                   <div class="h-4 bg-gray-200 rounded w-5/6"></div>
@@ -286,7 +290,11 @@ async def next_text(
     # Timed out: return a simple loader (no polling)
     return HTMLResponse(
         content='''
-          <div class="text-center py-8">
+          <div class="text-center py-8"
+               hx-get="/reading/current"
+               hx-trigger="load, every:2s"
+               hx-swap="innerHTML"
+               hx-target="#current-reading">
             <div class="animate-pulse space-y-3">
               <div class="h-4 bg-gray-200 rounded w-3/4"></div>
               <div class="h-4 bg-gray-200 rounded w-5/6"></div>
@@ -299,100 +307,7 @@ async def next_text(
     )
 
 
-@router.get("/reading/{text_id}/words/stream")
-async def stream_reading_words(
-    text_id: int,
-    account: Account = Depends(_get_current_account),
-):
-    # Create a dedicated per-account session for the lifetime of this SSE stream
-    from ..account_db import open_account_session
-
-    async def event_gen():
-        db = open_account_session(int(account.id))
-        try:
-            rt = db.get(ReadingText, text_id)
-            if not rt or rt.account_id != account.id:
-                yield "event: error\ndata: {\"error\": \"not found\"}\n\n"
-                return
-
-            start = time.monotonic()
-            timeout = MAX_WAIT_SEC
-            keepalive_every = 10.0
-            last_keep = start
-
-            def _load():
-                return (
-                    db.query(ReadingWordGloss)
-                    .filter(
-                        ReadingWordGloss.account_id == account.id,
-                        ReadingWordGloss.text_id == text_id,
-                    )
-                    .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
-                    .all()
-                )
-
-            def _try_reconstruct_from_logs() -> None:
-                try:
-                    reconstruct_glosses_from_logs(
-                        db,
-                        account_id=account.id,
-                        text_id=text_id,
-                        text=rt.content or "",
-                        lang=rt.lang,
-                        prefer_db=True,
-                    )
-                except Exception:
-                    return
-
-            while True:
-                rows = _load()
-                if rows:
-                    payload = {
-                        "text_id": text_id,
-                        "words": [
-                            {
-                                "surface": w.surface,
-                                "lemma": w.lemma,
-                                "pos": w.pos,
-                                "pinyin": w.pinyin,
-                                "translation": w.translation,
-                                "lemma_translation": w.lemma_translation,
-                                "grammar": w.grammar,
-                                "span_start": w.span_start,
-                                "span_end": w.span_end,
-                            }
-                            for w in rows
-                        ],
-                    }
-                    data = json.dumps(payload, ensure_ascii=False)
-                    yield f"event: words\ndata: {data}\n\n"
-                    break
-
-                now = time.monotonic()
-                if now - start > timeout:
-                    yield "event: timeout\ndata: {}\n\n"
-                    break
-
-                if now - last_keep > keepalive_every:
-                    last_keep = now
-                    yield "event: ping\ndata: {}\n\n"
-
-                # Single best-effort reconstruction attempt before next sleep if rows are still empty
-                if not rows:
-                    _try_reconstruct_from_logs()
-
-                await asyncio.sleep(0.5)
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
-    )
+## SSE endpoint removed in favor of async long-polling
 
 
 @router.get("/reading/{text_id}/translations")

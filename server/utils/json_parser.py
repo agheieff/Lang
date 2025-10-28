@@ -21,7 +21,57 @@ def extract_json_from_text(text: str, expected_key: str = "text") -> Optional[An
     if not text or text.strip() == "":
         return None
 
-    # Try to find JSON in the response
+    s = text.strip()
+    # 1) Try full-document JSON first
+    try:
+        data = json.loads(s)
+        if isinstance(data, dict) and expected_key in data:
+            return data[expected_key]
+    except Exception:
+        pass
+
+    # 2) Try code-fenced JSON (```json ... ```)
+    def _extract_balanced(buf: str, start: int) -> Optional[str]:
+        depth = 0
+        i = start
+        n = len(buf)
+        in_str = False
+        esc = False
+        while i < n:
+            ch = buf[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return buf[start:i+1]
+            i += 1
+        return None
+
+    m = re.search(r"```json\s*", s)
+    if m:
+        start_brace = s.find('{', m.end())
+        if start_brace != -1:
+            blob = _extract_balanced(s, start_brace)
+            if blob:
+                try:
+                    data2 = json.loads(blob)
+                    if isinstance(data2, dict) and expected_key in data2:
+                        return data2[expected_key]
+                except Exception:
+                    pass
+
+    # 3) Try to find a simple JSON object with the key in the response
     json_match = re.search(r'\{[^{}]*"' + re.escape(expected_key) + r'"[^{}]*\}', text, re.DOTALL)
     if json_match:
         try:
@@ -32,7 +82,7 @@ def extract_json_from_text(text: str, expected_key: str = "text") -> Optional[An
             # If JSON parsing fails, try to find the first valid JSON object
             pass
 
-    # Alternative: try to find any JSON object
+    # 4) Alternative: try to find any JSON object containing the key
     try:
         # Look for JSON objects with the expected key
         json_objects = re.findall(r'\{[^{}]*"' + re.escape(expected_key) + r'"[^{}]*\}', text, re.DOTALL)

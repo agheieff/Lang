@@ -42,6 +42,68 @@ def _job_dir(account_id: int, lang: str) -> Path:
     return d
 
 
+def _lock_dir_root() -> Path:
+    base = Path.cwd() / "data" / "gen_locks"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _lock_path(account_id: int, lang: str) -> Path:
+    return _lock_dir_root() / f"{int(account_id)}-{str(lang)}.lock"
+
+
+def _acquire_file_lock(account_id: int, lang: str) -> Optional[Path]:
+    """Cross-process lock using O_EXCL file creation. Stale locks are cleared after TTL.
+
+    Returns lock Path if acquired, else None.
+    """
+    import errno
+    import time as _t
+    ttl = float(os.getenv("ARC_GEN_LOCK_TTL_SEC", "300"))
+    p = _lock_path(account_id, lang)
+    try:
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            os.write(fd, str(datetime.utcnow()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return p
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            return None
+        # Lock exists: if stale, remove and retry once
+        try:
+            st = p.stat()
+            age = (datetime.utcnow().timestamp() - st.st_mtime)
+            if age > ttl:
+                try:
+                    p.unlink()
+                except Exception:
+                    return None
+                # retry
+                try:
+                    fd2 = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    try:
+                        os.write(fd2, str(datetime.utcnow()).encode("utf-8"))
+                    finally:
+                        os.close(fd2)
+                    return p
+                except Exception:
+                    return None
+        except Exception:
+            return None
+    return None
+
+
+def _release_file_lock(lock_path: Optional[Path]) -> None:
+    if not lock_path:
+        return
+    try:
+        lock_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+    except Exception:
+        pass
+
+
 def _enforce_retention(account_id: int, lang: str) -> None:
     try:
         keep = int(os.getenv("ARC_OR_LOG_KEEP", "5"))
@@ -111,25 +173,20 @@ def ensure_text_available(db: Session, account_id: int, lang: str) -> None:
     t.start()
 
 
-def _complete_and_log(messages: List[Dict], model: str, out_path: Path) -> tuple[str, Dict]:
-    """Call OpenRouter sync completion and write a combined log with full prompt history.
+def _complete_and_log(
+    messages: List[Dict], *, provider: str, model: Optional[str], base_url: Optional[str], out_path: Path
+) -> tuple[str, Dict, str, Optional[str]]:
+    """Call a completion provider and write request+response to a single JSON file.
 
-    The written file contains both the exact request payload (including all messages)
-    and the full JSON response from the provider, for easy reading and auditing:
-
-    {
-      "request": { "provider": "openrouter", "model": "...", "max_tokens": 4096, "messages": [...] },
-      "response": { ...full OpenRouter response... }
-    }
-
-    Returns: (cleaned_text_content, full_response_dict)
+    Returns: (cleaned_text_content, full_response_dict, provider_used, model_used)
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     max_tokens = 4096
     text, resp_dict_or_none = chat_complete_with_raw(
         messages,
-        provider="openrouter",
+        provider=provider,
         model=model,
+        base_url=(base_url or "http://localhost:1234/v1"),
         temperature=0.7,
         max_tokens=max_tokens,
     )
@@ -137,8 +194,9 @@ def _complete_and_log(messages: List[Dict], model: str, out_path: Path) -> tuple
     try:
         log_obj = {
             "request": {
-                "provider": "openrouter",
+                "provider": provider,
                 "model": model,
+                "base_url": base_url,
                 "max_tokens": max_tokens,
                 "messages": messages,
             },
@@ -147,20 +205,31 @@ def _complete_and_log(messages: List[Dict], model: str, out_path: Path) -> tuple
         out_path.write_text(json.dumps(log_obj, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
-    # We already have cleaned text from chat_complete_with_raw
-    return text or "", resp
+    return (text or ""), resp, provider, model
 
 
-def _log_llm_request(db: Session, *, account_id: int, text_id: Optional[int], kind: str, model: str, messages: List[Dict], resp: Optional[Dict], status: str, error: Optional[str] = None) -> None:
-    # Backwards-compatible local helper delegating to centralized logger
+def _log_llm_request(
+    db: Session,
+    *,
+    account_id: int,
+    text_id: Optional[int],
+    kind: str,
+    provider: str,
+    model: Optional[str],
+    base_url: Optional[str],
+    messages: List[Dict],
+    resp: Optional[Dict],
+    status: str,
+    error: Optional[str] = None,
+) -> None:
     log_llm_request(
         db,
         account_id=account_id,
         text_id=text_id,
         kind=kind,
-        provider="openrouter",
+        provider=provider,
         model=model,
-        base_url=None,
+        base_url=base_url,
         status=status,
         request={"messages": messages},
         response=resp,
@@ -170,9 +239,15 @@ def _log_llm_request(db: Session, *, account_id: int, text_id: Optional[int], ki
 
 async def _run_generation_job(account_id: int, lang: str) -> None:
     key = (account_id, lang)
-    # Atomic check+add under lock
+    lock_path: Optional[Path] = None
+    # Cross-process lock first
+    lock_path = _acquire_file_lock(account_id, lang)
+    if lock_path is None:
+        return
+    # Atomic in-process guard
     with _running_lock:
         if key in _running:
+            _release_file_lock(lock_path)
             return
         _running.add(key)
     try:
@@ -190,46 +265,75 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
             # Working directory for raw job outputs
             job_dir = _job_dir(account_id, lang)
 
-            # Determine OpenRouter model id (non-reasoning preferred)
-            model_id = _pick_openrouter_model(None)
+            # Provider order with fallback (default: openrouter,local)
+            provider_order = [p.strip() for p in os.getenv("ARC_LLM_PROVIDERS", "openrouter,local").split(",") if p.strip()]
+            local_base = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:1234/v1")
 
-            # 1) Reading completion -> persist ReadingText (retry on 429/5xx)
+            chosen_provider: Optional[str] = None
+            chosen_model: Optional[str] = None
+            chosen_base: Optional[str] = None
+
+            # 1) Reading completion -> persist ReadingText (retry/backoff for OpenRouter; fallback to local)
             max_attempts = int(os.getenv("ARC_OR_READING_ATTEMPTS", "3"))
             reading_buf = ""
             reading_resp: Optional[Dict] = None
             last_err: Optional[Exception] = None
-            for attempt in range(max_attempts):
-                try:
-                    reading_buf, reading_resp = _complete_and_log(messages, model=model_id, out_path=job_dir / "reading.json")
-                    last_err = None
-                    break
-                except Exception as e:
-                    last_err = e
-                    # Detect HTTP status and Retry-After if available
-                    status = None
-                    retry_after = None
+            for provider in provider_order:
+                attempts = max_attempts if provider == "openrouter" else 1
+                model_id = _pick_openrouter_model(None) if provider == "openrouter" else None
+                base_url = None if provider == "openrouter" else local_base
+                for attempt in range(attempts):
                     try:
-                        status = getattr(e, "response", None).status_code  # type: ignore[attr-defined]
-                        retry_after = getattr(e, "response", None).headers.get("Retry-After")  # type: ignore[attr-defined]
-                    except Exception:
-                        status = None
-                    # Log error attempt
-                    try:
-                        _log_llm_request(db, account_id=account_id, text_id=None, kind="reading", model=model_id, messages=messages, resp=None, status="error", error=str(e))
-                    except Exception:
-                        pass
-                    # Backoff only on retriable statuses; otherwise abort
-                    retriable = status in {429, 500, 502, 503, 504}
-                    if not retriable or attempt >= max_attempts - 1:
+                        reading_buf, reading_resp, used_provider, used_model = _complete_and_log(
+                            messages,
+                            provider=provider,
+                            model=model_id,
+                            base_url=base_url,
+                            out_path=job_dir / "reading.json",
+                        )
+                        chosen_provider, chosen_model, chosen_base = used_provider, used_model, base_url
+                        last_err = None
                         break
-                    # Compute backoff with jitter; honor Retry-After seconds if numeric
-                    delay_base: float
-                    try:
-                        delay_base = float(retry_after) if retry_after and str(retry_after).isdigit() else float(2 ** (attempt + 1))
-                    except Exception:
-                        delay_base = float(2 ** (attempt + 1))
-                    jitter = random.uniform(0, delay_base * 0.5)
-                    await asyncio.sleep(delay_base + jitter)
+                    except Exception as e:
+                        last_err = e
+                        # Detect HTTP status and Retry-After if available
+                        status = None
+                        retry_after = None
+                        try:
+                            status = getattr(e, "response", None).status_code  # type: ignore[attr-defined]
+                            retry_after = getattr(e, "response", None).headers.get("Retry-After")  # type: ignore[attr-defined]
+                        except Exception:
+                            status = None
+                        # Log error attempt
+                        try:
+                            _log_llm_request(
+                                db,
+                                account_id=account_id,
+                                text_id=None,
+                                kind="reading",
+                                provider=provider,
+                                model=model_id,
+                                base_url=base_url,
+                                messages=messages,
+                                resp=None,
+                                status="error",
+                                error=str(e),
+                            )
+                        except Exception:
+                            pass
+                        # Backoff only on retriable statuses for OpenRouter; otherwise break
+                        retriable = provider == "openrouter" and (status in {429, 500, 502, 503, 504})
+                        if not retriable or attempt >= attempts - 1:
+                            break
+                        # Compute backoff with jitter; honor Retry-After seconds if numeric
+                        try:
+                            delay_base = float(retry_after) if retry_after and str(retry_after).isdigit() else float(2 ** (attempt + 1))
+                        except Exception:
+                            delay_base = float(2 ** (attempt + 1))
+                        jitter = random.uniform(0, delay_base * 0.5)
+                        await asyncio.sleep(delay_base + jitter)
+                if last_err is None and reading_buf and reading_buf.strip():
+                    break
             if last_err is not None and (not reading_buf or not reading_buf.strip()):
                 return
             final_text = extract_text_from_llm_response(reading_buf) or reading_buf
@@ -249,7 +353,18 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
             db.commit()
 
             # Log reading request/response with full conversation
-            _log_llm_request(db, account_id=account_id, text_id=rt.id, kind="reading", model=model_id, messages=messages, resp=reading_resp, status="ok")
+            _log_llm_request(
+                db,
+                account_id=account_id,
+                text_id=rt.id,
+                kind="reading",
+                provider=(chosen_provider or "openrouter"),
+                model=chosen_model,
+                base_url=chosen_base,
+                messages=messages,
+                resp=reading_resp,
+                status="ok",
+            )
 
             # Release running lock early so next reading can start while translations run
             # Release lock: allow next reading job to start while translations are running
@@ -257,7 +372,17 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                 _running.discard(key)
 
             # Finish translations in a separate background thread (new DB session per thread)
-            def _finish_translations(account_id_: int, lang_: str, text_id_: int, text_html_: str, model_id_: str, job_dir_path: Path, reading_messages: List[Dict]):
+            def _finish_translations(
+                account_id_: int,
+                lang_: str,
+                text_id_: int,
+                text_html_: str,
+                provider_: str,
+                model_id_: Optional[str],
+                base_url_: Optional[str],
+                job_dir_path: Path,
+                reading_messages: List[Dict],
+            ):
                 db2 = _account_session(account_id_)
                 try:
                     # Rebuild translation contexts
@@ -277,14 +402,26 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
 
                     # Run both completions concurrently (threads)
                     from concurrent.futures import ThreadPoolExecutor
-                    def _call_structured() -> Optional[tuple[str, Dict]]:
+                    def _call_structured() -> Optional[tuple[str, Dict, str, Optional[str]]]:
                         try:
-                            return _complete_and_log(tr_messages, model=model_id_, out_path=job_dir_path / "structured.json")
+                            return _complete_and_log(
+                                tr_messages,
+                                provider=provider_,
+                                model=model_id_,
+                                base_url=base_url_,
+                                out_path=job_dir_path / "structured.json",
+                            )
                         except Exception:
                             return None
-                    def _call_words() -> Optional[tuple[str, Dict]]:
+                    def _call_words() -> Optional[tuple[str, Dict, str, Optional[str]]]:
                         try:
-                            return _complete_and_log(w_messages, model=model_id_, out_path=job_dir_path / "words.json")
+                            return _complete_and_log(
+                                w_messages,
+                                provider=provider_,
+                                model=model_id_,
+                                base_url=base_url_,
+                                out_path=job_dir_path / "words.json",
+                            )
                         except Exception:
                             return None
                     with ThreadPoolExecutor(max_workers=2) as ex:
@@ -296,7 +433,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     # Persist structured translations
                     try:
                         if tr_res:
-                            tr_buf, tr_resp = tr_res
+                            tr_buf, tr_resp = tr_res[0], tr_res[1]
                             tr_parsed = extract_structured_translation(tr_buf)
                             if tr_parsed:
                                 target = tr_parsed.get("target_lang") or target_lang2
@@ -314,8 +451,8 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                                                 span_end=None,
                                                 source_text=s["text"],
                                                 translated_text=s["translation"],
-                                                provider="openrouter",
-                                                model=None,
+                                                provider=provider_,
+                                                model=model_id_,
                                             ))
                                             idx += 1
                     except Exception:
@@ -323,14 +460,25 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     # Log structured translation request/response
                     try:
                         if tr_res:
-                            _log_llm_request(db2, account_id=account_id_, text_id=text_id_, kind="structured_translation", model=model_id_, messages=tr_messages, resp=tr_res[1], status="ok")
+                            _log_llm_request(
+                                db2,
+                                account_id=account_id_,
+                                text_id=text_id_,
+                                kind="structured_translation",
+                                provider=provider_,
+                                model=model_id_,
+                                base_url=base_url_,
+                                messages=tr_messages,
+                                resp=tr_res[1],
+                                status="ok",
+                            )
                     except Exception:
                         pass
 
                     # Persist word translations with span alignment to the original text
                     try:
                         if wd_res:
-                            wd_buf, wd_resp = wd_res
+                            wd_buf, wd_resp = wd_res[0], wd_res[1]
                             wd_parsed = extract_word_translations(wd_buf)
                             if wd_parsed:
                                 words_list = [w for w in wd_parsed.get("words", []) if "word" in w and w.get("word")]
@@ -343,7 +491,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                                         text_id=text_id_,
                                         lang=lang_,
                                         surface=it["word"],
-                                        lemma=it.get("lemma", it["word"]),
+                                        lemma=(None if str(lang_).startswith("zh") else it.get("lemma")),
                                         pos=it.get("part_of_speech"),
                                         pinyin=it.get("pinyin"),
                                         translation=it["translation"],
@@ -357,7 +505,18 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     # Log word translation request/response
                     try:
                         if wd_res:
-                            _log_llm_request(db2, account_id=account_id_, text_id=text_id_, kind="word_translation", model=model_id_, messages=w_messages, resp=wd_res[1], status="ok")
+                            _log_llm_request(
+                                db2,
+                                account_id=account_id_,
+                                text_id=text_id_,
+                                kind="word_translation",
+                                provider=provider_,
+                                model=model_id_,
+                                base_url=base_url_,
+                                messages=w_messages,
+                                resp=wd_res[1],
+                                status="ok",
+                            )
                     except Exception:
                         pass
 
@@ -386,7 +545,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
 
             threading.Thread(
                 target=_finish_translations,
-                args=(account_id, lang, rt.id, final_text, model_id, job_dir, messages),
+                args=(account_id, lang, rt.id, final_text, (chosen_provider or "openrouter"), chosen_model, chosen_base, job_dir, messages),
                 daemon=True,
             ).start()
 
@@ -399,3 +558,4 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
         # If we already discarded earlier, this is a no-op
         with _running_lock:
             _running.discard(key)
+        _release_file_lock(lock_path)

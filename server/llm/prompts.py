@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+def _safe_format(s: str, mapping: Dict[str, str]) -> str:
+    """Replace only known {keys} using a safe formatter, leaving all other braces intact.
+
+    Avoids KeyError and preserves embedded JSON examples like {"text": "..."}.
+    """
+    import re
+    def repl(m: re.Match[str]) -> str:
+        key = m.group(1)
+        return str(mapping.get(key, m.group(0)))
+    return re.sub(r"\{([a-zA-Z0-9_]+)\}", repl, s)
 
 
 def _load_prompt(name: str, lang_code: Optional[str] = None) -> str:
@@ -44,8 +54,9 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
             return "Spanish"
         return code
 
-    sys_tpl = _load_prompt("reading_system.txt", spec.lang)
-    user_tpl = _load_prompt("reading_user.txt", spec.lang)
+    # Use new file names (system.md, text.md)
+    sys_tpl = _load_prompt("system.md", spec.lang)
+    user_tpl = _load_prompt("text.md", spec.lang)
 
     lang_display = _lang_display(spec.lang)
     script_line = ""
@@ -67,15 +78,37 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         pct = int(round(float(spec.ci_target) * 100))
         ci_line = f"Aim for about {pct}% of tokens to be familiar for the learner; limit new vocabulary.\n"
 
-    sys_content = sys_tpl.format(lang_display=lang_display)
-    user_content = user_tpl.format(
-        lang_display=lang_display,
-        script_line=script_line,
-        level_line=level_line,
-        length_line=length_line,
-        include_words_line=include_words_line,
-        ci_line=ci_line,
-    )
+    # Build mapping for both legacy "*_line" placeholders and simplified {level}/{length}/{include_words}/{script}
+    # Prefer a concise level code (e.g., HSK2, A2) before any description
+    if spec.user_level_hint and ":" in spec.user_level_hint:
+        simple_level = spec.user_level_hint.split(":", 1)[0].strip()
+    else:
+        simple_level = spec.user_level_hint or ""
+    simple_length = str(spec.approx_len)
+    simple_include = ", ".join(spec.include_words or [])
+    script_label = ""
+    if spec.script and spec.lang.startswith("zh"):
+        if spec.script == "Hans":
+            script_label = "simplified"
+        elif spec.script == "Hant":
+            script_label = "traditional"
+    mapping = {
+        "lang_display": lang_display,
+        # legacy multi-line placeholders
+        "script_line": script_line,
+        "level_line": level_line,
+        "length_line": length_line,
+        "include_words_line": include_words_line,
+        "ci_line": ci_line,
+        # simplified single-value placeholders
+        "level": simple_level,
+        "length": simple_length,
+        "include_words": simple_include,
+        "script": script_label,
+    }
+
+    sys_content = _safe_format(sys_tpl, mapping)
+    user_content = _safe_format(user_tpl, mapping)
     return [
         {"role": "system", "content": sys_content},
         {"role": "user", "content": user_content},
@@ -100,31 +133,17 @@ def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List
             return "Spanish"
         return code
 
-    # Use regular translation prompts
-    sys_tpl = _load_prompt("translation_system.txt", spec.lang)
-    user_tpl = _load_prompt("translation_user.txt", spec.lang)
-
+    # Map to the new structured translation template for consistency
+    tpl = _load_prompt("translation.md", spec.lang)
     src_lang = _lang_display(spec.lang)
     tgt_lang = _lang_display(spec.target_lang)
-    line_mode_line = (
-        "Translate each input line independently and return exactly one line per input line in the same order."
-        if isinstance(spec.content, list) else ""
-    )
-    script_line = ""
-    if spec.script and spec.lang.startswith("zh"):
-        if spec.script == "Hans":
-            script_line = "Source text may be in simplified Chinese."
-        elif spec.script == "Hant":
-            script_line = "Source text may be in traditional Chinese."
-
-    sys_content = sys_tpl.format(src_lang=src_lang, tgt_lang=tgt_lang, line_mode_line=line_mode_line, script_line=script_line)
-    lines = spec.content if isinstance(spec.content, list) else [spec.content]
-    user_content = user_tpl.format(content="\n".join(lines))
+    text = spec.content if isinstance(spec.content, str) else "\n".join(spec.content)
+    user_content = tpl.format(source_lang=src_lang, target_lang=tgt_lang, text=text)
 
     msgs: List[Dict[str, str]] = []
     if prev_messages:
         msgs.extend(prev_messages)
-    msgs.append({"role": "system", "content": sys_content})
+    msgs.append({"role": "system", "content": ""})
     msgs.append({"role": "user", "content": user_content})
     return msgs
 
@@ -138,18 +157,15 @@ def build_structured_translation_prompt(source_lang: str, target_lang: str, text
             return "Spanish"
         return code
 
-    sys_tpl = _load_prompt("structured_translation_system.txt", source_lang)
-    user_tpl = _load_prompt("structured_translation_user.txt", source_lang)
-
-    sys_content = sys_tpl
-    user_content = user_tpl.format(
+    # Use single-file translation.md (structured by parts)
+    tpl = _load_prompt("translation.md", source_lang)
+    user_content = tpl.format(
         source_lang=_lang_display(source_lang),
         target_lang=_lang_display(target_lang),
-        text=text
+        text=text,
     )
-
     return [
-        {"role": "system", "content": sys_content},
+        {"role": "system", "content": ""},
         {"role": "user", "content": user_content},
     ]
 
@@ -165,18 +181,15 @@ def build_word_translation_prompt(source_lang: str, target_lang: str, text: str)
             return "French"
         return code
 
-    sys_tpl = _load_prompt("word_translation_system.txt", source_lang)
-    user_tpl = _load_prompt("word_translation_user.txt", source_lang)
-
-    sys_content = sys_tpl
-    user_content = user_tpl.format(
+    # Use single-file words.md (word-by-word)
+    tpl = _load_prompt("words.md", source_lang)
+    user_content = tpl.format(
         source_lang=_lang_display(source_lang),
         target_lang=_lang_display(target_lang),
-        text=text
+        text=text,
     )
-
     return [
-        {"role": "system", "content": sys_content},
+        {"role": "system", "content": ""},
         {"role": "user", "content": user_content},
     ]
 

@@ -62,10 +62,33 @@
               if (ws.length) {
                 makeClickable(textEl, ws);
                 attachTooltip(textEl, ws);
+              } else {
+                // Auto-retry until words arrive (best-effort)
+                if (!textEl.dataset.wordsPolling) {
+                  textEl.dataset.wordsPolling = '1';
+                  pollWords(textEl, Number(textId));
+                }
               }
             }
           } catch {}
         }
+      }
+      async function pollWords(textEl, textId){
+        if (!textEl || !textId) return;
+        if (textEl.querySelector('[data-word-index]')) return; // already clickable
+        try {
+          const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
+          if (res.ok) {
+            const data = await res.json();
+            const ws = (data && Array.isArray(data.words)) ? data.words : [];
+            if (ws.length) {
+              makeClickable(textEl, ws);
+              attachTooltip(textEl, ws);
+              return;
+            }
+          }
+        } catch {}
+        setTimeout(() => pollWords(textEl, textId), 2000);
       }
       function getEmbeddedWords(){
         const el = document.getElementById('reading-words-json');
