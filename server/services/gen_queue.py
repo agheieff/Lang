@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import re
 
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.exc import IntegrityError
@@ -461,7 +462,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     target_lang2 = prof2.target_lang if prof2 and getattr(prof2, "target_lang", None) else "en"
                     reading_user_content2 = reading_messages[1]["content"] if reading_messages and len(reading_messages) > 1 else ""
 
-                    from ..llm.prompts import build_translation_contexts
+                    from ..llm.prompts import build_translation_contexts, build_word_translation_prompt
                     ctx2 = build_translation_contexts(
                         reading_messages,
                         source_lang=lang_,
@@ -471,7 +472,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     tr_messages = ctx2["structured"]
                     w_messages = ctx2["words"]
 
-                    # Run both completions concurrently (threads)
+                    # Run structured + words (optionally per-sentence) concurrently
                     from concurrent.futures import ThreadPoolExecutor
                     def _call_structured() -> Optional[tuple[str, Dict, str, Optional[str]]]:
                         try:
@@ -484,22 +485,97 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             )
                         except Exception:
                             return None
-                    def _call_words() -> Optional[tuple[str, Dict, str, Optional[str]]]:
-                        try:
-                            return _complete_and_log(
-                                w_messages,
-                                provider=provider_,
-                                model=model_id_,
-                                base_url=base_url_,
-                                out_path=job_dir_path / "words.json",
-                            )
-                        except Exception:
-                            return None
-                    with ThreadPoolExecutor(max_workers=2) as ex:
-                        fut_tr = ex.submit(_call_structured)
-                        fut_wd = ex.submit(_call_words)
-                        tr_res = fut_tr.result()
-                        wd_res = fut_wd.result()
+
+                    def _split_sentences(text: str, lang: str) -> List[Tuple[int, int, str]]:
+                        if not text:
+                            return []
+                        if str(lang).startswith("zh"):
+                            pattern = r"[^。！？!?…]+(?:[。！？!?…]+|$)"
+                        else:
+                            pattern = r"[^\.\!\?]+(?:[\.\!\?]+|$)"
+                        out: List[Tuple[int, int, str]] = []
+                        for m in re.finditer(pattern, text):
+                            s, e = m.span()
+                            seg = text[s:e]
+                            if seg and seg.strip():
+                                out.append((s, e, seg))
+                        return out
+
+                    def _attempt_words(messages: List[Dict], out_path: Path) -> Optional[tuple[str, Dict, str, Optional[str]]]:
+                        attempts = 1
+                        if provider_ == "openrouter":
+                            try:
+                                attempts = int(os.getenv("ARC_OR_WORDS_ATTEMPTS", "2"))
+                            except Exception:
+                                attempts = 2
+                        last_err: Optional[Exception] = None
+                        for attempt in range(attempts):
+                            try:
+                                return _complete_and_log(
+                                    messages,
+                                    provider=provider_,
+                                    model=model_id_,
+                                    base_url=base_url_,
+                                    out_path=out_path,
+                                )
+                            except Exception as e:
+                                last_err = e
+                                if provider_ != "openrouter" or attempt >= attempts - 1:
+                                    break
+                                try:
+                                    delay_base = float(2 ** (attempt + 1))
+                                except Exception:
+                                    delay_base = 2.0
+                                jitter = random.uniform(0, delay_base * 0.5)
+                                try:
+                                    import time as _t
+                                    _t.sleep(delay_base + jitter)
+                                except Exception:
+                                    pass
+                        return None
+
+                    try:
+                        words_parallel = max(1, int(os.getenv("ARC_WORDS_PARALLEL", "1")))
+                    except Exception:
+                        words_parallel = 1
+
+                    tr_res = None
+                    wd_res = None
+                    wd_seg_results: List[Tuple[int, str, Optional[tuple[str, Dict, str, Optional[str]]], List[Dict]]] = []
+
+                    if words_parallel <= 1:
+                        def _call_words_single() -> Optional[tuple[str, Dict, str, Optional[str]]]:
+                            return _attempt_words(w_messages, job_dir_path / "words.json")
+                        with ThreadPoolExecutor(max_workers=2) as ex:
+                            fut_tr = ex.submit(_call_structured)
+                            fut_wd = ex.submit(_call_words_single)
+                            tr_res = fut_tr.result()
+                            wd_res = fut_wd.result()
+                    else:
+                        sent_spans = _split_sentences(text_html_, lang_)
+                        # Build per-sentence messages preserving reading context
+                        per_msgs: List[Tuple[int, str, List[Dict]]] = []
+                        for (s, e, seg) in sent_spans:
+                            msgs = build_word_translation_prompt(lang_, target_lang2, seg)
+                            words_ctx = [
+                                {"role": "system", "content": msgs[0]["content"]},
+                                {"role": "user", "content": reading_user_content2},
+                                {"role": "assistant", "content": text_html_},
+                                {"role": "user", "content": msgs[1]["content"]},
+                            ]
+                            per_msgs.append((s, seg, words_ctx))
+                        max_workers = max(2, min(words_parallel, len(per_msgs)) + 1)
+                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                            fut_tr = ex.submit(_call_structured)
+                            futs = []
+                            for i, (s, seg, m) in enumerate(per_msgs):
+                                futs.append((s, seg, m, ex.submit(_attempt_words, m, job_dir_path / f"words_{i}.json")))
+                            tr_res = fut_tr.result()
+                            for s, seg, m, f in futs:
+                                try:
+                                    wd_seg_results.append((s, seg, f.result(), m))
+                                except Exception:
+                                    wd_seg_results.append((s, seg, None, m))
 
                     # Persist structured translations
                     try:
@@ -548,63 +624,83 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
 
                     # Persist word translations with span alignment to the original text
                     try:
-                        if wd_res:
-                            wd_buf, wd_resp = wd_res[0], wd_res[1]
-                            wd_parsed = extract_word_translations(wd_buf)
-                            if wd_parsed:
-                                words_list = [w for w in wd_parsed.get("words", []) if "word" in w and w.get("word")]
-                                spans = compute_spans(text_html_, words_list, key="word")
-                                # Avoid duplicates by preloading existing spans and tracking newly added
-                                try:
-                                    existing = set(
-                                        (rw.span_start, rw.span_end)
-                                        for rw in db2.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
-                                        .filter(ReadingWordGloss.account_id == account_id_, ReadingWordGloss.text_id == text_id_)
-                                        .all()
-                                    )
-                                except Exception:
-                                    existing = set()
-                                seen = set()
-                                for it, sp in zip(words_list, spans):
-                                    if sp is None:
-                                        continue
-                                    if sp in existing or sp in seen:
-                                        continue
-                                    _pos = it.get("pos") if isinstance(it, dict) else None
-                                    if not _pos:
-                                        _pos = it.get("part_of_speech") if isinstance(it, dict) else None
-                                    db2.add(ReadingWordGloss(
-                                        account_id=account_id_,
-                                        text_id=text_id_,
-                                        lang=lang_,
-                                        surface=it["word"],
-                                        lemma=(None if str(lang_).startswith("zh") else it.get("lemma")),
-                                        pos=_pos,
-                                        pinyin=it.get("pinyin"),
-                                        translation=it["translation"],
-                                        lemma_translation=it.get("lemma_translation"),
-                                        grammar=it.get("grammar", {}),
-                                        span_start=sp[0],
-                                        span_end=sp[1],
-                                    ))
-                                    seen.add(sp)
-                    except Exception:
-                        pass
-                    # Log word translation request/response
-                    try:
-                        if wd_res:
-                            _log_llm_request(
-                                db2,
-                                account_id=account_id_,
-                                text_id=text_id_,
-                                kind="word_translation",
-                                provider=provider_,
-                                model=model_id_,
-                                base_url=base_url_,
-                                messages=w_messages,
-                                resp=wd_res[1],
-                                status="ok",
+                        # Avoid duplicates by preloading existing spans and tracking newly added
+                        try:
+                            existing = set(
+                                (rw.span_start, rw.span_end)
+                                for rw in db2.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+                                .filter(ReadingWordGloss.account_id == account_id_, ReadingWordGloss.text_id == text_id_)
+                                .all()
                             )
+                        except Exception:
+                            existing = set()
+                        seen = set()
+
+                        def _persist(seg_start: int, seg_text: str, tup: Optional[tuple[str, Dict, str, Optional[str]]], msgs_used: List[Dict]) -> None:
+                            if not tup:
+                                return
+                            wd_buf, wd_resp = tup[0], tup[1]
+                            wd_parsed = extract_word_translations(wd_buf)
+                            if not wd_parsed:
+                                return
+                            words_list = [w for w in wd_parsed.get("words", []) if isinstance(w, dict) and w.get("word")]
+                            if not words_list:
+                                return
+                            spans = compute_spans(seg_text, words_list, key="word")
+                            for it, sp in zip(words_list, spans):
+                                if sp is None:
+                                    continue
+                                gs = (seg_start + sp[0], seg_start + sp[1])
+                                if gs in existing or gs in seen:
+                                    continue
+                                _pos_local = it.get("pos") if isinstance(it, dict) else None
+                                if not _pos_local and isinstance(it, dict):
+                                    _pos_local = it.get("part_of_speech")
+                                db2.add(ReadingWordGloss(
+                                    account_id=account_id_,
+                                    text_id=text_id_,
+                                    lang=lang_,
+                                    surface=it["word"],
+                                    lemma=(None if str(lang_).startswith("zh") else it.get("lemma")),
+                                    pos=_pos_local,
+                                    pinyin=it.get("pinyin"),
+                                    translation=it["translation"],
+                                    lemma_translation=it.get("lemma_translation"),
+                                    grammar=it.get("grammar", {}),
+                                    span_start=gs[0],
+                                    span_end=gs[1],
+                                ))
+                                seen.add(gs)
+                            # Log each call
+                            try:
+                                _log_llm_request(
+                                    db2,
+                                    account_id=account_id_,
+                                    text_id=text_id_,
+                                    kind="word_translation",
+                                    provider=provider_,
+                                    model=model_id_,
+                                    base_url=base_url_,
+                                    messages=msgs_used,
+                                    resp=tup[1],
+                                    status="ok",
+                                )
+                            except Exception:
+                                pass
+
+                        try:
+                            words_parallel_val = max(1, int(os.getenv("ARC_WORDS_PARALLEL", "1")))
+                        except Exception:
+                            words_parallel_val = 1
+                        if words_parallel_val <= 1:
+                            _persist(0, text_html_, wd_res, w_messages)
+                        else:
+                            # Use the same sentence splitting as above order
+                            sent_spans2 = _split_sentences(text_html_, lang_)
+                            # Ensure mapping by start offset
+                            seg_map = {s: (s, e, seg) for (s, e, seg) in sent_spans2}
+                            for s, seg, tup, msgs_used in wd_seg_results:
+                                _persist(s, seg, tup, msgs_used)
                     except Exception:
                         pass
 
