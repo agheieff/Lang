@@ -77,18 +77,40 @@ def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
     # Avoid any leading whitespace before content to keep span offsets aligned with DOM
     return (
         f'<div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">{html_content}</div>'
-        '<div class="mt-4 flex gap-2">'
-        '  <button'
+        '<div class="mt-4 flex items-center gap-3">'
+        '  <button id="next-btn"'
         '    hx-post="/reading/next"'
         '    hx-target="#current-reading"'
         '    hx-swap="innerHTML"'
-        '    class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"'
-        '  >'
-        '    Next text'
-        '  </button>'
+        '    class="px-4 py-2 rounded-lg transition-colors text-white bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"'
+        '    disabled'
+        '  >Next text</button>'
+        '  <span id="next-status" class="text-sm text-gray-500">Loading next…</span>'
         '</div>'
         f'<script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>'
         '<div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>'
+        '<script>(function(){'
+        '  const container=document.getElementById("current-reading");'
+        '  const textEl=document.getElementById("reading-text");'
+        '  if(!container||!textEl) return;'
+        '  const curId=String(textEl.dataset.textId||"");'
+        '  if(container.dataset.nextPollFor===curId) return;'
+        '  container.dataset.nextPollFor=curId;'
+        '  const btn=document.getElementById("next-btn");'
+        '  const st=document.getElementById("next-status");'
+        '  if(container.__nextPollTimer){ try{ clearTimeout(container.__nextPollTimer); }catch(e){} }'
+        '  async function poll(){'
+        '    try{'
+        '      const res=await fetch("/reading/next/ready?wait=25",{headers:{"Accept":"application/json"}});'
+        '      if(res.ok){'
+        '        const data=await res.json();'
+        '        if(data && data.ready){ if(btn){ btn.disabled=false; } if(st){ try{ st.remove(); }catch(e){ st.textContent=""; } } container.__nextPollTimer=null; return; }'
+        '      }'
+        '    }catch(e){}'
+        '    container.__nextPollTimer=setTimeout(poll, 1500);'
+        '  }'
+        '  poll();'
+        '})();</script>'
     )
 
 
@@ -454,4 +476,69 @@ def get_reading_meta(
         "read_at": (rt.read_at.isoformat() if getattr(rt, "read_at", None) else None),
         "created_at": (rt.created_at.isoformat() if getattr(rt, "created_at", None) else None),
     }
+
+
+@router.get("/reading/next/ready")
+async def next_ready(
+    wait: Optional[float] = None,
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    prof = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not prof:
+        return {"ready": False, "text_id": None}
+
+    def _next_unopened() -> Optional[ReadingText]:
+        return (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.account_id == account.id,
+                ReadingText.lang == prof.lang,
+                ReadingText.opened_at.is_(None),
+            )
+            .order_by(ReadingText.created_at.desc())
+            .first()
+        )
+
+    def _is_ready(rt: ReadingText) -> bool:
+        if not getattr(rt, "content", None):
+            return False
+        try:
+            has_words = (
+                db.query(ReadingWordGloss.id)
+                .filter(ReadingWordGloss.account_id == account.id, ReadingWordGloss.text_id == rt.id)
+                .first()
+                is not None
+            )
+        except Exception:
+            has_words = False
+        # Temporarily gate on words only; translations may arrive slightly later
+        return bool(has_words)
+
+    # Ensure something is queued
+    try:
+        ensure_text_available(db, account.id, prof.lang)
+    except Exception:
+        pass
+
+    rt = _next_unopened()
+    deadline = time.time() + min(float(wait or 0), MAX_WAIT_SEC) if wait and wait > 0 else None
+
+    while True:
+        if rt and _is_ready(rt):
+            return {"ready": True, "text_id": rt.id}
+        if deadline is None or time.time() >= deadline:
+            return {"ready": False, "text_id": (rt.id if rt else None)}
+        # Try to reconstruct words if content exists but words are missing
+        try:
+            if rt and getattr(rt, "content", None):
+                reconstruct_glosses_from_logs(db, account_id=account.id, text_id=rt.id, text=rt.content or "", lang=rt.lang, prefer_db=True)
+        except Exception:
+            pass
+        try:
+            db.expire_all()
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        rt = _next_unopened()
 
