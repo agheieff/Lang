@@ -209,7 +209,7 @@
           if (w.pinyin) parts.push(`<div class="text-gray-600">${escapeHtml(w.pinyin)}</div>`);
           if (w.lemma) parts.push(`<div class="text-gray-600">Lemma: ${escapeHtml(w.lemma)}</div>`);
           if (w.translation) parts.push(`<div class="mt-1">${escapeHtml(w.translation)}</div>`);
-          if (w.pos) parts.push(`<div class="mt-1 text-xs text-gray-500">POS: ${escapeHtml(w.pos)}</div>`);
+          if (w.pos) parts.push(`<div class="mt-1 text-xs text-gray-500">${escapeHtml(w.pos)}</div>`);
           if (w.grammar && typeof w.grammar === 'object' && Object.keys(w.grammar).length > 0) {
             try { parts.push(`<pre class="mt-1 bg-gray-50 p-2 rounded">${escapeHtml(JSON.stringify(w.grammar, null, 2))}</pre>`); } catch {}
           }
