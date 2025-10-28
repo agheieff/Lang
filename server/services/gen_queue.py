@@ -570,13 +570,16 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                                         continue
                                     if sp in existing or sp in seen:
                                         continue
+                                    _pos = it.get("pos") if isinstance(it, dict) else None
+                                    if not _pos:
+                                        _pos = it.get("part_of_speech") if isinstance(it, dict) else None
                                     db2.add(ReadingWordGloss(
                                         account_id=account_id_,
                                         text_id=text_id_,
                                         lang=lang_,
                                         surface=it["word"],
                                         lemma=(None if str(lang_).startswith("zh") else it.get("lemma")),
-                                        pos=it.get("part_of_speech"),
+                                        pos=_pos,
                                         pinyin=it.get("pinyin"),
                                         translation=it["translation"],
                                         lemma_translation=it.get("lemma_translation"),

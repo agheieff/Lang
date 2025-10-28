@@ -111,6 +111,11 @@ def _reconstruct_from_db_logs(
             continue
         if sp in existing or sp in seen:
             continue
+        _pos = None
+        try:
+            _pos = it.get("pos") or it.get("part_of_speech")
+        except Exception:
+            _pos = None
         try:
             db.add(
                 ReadingWordGloss(
@@ -119,7 +124,7 @@ def _reconstruct_from_db_logs(
                     lang=lang,
                     surface=it.get("word"),
                     lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
-                    pos=it.get("part_of_speech"),
+                    pos=_pos,
                     pinyin=it.get("pinyin"),
                     translation=it.get("translation"),
                     lemma_translation=it.get("lemma_translation"),
@@ -185,6 +190,11 @@ def _reconstruct_from_file_logs(
                             continue
                         if sp in existing or sp in seen:
                             continue
+                        _pos = None
+                        try:
+                            _pos = it.get("pos") or it.get("part_of_speech")
+                        except Exception:
+                            _pos = None
                         try:
                             db.add(
                                 ReadingWordGloss(
@@ -193,7 +203,7 @@ def _reconstruct_from_file_logs(
                                     lang=lang,
                                     surface=it.get("word"),
                                     lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
-                                    pos=it.get("part_of_speech"),
+                                    pos=_pos,
                                     pinyin=it.get("pinyin"),
                                     translation=it.get("translation"),
                                     lemma_translation=it.get("lemma_translation"),
