@@ -186,12 +186,14 @@ def build_word_translation_prompt(source_lang: str, target_lang: str, text: str)
 
     # Use single-file words.md (word-by-word)
     tpl = _load_prompt("words.md", source_lang)
+    # Support both {text} and {sentence} placeholders in templates
     user_content = _safe_format(
         tpl,
         {
             "source_lang": _lang_display(source_lang),
             "target_lang": _lang_display(target_lang),
             "text": text,
+            "sentence": text,
         },
     )
     return [
