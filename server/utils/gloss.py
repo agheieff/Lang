@@ -95,21 +95,21 @@ def _reconstruct_from_db_logs(
         return 0
     spans = compute_spans(text, items, key="word")
     count = 0
-    # Prepare existing spans to avoid unique constraint conflicts
+    # Load existing rows to allow in-place updates of missing fields
     try:
-        existing = set(
-            (rw.span_start, rw.span_end)
-            for rw in db.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+        existing_rows = (
+            db.query(ReadingWordGloss)
             .filter(ReadingWordGloss.account_id == account_id, ReadingWordGloss.text_id == text_id)
             .all()
         )
+        existing_map = {(rw.span_start, rw.span_end): rw for rw in existing_rows}
     except Exception:
-        existing = set()
+        existing_map = {}
     seen: set[Tuple[int, int]] = set()
     for it, sp in zip(items, spans):
         if sp is None:
             continue
-        if sp in existing or sp in seen:
+        if sp in seen:
             continue
         _pos = None
         try:
@@ -117,24 +117,35 @@ def _reconstruct_from_db_logs(
         except Exception:
             _pos = None
         try:
-            db.add(
-                ReadingWordGloss(
-                    account_id=account_id,
-                    text_id=text_id,
-                    lang=lang,
-                    surface=it.get("word"),
-                    lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
-                    pos=_pos,
-                    pinyin=it.get("pinyin"),
-                    translation=it.get("translation"),
-                    lemma_translation=it.get("lemma_translation"),
-                    grammar=it.get("grammar", {}),
-                    span_start=sp[0],
-                    span_end=sp[1],
+            if sp in existing_map:
+                rw = existing_map[sp]
+                updated = False
+                if (rw.pos is None or rw.pos == "") and _pos:
+                    rw.pos = _pos
+                    updated = True
+                if updated:
+                    seen.add(sp)
+                    continue
+            # Insert if not existing
+            if sp not in existing_map:
+                db.add(
+                    ReadingWordGloss(
+                        account_id=account_id,
+                        text_id=text_id,
+                        lang=lang,
+                        surface=it.get("word"),
+                        lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
+                        pos=_pos,
+                        pinyin=it.get("pinyin"),
+                        translation=it.get("translation"),
+                        lemma_translation=it.get("lemma_translation"),
+                        grammar=it.get("grammar", {}),
+                        span_start=sp[0],
+                        span_end=sp[1],
+                    )
                 )
-            )
-            count += 1
-            seen.add(sp)
+                count += 1
+                seen.add(sp)
         except Exception:
             continue
     try:
@@ -176,19 +187,19 @@ def _reconstruct_from_file_logs(
                     spans = compute_spans(text, items, key="word")
                     count = 0
                     try:
-                        existing = set(
-                            (rw.span_start, rw.span_end)
-                            for rw in db.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+                        existing_rows = (
+                            db.query(ReadingWordGloss)
                             .filter(ReadingWordGloss.account_id == account_id, ReadingWordGloss.text_id == text_id)
                             .all()
                         )
+                        existing_map = {(rw.span_start, rw.span_end): rw for rw in existing_rows}
                     except Exception:
-                        existing = set()
+                        existing_map = {}
                     seen: set[Tuple[int, int]] = set()
                     for it, sp in zip(items, spans):
                         if sp is None:
                             continue
-                        if sp in existing or sp in seen:
+                        if sp in seen:
                             continue
                         _pos = None
                         try:
@@ -196,24 +207,34 @@ def _reconstruct_from_file_logs(
                         except Exception:
                             _pos = None
                         try:
-                            db.add(
-                                ReadingWordGloss(
-                                    account_id=account_id,
-                                    text_id=text_id,
-                                    lang=lang,
-                                    surface=it.get("word"),
-                                    lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
-                                    pos=_pos,
-                                    pinyin=it.get("pinyin"),
-                                    translation=it.get("translation"),
-                                    lemma_translation=it.get("lemma_translation"),
-                                    grammar=it.get("grammar", {}),
-                                    span_start=sp[0],
-                                    span_end=sp[1],
+                            if sp in existing_map:
+                                rw = existing_map[sp]
+                                updated = False
+                                if (rw.pos is None or rw.pos == "") and _pos:
+                                    rw.pos = _pos
+                                    updated = True
+                                if updated:
+                                    seen.add(sp)
+                                    continue
+                            if sp not in existing_map:
+                                db.add(
+                                    ReadingWordGloss(
+                                        account_id=account_id,
+                                        text_id=text_id,
+                                        lang=lang,
+                                        surface=it.get("word"),
+                                        lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
+                                        pos=_pos,
+                                        pinyin=it.get("pinyin"),
+                                        translation=it.get("translation"),
+                                        lemma_translation=it.get("lemma_translation"),
+                                        grammar=it.get("grammar", {}),
+                                        span_start=sp[0],
+                                        span_end=sp[1],
+                                    )
                                 )
-                            )
-                            count += 1
-                            seen.add(sp)
+                                count += 1
+                                seen.add(sp)
                         except Exception:
                             continue
                     try:
