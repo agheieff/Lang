@@ -83,7 +83,7 @@ def chat_complete(
     provider: Optional[str] = "openrouter",
     model: Optional[str] = None,
     base_url: str = "http://localhost:1234/v1",
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
 ) -> str:
     """Call LLM API and return text response.
 
@@ -106,13 +106,20 @@ def chat_complete_with_raw(
     provider: Optional[str] = "openrouter",
     model: Optional[str] = None,
     base_url: str = "http://localhost:1234/v1",
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: int = 16384,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Call LLM API and return (cleaned_text, provider_response_dict_or_none).
 
     Mirrors chat_complete but also returns the raw provider JSON when available.
     """
+    # Resolve temperature from env when not provided
+    if temperature is None:
+        try:
+            temperature = float(os.getenv("ARC_LLM_TEMPERATURE", "0.7"))
+        except Exception:
+            temperature = 0.7
+
     if provider == "openrouter":
         if _or_complete is None:
             raise RuntimeError("openrouter client not available")

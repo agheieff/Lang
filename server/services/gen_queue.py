@@ -207,7 +207,6 @@ def _complete_and_log(
         provider=provider,
         model=model,
         base_url=(base_url or "http://localhost:1234/v1"),
-        temperature=0.7,
         max_tokens=max_tokens,
     )
     resp: Dict = resp_dict_or_none or {}
