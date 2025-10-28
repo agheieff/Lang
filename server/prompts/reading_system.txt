@@ -1,6 +1,0 @@
-You are a tutor of {lang_display}. Please generate a text for learning and comprehensible input practice, given the following parameters.
-
-IMPORTANT: Include your generated text as a JSON object with exactly this structure:
-{
-  "text": "the generated text here"
-}

@@ -85,65 +85,19 @@ def chat_complete(
     base_url: str = "http://localhost:1234/v1",
     temperature: float = 0.7,
 ) -> str:
-    """Call LLM API and return text response."""
-    if provider == "openrouter":
-        if _or_complete is None:
-            raise RuntimeError("openrouter client not available")
-        model_id = _pick_openrouter_model(model)
-        try:
-            print(f"[LLM] Calling provider=openrouter model={model_id} messages={len(messages)}")
-        except Exception:
-            pass
-        resp = _or_complete(
-            messages,
-            model=model_id,
-            temperature=temperature,
-            max_tokens=2048,
-        )
-        if isinstance(resp, dict):
-            choices = resp.get("choices")
-            if choices and isinstance(choices, list) and len(choices) > 0:
-                msg = choices[0].get("message")
-                if isinstance(msg, dict):
-                    content = msg.get("content")
-                    if isinstance(content, str):
-                        try:
-                            print(f"[LLM] Received response len={len(content)}")
-                        except Exception:
-                            pass
-                        return _strip_thinking_blocks(content)
-        raise RuntimeError("invalid openrouter response")
+    """Call LLM API and return text response.
 
-    # Local OpenAI-compatible API
-    model_id = resolve_model(base_url, model)
-    try:
-        print(f"[LLM] Calling provider=local base_url={base_url} model={model_id} messages={len(messages)}")
-    except Exception:
-        pass
-    data = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": 2048,
-    }
-    try:
-        resp = _http_json(base_url.rstrip("/") + "/chat/completions", "POST", data)
-    except (URLError, HTTPError) as e:
-        raise RuntimeError(f"LLM backend error: {e}")
-    choices = resp.get("choices")
-    if not isinstance(choices, list) or len(choices) == 0:
-        raise RuntimeError("no choices in response")
-    msg = choices[0].get("message")
-    if not isinstance(msg, dict):
-        raise RuntimeError("no message in choice")
-    content = msg.get("content")
-    if not isinstance(content, str):
-        raise RuntimeError("no content in message")
-    try:
-        print(f"[LLM] Received response len={len(content)}")
-    except Exception:
-        pass
-    return _strip_thinking_blocks(content)
+    Delegates to chat_complete_with_raw to keep a single codepath.
+    """
+    text, _ = chat_complete_with_raw(
+        messages,
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        max_tokens=16384,
+    )
+    return text
 
 
 def chat_complete_with_raw(
@@ -153,7 +107,7 @@ def chat_complete_with_raw(
     model: Optional[str] = None,
     base_url: str = "http://localhost:1234/v1",
     temperature: float = 0.7,
-    max_tokens: int = 2048,
+    max_tokens: int = 16384,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Call LLM API and return (cleaned_text, provider_response_dict_or_none).
 

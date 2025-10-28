@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.exc import IntegrityError
 
 from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
 from ..llm import build_reading_prompt
@@ -26,6 +28,7 @@ from ..utils.gloss import compute_spans
 # In-memory registry of running jobs per (account_id, lang)
 _running: set[Tuple[int, str]] = set()
 _running_lock = threading.Lock()
+_cooldown_next: Dict[Tuple[int, str], float] = {}
 
 
 def _log_dir_root() -> Path:
@@ -137,9 +140,13 @@ def _account_session(account_id: int) -> Session:
     return open_account_session(int(account_id))
 
 
-def ensure_text_available(db: Session, account_id: int, lang: str) -> None:
+def ensure_text_available(db: Session, account_id: int, lang: str, *, prefetch: bool = False) -> None:
     """If there are no unopened texts for (account, lang) and no running job,
     schedule a background generation job. Non-blocking.
+
+    When prefetch=True, we allow scheduling the next job even if there is already
+    an unopened text available (but never if one is running). Cooldown is also
+    bypassed to start immediately after the previous reading is generated.
     """
     # Count unopened texts
     unopened = (
@@ -148,11 +155,21 @@ def ensure_text_available(db: Session, account_id: int, lang: str) -> None:
         .count()
     )
     key = (int(account_id), str(lang))
-    if unopened > 0:
+    if (not prefetch) and unopened > 0:
         return
     # Quick non-locking check to avoid thread start; final guard happens in _run_generation_job
     if key in _running:
         return
+    # Simple cooldown to avoid hammering providers on repeated failures (skip if prefetch)
+    if not prefetch:
+        try:
+            cd = float(os.getenv("ARC_GEN_COOLDOWN_SEC", "8"))
+        except Exception:
+            cd = 8.0
+        now = time.time()
+        next_ok = _cooldown_next.get(key, 0.0)
+        if now < next_ok:
+            return
     # Fire-and-forget via a dedicated thread + event loop
     import threading
 
@@ -171,6 +188,8 @@ def ensure_text_available(db: Session, account_id: int, lang: str) -> None:
 
     t = threading.Thread(target=_worker, name=f"gen-job-{account_id}-{lang}", daemon=True)
     t.start()
+    if not prefetch:
+        _cooldown_next[key] = now + cd
 
 
 def _complete_and_log(
@@ -181,7 +200,7 @@ def _complete_and_log(
     Returns: (cleaned_text_content, full_response_dict, provider_used, model_used)
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    max_tokens = 4096
+    max_tokens = 16384
     text, resp_dict_or_none = chat_complete_with_raw(
         messages,
         provider=provider,
@@ -265,6 +284,34 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
             # Working directory for raw job outputs
             job_dir = _job_dir(account_id, lang)
 
+            # Create a skeleton reading row immediately so UI can show a placeholder
+            rt = ReadingText(
+                account_id=account_id,
+                lang=lang,
+                content=None,
+                request_sent_at=datetime.utcnow(),
+            )
+            db.add(rt)
+            try:
+                db.flush()
+            except IntegrityError:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # Fallback: store empty string if content cannot be NULL (pre-reset DB)
+                try:
+                    rt = ReadingText(
+                        account_id=account_id,
+                        lang=lang,
+                        content="",
+                        request_sent_at=datetime.utcnow(),
+                    )
+                    db.add(rt)
+                    db.flush()
+                except Exception:
+                    raise
+
             # Provider order with fallback (default: openrouter,local)
             provider_order = [p.strip() for p in os.getenv("ARC_LLM_PROVIDERS", "openrouter,local").split(",") if p.strip()]
             local_base = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:1234/v1")
@@ -309,7 +356,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             _log_llm_request(
                                 db,
                                 account_id=account_id,
-                                text_id=None,
+                                text_id=rt.id,
                                 kind="reading",
                                 provider=provider,
                                 model=model_id,
@@ -335,21 +382,40 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                 if last_err is None and reading_buf and reading_buf.strip():
                     break
             if last_err is not None and (not reading_buf or not reading_buf.strip()):
+                # Drop skeleton on failure
+                try:
+                    db.delete(rt)
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                 return
             final_text = extract_text_from_llm_response(reading_buf) or reading_buf
 
             if not final_text or not final_text.strip():
+                # Drop skeleton on empty output
+                try:
+                    db.delete(rt)
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                 return
 
-            rt = ReadingText(account_id=account_id, lang=lang, content=final_text)
-            db.add(rt)
-            db.flush()
-
-            # Set profile current_text_id to this new text (first-time view will mark opened)
+            # Update skeleton with final text and generated timestamp
             try:
-                prof.current_text_id = rt.id
+                rt.content = final_text
+                rt.generated_at = datetime.utcnow()
             except Exception:
                 pass
+            db.flush()
+
+            # Persist the updated reading but do not update Profile.current_text_id here.
+            # The current text pointer is advanced only via POST /reading/next or first open in GET /reading/current.
             db.commit()
 
             # Log reading request/response with full conversation
@@ -366,10 +432,15 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                 status="ok",
             )
 
-            # Release running lock early so next reading can start while translations run
-            # Release lock: allow next reading job to start while translations are running
+            # Release running/file locks early so next reading can start while translations run.
+            # We do NOT auto-prefetch here; routes trigger ensure_text_available when a text is opened.
             with _running_lock:
                 _running.discard(key)
+            try:
+                _release_file_lock(lock_path)
+            except Exception:
+                pass
+            lock_path = None
 
             # Finish translations in a separate background thread (new DB session per thread)
             def _finish_translations(
@@ -483,8 +554,21 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             if wd_parsed:
                                 words_list = [w for w in wd_parsed.get("words", []) if "word" in w and w.get("word")]
                                 spans = compute_spans(text_html_, words_list, key="word")
+                                # Avoid duplicates by preloading existing spans and tracking newly added
+                                try:
+                                    existing = set(
+                                        (rw.span_start, rw.span_end)
+                                        for rw in db2.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+                                        .filter(ReadingWordGloss.account_id == account_id_, ReadingWordGloss.text_id == text_id_)
+                                        .all()
+                                    )
+                                except Exception:
+                                    existing = set()
+                                seen = set()
                                 for it, sp in zip(words_list, spans):
                                     if sp is None:
+                                        continue
+                                    if sp in existing or sp in seen:
                                         continue
                                     db2.add(ReadingWordGloss(
                                         account_id=account_id_,
@@ -500,6 +584,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                                         span_start=sp[0],
                                         span_end=sp[1],
                                     ))
+                                    seen.add(sp)
                     except Exception:
                         pass
                     # Log word translation request/response

@@ -61,9 +61,12 @@ class ReadingText(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int] = mapped_column(Integer, index=True)
     lang: Mapped[str] = mapped_column(String(16), index=True)
-    content: Mapped[str] = mapped_column(String)
+    content: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual
+    # Generation lifecycle timestamps
+    request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     # Read tracking
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)

@@ -9,7 +9,7 @@ from pathlib import Path
 # Add the current directory to Python path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from server.db import recreate_db, get_db_info
+from server.db import recreate_db, get_db_info, DB_PATH
 from server.account_db import _ACCOUNTS_DIR
 
 # LLM generation logs directory
@@ -36,9 +36,18 @@ if __name__ == "__main__":
     if response.lower() == 'y':
         print("Resetting databases...")
 
-        # Reset global database
+        # Fully remove the global DB file (auth tables, sequences, everything)
+        try:
+            for p in [DB_PATH, DB_PATH.with_suffix(DB_PATH.suffix + "-wal"), DB_PATH.with_suffix(DB_PATH.suffix + "-shm")]:
+                if p.exists():
+                    p.unlink()
+                    print(f"✓ Deleted global DB file: {p.name}")
+        except Exception as e:
+            print(f"! Failed to delete global DB files: {e}")
+
+        # Recreate all tables (app + auth)
         recreate_db()
-        print("✓ Global database reset complete")
+        print("✓ Global database reset complete (recreated)")
 
         # Delete all account databases
         if _ACCOUNTS_DIR.exists():
@@ -66,6 +75,15 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"! Failed to delete LLM logs: {e}")
 
+        # Delete any local cookie jar used by CLI tools
+        try:
+            cj = Path.cwd() / 'cookies.txt'
+            if cj.exists():
+                cj.unlink()
+                print("✓ Deleted local cookies.txt")
+        except Exception as e:
+            print(f"! Failed to delete cookies.txt: {e}")
+
         # Show updated info
         info = get_db_info()
         print(f"\nNew database info:")
@@ -78,5 +96,6 @@ if __name__ == "__main__":
         account_dbs = list(_ACCOUNTS_DIR.glob("*.db")) if _ACCOUNTS_DIR.exists() else []
         print(f"  Account databases: {len(account_dbs)}")
         print(f"  LLM logs dir exists: {LOG_DIR.exists()}")
+        print("\nNote: You may still have a browser cookie set. Visit /logout in the app or clear cookies for localhost to fully sign out.")
     else:
         print("Cancelled")

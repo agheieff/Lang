@@ -97,6 +97,8 @@
       }
       // SSE removed: long-poll request is used instead
       function makeClickable(textEl, words){
+        const container = document.getElementById('current-reading');
+        const isZh = !!(container && (container.dataset.lang || '').toLowerCase().startsWith('zh'));
         let wi = 0;
         const walker = document.createTreeWalker(
           textEl,
@@ -125,7 +127,25 @@
             }
             const after = node.splitText(w.length);
             const span = document.createElement('span');
-            span.className = 'cursor-pointer underline decoration-dotted';
+            // Styling: make word boundaries visible for Chinese by alternating underline styles/colors
+            if (isZh) {
+              span.className = 'cursor-pointer';
+              span.style.textDecoration = 'underline';
+              span.style.textDecorationThickness = '2px';
+              span.style.textUnderlineOffset = '2px';
+              // Alternate color/style per word index to make boundaries clear
+              if ((wi % 2) === 0) {
+                span.style.textDecorationStyle = 'solid';
+                span.style.textDecorationColor = '#6b7280'; /* gray-500 */
+              } else {
+                span.style.textDecorationStyle = 'dashed';
+                span.style.textDecorationColor = '#9ca3af'; /* gray-400 */
+              }
+            } else {
+              span.className = 'cursor-pointer underline decoration-dotted';
+              span.style.textDecorationThickness = '2px';
+              span.style.textUnderlineOffset = '2px';
+            }
             span.dataset.wordIndex = String(wi);
             span.textContent = w;
             node.parentNode.replaceChild(span, node);

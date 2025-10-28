@@ -12,10 +12,11 @@ from .json_parser import extract_word_translations
 
 
 def compute_spans(text: str, items: Iterable[Dict[str, Any]], *, key: str = "word") -> List[Optional[Tuple[int, int]]]:
-    """Compute simple left-to-right non-overlapping spans for items in text.
+    """Compute left-to-right non-overlapping spans strictly forward-only.
 
-    For each item, finds the first occurrence of item[key] after the previous match end;
-    falls back to searching from the beginning if not found. Returns None when not found.
+    For each item, finds the first occurrence of item[key] after the previous match end.
+    Does NOT fall back to searching from the beginning, to avoid duplicate spans.
+    Returns None when not found.
     """
     spans: List[Optional[Tuple[int, int]]] = []
     i = 0
@@ -25,8 +26,6 @@ def compute_spans(text: str, items: Iterable[Dict[str, Any]], *, key: str = "wor
             spans.append(None)
             continue
         idx = text.find(s, i)
-        if idx == -1:
-            idx = text.find(s)
         if idx == -1:
             spans.append(None)
             continue
@@ -96,8 +95,21 @@ def _reconstruct_from_db_logs(
         return 0
     spans = compute_spans(text, items, key="word")
     count = 0
+    # Prepare existing spans to avoid unique constraint conflicts
+    try:
+        existing = set(
+            (rw.span_start, rw.span_end)
+            for rw in db.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+            .filter(ReadingWordGloss.account_id == account_id, ReadingWordGloss.text_id == text_id)
+            .all()
+        )
+    except Exception:
+        existing = set()
+    seen: set[Tuple[int, int]] = set()
     for it, sp in zip(items, spans):
         if sp is None:
+            continue
+        if sp in existing or sp in seen:
             continue
         try:
             db.add(
@@ -117,6 +129,7 @@ def _reconstruct_from_db_logs(
                 )
             )
             count += 1
+            seen.add(sp)
         except Exception:
             continue
     try:
@@ -157,8 +170,20 @@ def _reconstruct_from_file_logs(
                         continue
                     spans = compute_spans(text, items, key="word")
                     count = 0
+                    try:
+                        existing = set(
+                            (rw.span_start, rw.span_end)
+                            for rw in db.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+                            .filter(ReadingWordGloss.account_id == account_id, ReadingWordGloss.text_id == text_id)
+                            .all()
+                        )
+                    except Exception:
+                        existing = set()
+                    seen: set[Tuple[int, int]] = set()
                     for it, sp in zip(items, spans):
                         if sp is None:
+                            continue
+                        if sp in existing or sp in seen:
                             continue
                         try:
                             db.add(
@@ -178,6 +203,7 @@ def _reconstruct_from_file_logs(
                                 )
                             )
                             count += 1
+                            seen.add(sp)
                         except Exception:
                             continue
                     try:

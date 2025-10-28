@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 import json
 import time
 import asyncio
@@ -188,6 +188,26 @@ async def current_reading_block(
             '''
         )
 
+    # If text is still generating, show placeholder that auto-reloads
+    if not getattr(text_obj, "content", None):
+        return HTMLResponse(
+            content='''
+              <div class="text-center py-8"
+                   hx-get="/reading/current"
+                   hx-trigger="load, every:2s"
+                   hx-swap="innerHTML"
+                   hx-target="#current-reading">
+                <div class="animate-pulse space-y-3">
+                  <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+                  <div class="h-4 bg-gray-200 rounded w-5/6"></div>
+                  <div class="h-4 bg-gray-200 rounded w-2/3"></div>
+                  <div class="h-4 bg-gray-200 rounded w-4/5"></div>
+                </div>
+                <div class="mt-2 text-sm text-gray-500">Generating…</div>
+              </div>
+            '''
+        )
+
     text_id = text_obj.id
     text_html = _safe_html(text_obj.content)
 
@@ -220,91 +240,18 @@ async def next_text(
             # Do not clear opened_at
             db.commit()
 
-    # Advance to next unopened
-    nxt = (
-        db.query(ReadingText)
-        .filter(
-            ReadingText.account_id == account.id,
-            ReadingText.lang == prof.lang,
-            ReadingText.opened_at.is_(None),
-        )
-        .order_by(ReadingText.created_at.desc())
-        .first()
-    )
-
-    if nxt is not None:
-        prof.current_text_id = nxt.id
-        nxt.opened_at = datetime.utcnow()
-        db.commit()
-        # Kick off background generation for the next after opening this one
-        try:
-            ensure_text_available(db, account.id, prof.lang)
-        except Exception:
-            pass
-        rows = (
-            db.query(ReadingWordGloss)
-            .filter(ReadingWordGloss.account_id == account.id, ReadingWordGloss.text_id == nxt.id)
-            .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
-            .all()
-        )
-        inner = _render_reading_block(nxt.id, _safe_html(nxt.content), rows)
-        return HTMLResponse(content=inner)
-
-    # No unopened exists: clear pointer, schedule background generation and long-poll for next
+    # Clear pointer and schedule next; delegate selection/rendering to GET /reading/current
     try:
         prof.current_text_id = None
         db.commit()
+    except Exception:
+        pass
+    try:
         ensure_text_available(db, account.id, prof.lang)
     except Exception:
         pass
-    deadline = time.time() + MAX_WAIT_SEC
-    while time.time() < deadline:
-        await asyncio.sleep(0.5)
-        try:
-            db.expire_all()
-        except Exception:
-            pass
-        nxt = (
-            db.query(ReadingText)
-            .filter(
-                ReadingText.account_id == account.id,
-                ReadingText.lang == prof.lang,
-                ReadingText.opened_at.is_(None),
-            )
-            .order_by(ReadingText.created_at.desc())
-            .first()
-        )
-        if nxt is not None:
-            prof.current_text_id = nxt.id
-            nxt.opened_at = datetime.utcnow()
-            db.commit()
-            rows = (
-                db.query(ReadingWordGloss)
-                .filter(ReadingWordGloss.account_id == account.id, ReadingWordGloss.text_id == nxt.id)
-                .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
-                .all()
-            )
-            inner = _render_reading_block(nxt.id, _safe_html(nxt.content), rows)
-            return HTMLResponse(content=inner)
 
-    # Timed out: return a simple loader (no polling)
-    return HTMLResponse(
-        content='''
-          <div class="text-center py-8"
-               hx-get="/reading/current"
-               hx-trigger="load, every:2s"
-               hx-swap="innerHTML"
-               hx-target="#current-reading">
-            <div class="animate-pulse space-y-3">
-              <div class="h-4 bg-gray-200 rounded w-3/4"></div>
-              <div class="h-4 bg-gray-200 rounded w-5/6"></div>
-              <div class="h-4 bg-gray-200 rounded w-2/3"></div>
-              <div class="h-4 bg-gray-200 rounded w-4/5"></div>
-            </div>
-            <div class="mt-2 text-sm text-gray-500">Loading text…</div>
-          </div>
-        '''
-    )
+    return RedirectResponse(url="/reading/current", status_code=303)
 
 
 ## SSE endpoint removed in favor of async long-polling

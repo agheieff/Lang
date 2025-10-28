@@ -5,7 +5,7 @@ Now please translate the individual words from the text into English. Go over al
 - pos – the part-of-speech label (e.g. "NOUN", "VERB", "ADJ", "PART", etc.)
 
 Tokenize the text into the smallest meaningful units (words, not individual characters unless they are single-character words).
-Preserve the original order; the array must map one-to-one with the token sequence.
+Preserve the original order; the array must map one-to-one with the token sequence. Skip any punctuation you encounter.
 
 Here's an example for how the first sentence from the text from before would be done:
 

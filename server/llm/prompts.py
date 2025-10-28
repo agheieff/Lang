@@ -138,7 +138,7 @@ def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List
     src_lang = _lang_display(spec.lang)
     tgt_lang = _lang_display(spec.target_lang)
     text = spec.content if isinstance(spec.content, str) else "\n".join(spec.content)
-    user_content = tpl.format(source_lang=src_lang, target_lang=tgt_lang, text=text)
+    user_content = _safe_format(tpl, {"source_lang": src_lang, "target_lang": tgt_lang, "text": text})
 
     msgs: List[Dict[str, str]] = []
     if prev_messages:
@@ -159,10 +159,13 @@ def build_structured_translation_prompt(source_lang: str, target_lang: str, text
 
     # Use single-file translation.md (structured by parts)
     tpl = _load_prompt("translation.md", source_lang)
-    user_content = tpl.format(
-        source_lang=_lang_display(source_lang),
-        target_lang=_lang_display(target_lang),
-        text=text,
+    user_content = _safe_format(
+        tpl,
+        {
+            "source_lang": _lang_display(source_lang),
+            "target_lang": _lang_display(target_lang),
+            "text": text,
+        },
     )
     return [
         {"role": "system", "content": ""},
@@ -183,10 +186,13 @@ def build_word_translation_prompt(source_lang: str, target_lang: str, text: str)
 
     # Use single-file words.md (word-by-word)
     tpl = _load_prompt("words.md", source_lang)
-    user_content = tpl.format(
-        source_lang=_lang_display(source_lang),
-        target_lang=_lang_display(target_lang),
-        text=text,
+    user_content = _safe_format(
+        tpl,
+        {
+            "source_lang": _lang_display(source_lang),
+            "target_lang": _lang_display(target_lang),
+            "text": text,
+        },
     )
     return [
         {"role": "system", "content": ""},

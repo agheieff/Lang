@@ -305,10 +305,23 @@ def extract_word_translations(response: str) -> Optional[Dict[str, Any]]:
             i += 1
         return None
 
-    # Prefer code-fenced JSON if present
+    # Prefer code-fenced JSON if present (support dict or array)
     fence = re.search(r"```json\s*", response)
     if fence:
-        start_brace = response.find('{', fence.end())
+        fence_start = fence.end()
+        fence_end = response.find("```", fence_start)
+        if fence_end != -1:
+            body = response[fence_start:fence_end].strip()
+            try:
+                data_any = json.loads(body)
+                if isinstance(data_any, dict) and isinstance(data_any.get("words"), list):
+                    return data_any
+                if isinstance(data_any, list):
+                    return {"words": data_any}
+            except Exception:
+                pass
+        # fallback to object-only balanced extraction inside fenced block
+        start_brace = response.find('{', fence_start)
         if start_brace != -1:
             blob = _extract_balanced(response, start_brace)
             if blob:
@@ -329,6 +342,14 @@ def extract_word_translations(response: str) -> Optional[Dict[str, Any]]:
     first_brace = response.find('{')
     if first_brace != -1:
         candidates.append(first_brace)
+
+    # Try full-document JSON array
+    try:
+        any_data = json.loads(response)
+        if isinstance(any_data, list):
+            return {"words": any_data}
+    except Exception:
+        pass
 
     seen: set[int] = set()
     for pos in candidates:
