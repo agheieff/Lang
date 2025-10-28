@@ -1,5 +1,6 @@
-- Rework translations for word on clicks
-- Add possibility of sentence/paragraph/text translation view
-- Integrate the srs with the current text generation system, doesn't seem to be the case yet
+- Right click for sentence/paragraph/text translation
+- Integrate the srs and connect everything together
 - Integrate interests in the prompts
-- Generally work more on prompts
+- Improve the prompt for better translation
+- Improve prompts in general
+
