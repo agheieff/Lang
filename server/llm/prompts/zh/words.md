@@ -1,4 +1,4 @@
-Now please translate the following sentence from the text into English: {}. Go over all the words from the sentence in order, not skipping anything, and return valid json - a single array of all the words. Each word should be an object with the following four keys:
+Now please translate the following sentence from the text into English: {sentence}. Go over all the words from the sentence in order, not skipping anything, and return valid json - a single array of all the words. Each word should be an object with the following four keys:
 - word – the original Chinese character(s)
 - pinyin – the pinyin with diacritics (e.g. "tiānqì")
 - translation – the most context-appropriate English gloss for this word

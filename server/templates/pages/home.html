@@ -99,12 +99,13 @@
       function makeClickable(textEl, words){
         const container = document.getElementById('current-reading');
         const isZh = !!(container && (container.dataset.lang || '').toLowerCase().startsWith('zh'));
-        const hasSpans = Array.isArray(words) && words.every(w => Number.isInteger(w.span_start) && Number.isInteger(w.span_end));
+        const spansExist = Array.isArray(words) && words.some(w => Number.isInteger(w.span_start) && Number.isInteger(w.span_end));
 
-        if (hasSpans) {
-          // Process in order; wrap exact [start,end) ranges
+        // First pass: wrap by exact spans for items that have them (in-order)
+        if (spansExist) {
           for (let wi = 0; wi < words.length; wi++) {
             const w = words[wi];
+            if (!Number.isInteger(w.span_start) || !Number.isInteger(w.span_end)) continue;
             const startPos = _resolveDomPosAt(textEl, w.span_start);
             const endPos = _resolveDomPosAt(textEl, w.span_end);
             if (!startPos || !endPos) continue;
@@ -120,7 +121,6 @@
               range.insertNode(wrapper);
             } catch {}
           }
-          return;
         }
 
         // Fallback: naive substring scan within text nodes (less reliable)
@@ -142,6 +142,8 @@
           let text = node.nodeValue || '';
           let pos = 0;
           while (wi < words.length) {
+            // Skip words already wrapped by span pass
+            if (textEl.querySelector(`[data-word-index="${wi}"]`)) { wi++; continue; }
             const form = (words[wi].surface || '').toString();
             if (!form) { wi++; continue; }
             const idx = text.indexOf(form, pos);
