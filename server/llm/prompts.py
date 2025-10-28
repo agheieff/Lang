@@ -5,6 +5,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 
+def _load_prompt(name: str, lang_code: Optional[str] = None) -> str:
+    base = Path(__file__).resolve().parent / "prompts"
+    # Strict language-based lookup only: exact code, then base code. No inline defaults.
+    candidates: List[Path] = []
+    if lang_code:
+        code = str(lang_code).strip()
+        if code:
+            candidates.append(base / code / name)
+            base_code = code.split("-", 1)[0].split("_", 1)[0]
+            if base_code and base_code != code:
+                candidates.append(base / base_code / name)
+    for p in candidates:
+        try:
+            if p.exists():
+                return p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+    raise FileNotFoundError(f"Prompt file not found for lang={lang_code!r}, name={name!r}")
+
+
 @dataclass
 class PromptSpec:
     lang: str
@@ -24,19 +44,8 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
             return "Spanish"
         return code
 
-    def _load_prompt(name: str) -> str:
-        p = Path(__file__).resolve().parent / "prompts" / name
-        try:
-            return p.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
-    sys_tpl = _load_prompt("reading_system.txt") or (
-        "You are a tutor of {lang_display}. Please generate a text for learning and comprehensible input practice, given the following parameters."
-    )
-    user_tpl = _load_prompt("reading_user.txt") or (
-        "Write in {lang_display}.\n{script_line}{level_line}{length_line}{include_words_line}Constraints:\n- Do not include translations or vocabulary lists.\n- Avoid English unless the target language is English.\n- Gently reinforce the target words in context and keep the language natural and engaging.\n- Do not include meta commentary.\n- Separate paragraphs with double newlines (\\n\\n)."
-    )
+    sys_tpl = _load_prompt("reading_system.txt", spec.lang)
+    user_tpl = _load_prompt("reading_user.txt", spec.lang)
 
     lang_display = _lang_display(spec.lang)
     script_line = ""
@@ -91,18 +100,9 @@ def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List
             return "Spanish"
         return code
 
-    def _load_prompt(name: str) -> str:
-        p = Path(__file__).resolve().parent / "prompts" / name
-        try:
-            return p.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
     # Use regular translation prompts
-    sys_tpl = _load_prompt("translation_system.txt") or (
-        "You are a professional translator from {src_lang} to {tgt_lang}. Output only the translation, no explanations. {line_mode_line}{script_line}"
-    )
-    user_tpl = _load_prompt("translation_user.txt") or ("{content}")
+    sys_tpl = _load_prompt("translation_system.txt", spec.lang)
+    user_tpl = _load_prompt("translation_user.txt", spec.lang)
 
     src_lang = _lang_display(spec.lang)
     tgt_lang = _lang_display(spec.target_lang)
@@ -131,13 +131,6 @@ def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List
 
 def build_structured_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
     """Build prompt for structured sentence-by-sentence translation."""
-    def _load_prompt(name: str) -> str:
-        p = Path(__file__).resolve().parent / "prompts" / name
-        try:
-            return p.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
     def _lang_display(code: str) -> str:
         if code.startswith("zh"):
             return "Chinese"
@@ -145,13 +138,8 @@ def build_structured_translation_prompt(source_lang: str, target_lang: str, text
             return "Spanish"
         return code
 
-    sys_tpl = _load_prompt("structured_translation_system.txt") or (
-        "You are a professional translator. Please translate the provided text sentence-by-sentence, preserving paragraph structure. "
-        "Return a JSON object with 'text' (original), 'paragraphs' array containing 'sentences' arrays with 'text' and 'translation'."
-    )
-    user_tpl = _load_prompt("structured_translation_user.txt") or (
-        "Translate this text from {source_lang} to {target_lang}:\n\n{text}"
-    )
+    sys_tpl = _load_prompt("structured_translation_system.txt", source_lang)
+    user_tpl = _load_prompt("structured_translation_user.txt", source_lang)
 
     sys_content = sys_tpl
     user_content = user_tpl.format(
@@ -168,13 +156,6 @@ def build_structured_translation_prompt(source_lang: str, target_lang: str, text
 
 def build_word_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
     """Build prompt for word-by-word translation with linguistic analysis."""
-    def _load_prompt(name: str) -> str:
-        p = Path(__file__).resolve().parent / "prompts" / name
-        try:
-            return p.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
     def _lang_display(code: str) -> str:
         if code.startswith("zh"):
             return "Chinese"
@@ -184,13 +165,8 @@ def build_word_translation_prompt(source_lang: str, target_lang: str, text: str)
             return "French"
         return code
 
-    sys_tpl = _load_prompt("word_translation_system.txt") or (
-        "You are a professional linguist and translator. Please analyze the provided text and provide detailed word-by-word translations. "
-        "Return a JSON object with 'text' (original) and 'words' array containing word objects with translations, lemmas, and grammatical information."
-    )
-    user_tpl = _load_prompt("word_translation_user.txt") or (
-        "Analyze and translate each word in this {source_lang} text:\n\n{text}"
-    )
+    sys_tpl = _load_prompt("word_translation_system.txt", source_lang)
+    user_tpl = _load_prompt("word_translation_user.txt", source_lang)
 
     sys_content = sys_tpl
     user_content = user_tpl.format(
@@ -203,3 +179,47 @@ def build_word_translation_prompt(source_lang: str, target_lang: str, text: str)
         {"role": "system", "content": sys_content},
         {"role": "user", "content": user_content},
     ]
+
+
+def build_translation_contexts(
+    reading_messages: List[Dict[str, str]],
+    *,
+    source_lang: str,
+    target_lang: str,
+    text: str,
+) -> Dict[str, List[Dict[str, str]]]:
+    """Return canonical 4-message contexts for structured and word translations.
+
+    Messages shape (both kinds):
+      [
+        {system: translation_system},
+        {user: reading_user_content},
+        {assistant: generated_text},
+        {user: task_user_prompt}
+      ]
+    """
+    reading_user_content = reading_messages[1]["content"] if (reading_messages and len(reading_messages) > 1) else ""
+
+    # Structured
+    tr_msgs = build_structured_translation_prompt(source_lang, target_lang, text)
+    tr_system = tr_msgs[0]["content"]
+    tr_user = tr_msgs[1]["content"]
+    structured = [
+        {"role": "system", "content": tr_system},
+        {"role": "user", "content": reading_user_content},
+        {"role": "assistant", "content": text},
+        {"role": "user", "content": tr_user},
+    ]
+
+    # Word-by-word
+    w_msgs = build_word_translation_prompt(source_lang, target_lang, text)
+    w_system = w_msgs[0]["content"]
+    w_user = w_msgs[1]["content"]
+    words = [
+        {"role": "system", "content": w_system},
+        {"role": "user", "content": reading_user_content},
+        {"role": "assistant", "content": text},
+        {"role": "user", "content": w_user},
+    ]
+
+    return {"structured": structured, "words": words}

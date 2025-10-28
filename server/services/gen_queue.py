@@ -9,24 +9,23 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss, LLMRequestLog
-from ..llm import (
-    PromptSpec,
-    build_reading_prompt,
-    build_structured_translation_prompt,
-    build_word_translation_prompt,
-)
+from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
+from ..llm import build_reading_prompt
 from ..utils.json_parser import (
     extract_text_from_llm_response,
     extract_structured_translation,
     extract_word_translations,
 )
-from ..llm.client import _strip_thinking_blocks, _pick_openrouter_model
+from ..llm.client import _strip_thinking_blocks, _pick_openrouter_model, chat_complete_with_raw
 import threading
+import random
+from .llm_logging import log_llm_request
+from ..utils.gloss import compute_spans
 
 
 # In-memory registry of running jobs per (account_id, lang)
 _running: set[Tuple[int, str]] = set()
+_running_lock = threading.Lock()
 
 
 def _log_dir_root() -> Path:
@@ -72,12 +71,8 @@ def _enforce_retention(account_id: int, lang: str) -> None:
 
 
 def _account_session(account_id: int) -> Session:
-    from ..account_db import _get_or_create_account_engine, _ensure_account_tables
-
-    eng = _get_or_create_account_engine(int(account_id))
-    _ensure_account_tables(eng)
-    Local = sessionmaker(autocommit=False, autoflush=False, bind=eng)
-    return Local()
+    from ..account_db import open_account_session
+    return open_account_session(int(account_id))
 
 
 def ensure_text_available(db: Session, account_id: int, lang: str) -> None:
@@ -91,7 +86,10 @@ def ensure_text_available(db: Session, account_id: int, lang: str) -> None:
         .count()
     )
     key = (int(account_id), str(lang))
-    if unopened > 0 or key in _running:
+    if unopened > 0:
+        return
+    # Quick non-locking check to avoid thread start; final guard happens in _run_generation_job
+    if key in _running:
         return
     # Fire-and-forget via a dedicated thread + event loop
     import threading
@@ -126,11 +124,16 @@ def _complete_and_log(messages: List[Dict], model: str, out_path: Path) -> tuple
 
     Returns: (cleaned_text_content, full_response_dict)
     """
-    from server.llm.openrouter import complete as or_complete
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     max_tokens = 4096
-    resp: Dict = or_complete(messages, model=model, max_tokens=max_tokens)
+    text, resp_dict_or_none = chat_complete_with_raw(
+        messages,
+        provider="openrouter",
+        model=model,
+        temperature=0.7,
+        max_tokens=max_tokens,
+    )
+    resp: Dict = resp_dict_or_none or {}
     try:
         log_obj = {
             "request": {
@@ -144,97 +147,44 @@ def _complete_and_log(messages: List[Dict], model: str, out_path: Path) -> tuple
         out_path.write_text(json.dumps(log_obj, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
-    # Extract content
-    try:
-        choices = resp.get("choices")
-        if isinstance(choices, list) and choices:
-            msg = choices[0].get("message")
-            if isinstance(msg, dict):
-                content = msg.get("content")
-                if isinstance(content, str):
-                    return _strip_thinking_blocks(content), resp
-    except Exception:
-        pass
-    return "", resp
+    # We already have cleaned text from chat_complete_with_raw
+    return text or "", resp
 
 
 def _log_llm_request(db: Session, *, account_id: int, text_id: Optional[int], kind: str, model: str, messages: List[Dict], resp: Optional[Dict], status: str, error: Optional[str] = None) -> None:
-    try:
-        db.add(LLMRequestLog(
-            account_id=account_id,
-            text_id=text_id,
-            kind=kind,
-            provider="openrouter",
-            model=model,
-            base_url=None,
-            status=status,
-            request={"messages": messages},
-            response=(json.dumps(resp, ensure_ascii=False) if isinstance(resp, dict) else None),
-            error=error,
-        ))
-        db.commit()
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
+    # Backwards-compatible local helper delegating to centralized logger
+    log_llm_request(
+        db,
+        account_id=account_id,
+        text_id=text_id,
+        kind=kind,
+        provider="openrouter",
+        model=model,
+        base_url=None,
+        status=status,
+        request={"messages": messages},
+        response=resp,
+        error=error,
+    )
 
 
 async def _run_generation_job(account_id: int, lang: str) -> None:
     key = (account_id, lang)
-    if key in _running:
-        return
-    _running.add(key)
+    # Atomic check+add under lock
+    with _running_lock:
+        if key in _running:
+            return
+        _running.add(key)
     try:
         # Prepare per-account session
         db = _account_session(account_id)
         try:
-            # Profile preferences
+            # Compose prompt spec (shared helper)
+            from .llm_common import build_reading_prompt_spec
             prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
             if prof is None:
                 return
-
-            # Script hint for zh
-            script = None
-            if str(lang).startswith("zh"):
-                ps = getattr(prof, "preferred_script", None)
-                script = ps if ps in ("Hans", "Hant") else "Hans"
-
-            # Compose prompt
-            # For simplicity, reuse the same defaults as llm_service
-            unit = "chars" if str(lang).startswith("zh") else "words"
-            approx_len = None
-            try:
-                if isinstance(prof.text_length, int) and prof.text_length and prof.text_length > 0:
-                    approx_len = int(prof.text_length)
-            except Exception:
-                approx_len = None
-            if approx_len is None:
-                approx_len = (300 if unit == "chars" else 180)
-
-            # Level hint and include words
-            from ..services.level_service import get_ci_target
-            from ..llm import pick_words as _pick_words, compose_level_hint as _compose_level_hint
-
-            class _U:
-                pass
-
-            u = _U()
-            u.id = account_id
-            ci_target = get_ci_target(db, account_id, lang)
-            base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
-            words = _pick_words(db, u, lang, count=12, new_ratio=base_new_ratio)
-            level_hint = _compose_level_hint(db, u, lang)
-
-            spec = PromptSpec(
-                lang=lang,
-                unit=unit,
-                approx_len=int(max(50, min(2000, approx_len))),
-                user_level_hint=level_hint,
-                include_words=words,
-                script=script,
-                ci_target=ci_target,
-            )
+            spec, words, level_hint = build_reading_prompt_spec(db, account_id=account_id, lang=lang)
             messages = build_reading_prompt(spec)
 
             # Working directory for raw job outputs
@@ -243,8 +193,45 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
             # Determine OpenRouter model id (non-reasoning preferred)
             model_id = _pick_openrouter_model(None)
 
-            # 1) Reading completion -> persist ReadingText
-            reading_buf, reading_resp = _complete_and_log(messages, model=model_id, out_path=job_dir / "reading.json")
+            # 1) Reading completion -> persist ReadingText (retry on 429/5xx)
+            max_attempts = int(os.getenv("ARC_OR_READING_ATTEMPTS", "3"))
+            reading_buf = ""
+            reading_resp: Optional[Dict] = None
+            last_err: Optional[Exception] = None
+            for attempt in range(max_attempts):
+                try:
+                    reading_buf, reading_resp = _complete_and_log(messages, model=model_id, out_path=job_dir / "reading.json")
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    # Detect HTTP status and Retry-After if available
+                    status = None
+                    retry_after = None
+                    try:
+                        status = getattr(e, "response", None).status_code  # type: ignore[attr-defined]
+                        retry_after = getattr(e, "response", None).headers.get("Retry-After")  # type: ignore[attr-defined]
+                    except Exception:
+                        status = None
+                    # Log error attempt
+                    try:
+                        _log_llm_request(db, account_id=account_id, text_id=None, kind="reading", model=model_id, messages=messages, resp=None, status="error", error=str(e))
+                    except Exception:
+                        pass
+                    # Backoff only on retriable statuses; otherwise abort
+                    retriable = status in {429, 500, 502, 503, 504}
+                    if not retriable or attempt >= max_attempts - 1:
+                        break
+                    # Compute backoff with jitter; honor Retry-After seconds if numeric
+                    delay_base: float
+                    try:
+                        delay_base = float(retry_after) if retry_after and str(retry_after).isdigit() else float(2 ** (attempt + 1))
+                    except Exception:
+                        delay_base = float(2 ** (attempt + 1))
+                    jitter = random.uniform(0, delay_base * 0.5)
+                    await asyncio.sleep(delay_base + jitter)
+            if last_err is not None and (not reading_buf or not reading_buf.strip()):
+                return
             final_text = extract_text_from_llm_response(reading_buf) or reading_buf
 
             if not final_text or not final_text.strip():
@@ -265,37 +252,28 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
             _log_llm_request(db, account_id=account_id, text_id=rt.id, kind="reading", model=model_id, messages=messages, resp=reading_resp, status="ok")
 
             # Release running lock early so next reading can start while translations run
-            _running.discard(key)
+            # Release lock: allow next reading job to start while translations are running
+            with _running_lock:
+                _running.discard(key)
 
             # Finish translations in a separate background thread (new DB session per thread)
             def _finish_translations(account_id_: int, lang_: str, text_id_: int, text_html_: str, model_id_: str, job_dir_path: Path, reading_messages: List[Dict]):
                 db2 = _account_session(account_id_)
                 try:
                     # Rebuild translation contexts
-                    from ..llm import build_structured_translation_prompt, build_word_translation_prompt
                     prof2 = db2.query(Profile).filter(Profile.account_id == account_id_, Profile.lang == lang_).first()
                     target_lang2 = prof2.target_lang if prof2 and getattr(prof2, "target_lang", None) else "en"
                     reading_user_content2 = reading_messages[1]["content"] if reading_messages and len(reading_messages) > 1 else ""
 
-                    tr_msgs_base = build_structured_translation_prompt(lang_, target_lang2, text_html_)
-                    tr_system = tr_msgs_base[0]["content"]
-                    tr_user = tr_msgs_base[1]["content"]
-                    tr_messages = [
-                        {"role": "system", "content": tr_system},
-                        {"role": "user", "content": reading_user_content2},
-                        {"role": "assistant", "content": text_html_},
-                        {"role": "user", "content": tr_user},
-                    ]
-
-                    w_msgs_base = build_word_translation_prompt(lang_, target_lang2, text_html_)
-                    w_system = w_msgs_base[0]["content"]
-                    w_user = w_msgs_base[1]["content"]
-                    w_messages = [
-                        {"role": "system", "content": w_system},
-                        {"role": "user", "content": reading_user_content2},
-                        {"role": "assistant", "content": text_html_},
-                        {"role": "user", "content": w_user},
-                    ]
+                    from ..llm.prompts import build_translation_contexts
+                    ctx2 = build_translation_contexts(
+                        reading_messages,
+                        source_lang=lang_,
+                        target_lang=target_lang2,
+                        text=text_html_,
+                    )
+                    tr_messages = ctx2["structured"]
+                    w_messages = ctx2["words"]
 
                     # Run both completions concurrently (threads)
                     from concurrent.futures import ThreadPoolExecutor
@@ -349,28 +327,31 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     except Exception:
                         pass
 
-                    # Persist word translations
+                    # Persist word translations with span alignment to the original text
                     try:
                         if wd_res:
                             wd_buf, wd_resp = wd_res
                             wd_parsed = extract_word_translations(wd_buf)
                             if wd_parsed:
-                                for w in wd_parsed.get("words", []):
-                                    if "word" in w and "translation" in w:
-                                        db2.add(ReadingWordGloss(
-                                            account_id=account_id_,
-                                            text_id=text_id_,
-                                            lang=lang_,
-                                            surface=w["word"],
-                                            lemma=w.get("lemma", w["word"]),
-                                            pos=w.get("part_of_speech"),
-                                            pinyin=w.get("pinyin"),
-                                            translation=w["translation"],
-                                            lemma_translation=w.get("lemma_translation"),
-                                            grammar=w.get("grammar", {}),
-                                            span_start=None,
-                                            span_end=None,
-                                        ))
+                                words_list = [w for w in wd_parsed.get("words", []) if "word" in w and w.get("word")]
+                                spans = compute_spans(text_html_, words_list, key="word")
+                                for it, sp in zip(words_list, spans):
+                                    if sp is None:
+                                        continue
+                                    db2.add(ReadingWordGloss(
+                                        account_id=account_id_,
+                                        text_id=text_id_,
+                                        lang=lang_,
+                                        surface=it["word"],
+                                        lemma=it.get("lemma", it["word"]),
+                                        pos=it.get("part_of_speech"),
+                                        pinyin=it.get("pinyin"),
+                                        translation=it["translation"],
+                                        lemma_translation=it.get("lemma_translation"),
+                                        grammar=it.get("grammar", {}),
+                                        span_start=sp[0],
+                                        span_end=sp[1],
+                                    ))
                     except Exception:
                         pass
                     # Log word translation request/response
@@ -416,4 +397,5 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                 pass
     finally:
         # If we already discarded earlier, this is a no-op
-        _running.discard(key)
+        with _running_lock:
+            _running.discard(key)

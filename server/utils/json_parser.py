@@ -4,7 +4,7 @@ JSON parsing utilities for LLM responses.
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 def extract_json_from_text(text: str, expected_key: str = "text") -> Optional[Any]:
@@ -145,36 +145,71 @@ def extract_structured_translation(response: str) -> Optional[Dict[str, Any]]:
     if not response or response.strip() == "":
         return None
 
-    # Try to find JSON in the response
-    json_match = re.search(r'\{[^{}]*"text"[^{}]*"paragraphs"[^{}]*\}', response, re.DOTALL)
-    if json_match:
-        try:
-            json_data = json.loads(json_match.group())
-            if (isinstance(json_data, dict) and
-                "text" in json_data and
-                "paragraphs" in json_data and
-                isinstance(json_data["paragraphs"], list)):
-                return json_data
-        except json.JSONDecodeError:
-            # If JSON parsing fails, try alternative patterns
-            pass
+    # Reuse balanced extraction from extract_word_translations
+    def _extract_balanced(text: str, start: int) -> Optional[str]:
+        depth = 0
+        i = start
+        n = len(text)
+        in_str = False
+        esc = False
+        while i < n:
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
+            i += 1
+        return None
 
-    # Alternative: try to find any valid JSON with the expected structure
-    try:
-        # Look for JSON objects with text and paragraphs
-        json_objects = re.findall(r'\{[^{}]*"text"[^{}]*"paragraphs"[^{}]*\}', response, re.DOTALL)
-        for json_str in json_objects:
-            try:
-                json_data = json.loads(json_str)
-                if (isinstance(json_data, dict) and
-                    "text" in json_data and
-                    "paragraphs" in json_data and
-                    isinstance(json_data["paragraphs"], list)):
-                    return json_data
-            except json.JSONDecodeError:
-                continue
-    except Exception:
-        pass
+    fence = re.search(r"```json\s*", response)
+    if fence:
+        start_brace = response.find('{', fence.end())
+        if start_brace != -1:
+            blob = _extract_balanced(response, start_brace)
+            if blob:
+                try:
+                    data = json.loads(blob)
+                    if isinstance(data, dict) and isinstance(data.get("paragraphs"), list):
+                        return data
+                except Exception:
+                    pass
+
+    candidates: list[int] = []
+    idx_para = response.find('"paragraphs"')
+    if idx_para != -1:
+        brace_before = response.rfind('{', 0, idx_para)
+        if brace_before != -1:
+            candidates.append(brace_before)
+    first_brace = response.find('{')
+    if first_brace != -1:
+        candidates.append(first_brace)
+
+    seen: set[int] = set()
+    for pos in candidates:
+        if pos in seen:
+            continue
+        seen.add(pos)
+        blob = _extract_balanced(response, pos)
+        if not blob:
+            continue
+        try:
+            data = json.loads(blob)
+            if isinstance(data, dict) and isinstance(data.get("paragraphs"), list):
+                return data
+        except Exception:
+            continue
 
     return None
 
@@ -192,35 +227,72 @@ def extract_word_translations(response: str) -> Optional[Dict[str, Any]]:
     if not response or response.strip() == "":
         return None
 
-    # Try to find JSON in the response
-    json_match = re.search(r'\{[^{}]*"text"[^{}]*"words"[^{}]*\}', response, re.DOTALL)
-    if json_match:
-        try:
-            json_data = json.loads(json_match.group())
-            if (isinstance(json_data, dict) and
-                "text" in json_data and
-                "words" in json_data and
-                isinstance(json_data["words"], list)):
-                return json_data
-        except json.JSONDecodeError:
-            # If JSON parsing fails, try alternative patterns
-            pass
+    # Helper: find balanced JSON object starting at given '{'
+    def _extract_balanced(text: str, start: int) -> Optional[str]:
+        depth = 0
+        i = start
+        n = len(text)
+        in_str = False
+        esc = False
+        while i < n:
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
+            i += 1
+        return None
 
-    # Alternative: try to find any valid JSON with the expected structure
-    try:
-        # Look for JSON objects with text and words
-        json_objects = re.findall(r'\{[^{}]*"text"[^{}]*"words"[^{}]*\}', response, re.DOTALL)
-        for json_str in json_objects:
-            try:
-                json_data = json.loads(json_str)
-                if (isinstance(json_data, dict) and
-                    "text" in json_data and
-                    "words" in json_data and
-                    isinstance(json_data["words"], list)):
-                    return json_data
-            except json.JSONDecodeError:
-                continue
-    except Exception:
-        pass
+    # Prefer code-fenced JSON if present
+    fence = re.search(r"```json\s*", response)
+    if fence:
+        start_brace = response.find('{', fence.end())
+        if start_brace != -1:
+            blob = _extract_balanced(response, start_brace)
+            if blob:
+                try:
+                    data = json.loads(blob)
+                    if isinstance(data, dict) and isinstance(data.get("words"), list):
+                        return data
+                except Exception:
+                    pass
+
+    # Otherwise, try from the first '{' or closest before "\"words\""
+    candidates: list[int] = []
+    idx_words = response.find('"words"')
+    if idx_words != -1:
+        brace_before = response.rfind('{', 0, idx_words)
+        if brace_before != -1:
+            candidates.append(brace_before)
+    first_brace = response.find('{')
+    if first_brace != -1:
+        candidates.append(first_brace)
+
+    seen: set[int] = set()
+    for pos in candidates:
+        if pos in seen:
+            continue
+        seen.add(pos)
+        blob = _extract_balanced(response, pos)
+        if not blob:
+            continue
+        try:
+            data = json.loads(blob)
+            if isinstance(data, dict) and isinstance(data.get("words"), list):
+                return data
+        except Exception:
+            continue
 
     return None

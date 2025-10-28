@@ -136,3 +136,11 @@ def get_db(request: Request) -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def open_account_session(account_id: int) -> Session:
+    """Create and return a dedicated per-account Session (caller must close)."""
+    eng = _get_or_create_account_engine(int(account_id))
+    _ensure_account_tables(eng)
+    Local = sessionmaker(autocommit=False, autoflush=False, bind=eng)
+    return Local()

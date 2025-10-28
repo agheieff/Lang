@@ -46,11 +46,25 @@
         if (!textEl) return;
         const textId = textEl.dataset.textId;
         if (!textId) return;
+        if (textEl.querySelector('[data-word-index]')) return;
         const embedded = getEmbeddedWords();
         let words = Array.isArray(embedded) ? embedded : [];
         if (words && words.length) {
           makeClickable(textEl, words);
           attachTooltip(textEl, words);
+        } else {
+          // Long-poll for words (single request held server-side until available or timeout)
+          try {
+            const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
+            if (res.ok) {
+              const data = await res.json();
+              const ws = (data && Array.isArray(data.words)) ? data.words : [];
+              if (ws.length) {
+                makeClickable(textEl, ws);
+                attachTooltip(textEl, ws);
+              }
+            }
+          } catch {}
         }
       }
       function getEmbeddedWords(){
@@ -58,26 +72,46 @@
         if (!el) return null;
         try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
       }
+      // SSE removed: long-poll request is used instead
       function makeClickable(textEl, words){
-        const text = textEl.textContent || '';
-        const frag = document.createDocumentFragment();
-        let i = 0; let wi = 0;
-        while (i < text.length && wi < words.length) {
-          const w = (words[wi].surface || '').toString();
-          if (!w) { wi++; continue; }
-          const idx = text.indexOf(w, i);
-          if (idx === -1) break;
-          if (idx > i) frag.appendChild(document.createTextNode(text.slice(i, idx)));
-          const span = document.createElement('span');
-          span.className = 'cursor-pointer underline decoration-dotted';
-          span.dataset.wordIndex = String(wi);
-          span.textContent = w;
-          frag.appendChild(span);
-          i = idx + w.length; wi++;
+        let wi = 0;
+        const walker = document.createTreeWalker(
+          textEl,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode(node){
+              if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+              const p = node.parentElement;
+              if (p && p.closest('[data-word-index]')) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+        while (wi < words.length && walker.nextNode()) {
+          let node = walker.currentNode;
+          let text = node.nodeValue || '';
+          let pos = 0;
+          while (wi < words.length) {
+            const w = (words[wi].surface || '').toString();
+            if (!w) { wi++; continue; }
+            const idx = text.indexOf(w, pos);
+            if (idx === -1) break;
+            if (idx > 0) {
+              node = node.splitText(idx);
+              text = node.nodeValue || '';
+            }
+            const after = node.splitText(w.length);
+            const span = document.createElement('span');
+            span.className = 'cursor-pointer underline decoration-dotted';
+            span.dataset.wordIndex = String(wi);
+            span.textContent = w;
+            node.parentNode.replaceChild(span, node);
+            node = after;
+            text = after.nodeValue || '';
+            pos = 0;
+            wi++;
+          }
         }
-        if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
-        textEl.innerHTML = '';
-        textEl.appendChild(frag);
       }
       function attachTooltip(textEl, words){
         const tooltip = document.getElementById('word-tooltip');
@@ -119,11 +153,13 @@
           return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
         }
       }
-      document.addEventListener('htmx:afterSwap', function(ev){
+      function maybeInit(ev){
         if (ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading') {
           initWordClicks();
         }
-      });
+      }
+      document.addEventListener('htmx:afterSwap', maybeInit);
+      document.addEventListener('htmx:afterSettle', maybeInit);
     })();
     </script>
   </div>

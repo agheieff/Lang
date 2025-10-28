@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 import json
 import time
+import asyncio
+import os
 
 from server.auth import Account  # type: ignore
 
@@ -21,17 +24,75 @@ from ..models import (
     ReadingWordGloss,
 )
 from ..services.gen_queue import ensure_text_available
+from ..utils.gloss import reconstruct_glosses_from_logs
 
 
 router = APIRouter(tags=["reading"])
 
 MAX_WAIT_SEC = 25.0
+def _safe_html(text: Optional[str]) -> str:
+    """Escape untrusted text for safe HTML display. Preserve newlines as <br>."""
+    if not text:
+        return ""
+    try:
+        from markupsafe import escape  # type: ignore
+        esc = str(escape(text))
+    except Exception:
+        # Minimal escape fallback
+        esc = (
+            str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;")
+        )
+    return esc.replace("\n", "<br>")
+
+
+def _words_json(rows):
+    return [
+        {
+            "surface": w.surface,
+            "lemma": w.lemma,
+            "pos": w.pos,
+            "pinyin": w.pinyin,
+            "translation": w.translation,
+            "lemma_translation": w.lemma_translation,
+            "grammar": w.grammar,
+            "span_start": w.span_start,
+            "span_end": w.span_end,
+        }
+        for w in rows
+    ]
+
+
+def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
+    words_json = _words_json(words_rows)
+    return f'''
+      <div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">
+        {html_content}
+      </div>
+      <div class="mt-4 flex gap-2">
+        <button
+          hx-post="/reading/next"
+          hx-target="#current-reading"
+          hx-swap="innerHTML"
+          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+        >
+          Next text
+        </button>
+      </div>
+      <script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>
+      <div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>
+    '''
+
 
  
 
 
 @router.get("/reading/current", response_class=HTMLResponse)
-def current_reading_block(
+async def current_reading_block(
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -101,7 +162,7 @@ def current_reading_block(
     deadline = time.time() + MAX_WAIT_SEC
     text_obj = _pick_or_start()
     while text_obj is None and time.time() < deadline:
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         try:
             db.expire_all()
         except Exception:
@@ -124,50 +185,20 @@ def current_reading_block(
         )
 
     text_id = text_obj.id
-    text_html = text_obj.content
+    text_html = _safe_html(text_obj.content)
 
+    # Include words immediately if available; otherwise the client will subscribe via SSE and update when ready
     rows = (
         db.query(ReadingWordGloss)
         .filter(ReadingWordGloss.account_id == account.id, ReadingWordGloss.text_id == text_id)
         .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
         .all()
     )
-    words_json = [
-        {
-            "surface": w.surface,
-            "lemma": w.lemma,
-            "pos": w.pos,
-            "pinyin": w.pinyin,
-            "translation": w.translation,
-            "lemma_translation": w.lemma_translation,
-            "grammar": w.grammar,
-            "span_start": w.span_start,
-            "span_end": w.span_end,
-        }
-        for w in rows
-    ]
-
-    inner = f'''
-      <div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">
-        {text_html}
-      </div>
-      <div class="mt-4 flex gap-2">
-        <button
-          hx-post="/reading/next"
-          hx-target="#current-reading"
-          hx-swap="innerHTML"
-          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-        >
-          Next text
-        </button>
-      </div>
-      <script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>
-      <div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>
-    '''
+    inner = _render_reading_block(text_id, text_html, rows)
     return HTMLResponse(content=inner)
 
 @router.post("/reading/next")
-def next_text(
+async def next_text(
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -212,37 +243,7 @@ def next_text(
             .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
             .all()
         )
-        words_json = [
-            {
-                "surface": w.surface,
-                "lemma": w.lemma,
-                "pos": w.pos,
-                "pinyin": w.pinyin,
-                "translation": w.translation,
-                "lemma_translation": w.lemma_translation,
-                "grammar": w.grammar,
-                "span_start": w.span_start,
-                "span_end": w.span_end,
-            }
-            for w in rows
-        ]
-        inner = f'''
-          <div id="reading-text" class="prose max-w-none" data-text-id="{nxt.id}">
-            {nxt.content}
-          </div>
-          <div class="mt-4 flex gap-2">
-            <button
-              hx-post="/reading/next"
-              hx-target="#current-reading"
-              hx-swap="innerHTML"
-              class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-            >
-              Next text
-            </button>
-          </div>
-          <script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>
-          <div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>
-        '''
+        inner = _render_reading_block(nxt.id, _safe_html(nxt.content), rows)
         return HTMLResponse(content=inner)
 
     # No unopened exists: clear pointer, schedule background generation and long-poll for next
@@ -254,7 +255,7 @@ def next_text(
         pass
     deadline = time.time() + MAX_WAIT_SEC
     while time.time() < deadline:
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         try:
             db.expire_all()
         except Exception:
@@ -279,37 +280,7 @@ def next_text(
                 .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
                 .all()
             )
-            words_json = [
-                {
-                    "surface": w.surface,
-                    "lemma": w.lemma,
-                    "pos": w.pos,
-                    "pinyin": w.pinyin,
-                    "translation": w.translation,
-                    "lemma_translation": w.lemma_translation,
-                    "grammar": w.grammar,
-                    "span_start": w.span_start,
-                    "span_end": w.span_end,
-                }
-                for w in rows
-            ]
-            inner = f'''
-              <div id="reading-text" class="prose max-w-none" data-text-id="{nxt.id}">
-                {nxt.content}
-              </div>
-              <div class="mt-4 flex gap-2">
-                <button
-                  hx-post="/reading/next"
-                  hx-target="#current-reading"
-                  hx-swap="innerHTML"
-                  class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-                >
-                  Next text
-                </button>
-              </div>
-              <script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>
-              <div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>
-            '''
+            inner = _render_reading_block(nxt.id, _safe_html(nxt.content), rows)
             return HTMLResponse(content=inner)
 
     # Timed out: return a simple loader (no polling)
@@ -328,11 +299,108 @@ def next_text(
     )
 
 
+@router.get("/reading/{text_id}/words/stream")
+async def stream_reading_words(
+    text_id: int,
+    account: Account = Depends(_get_current_account),
+):
+    # Create a dedicated per-account session for the lifetime of this SSE stream
+    from ..account_db import open_account_session
+
+    async def event_gen():
+        db = open_account_session(int(account.id))
+        try:
+            rt = db.get(ReadingText, text_id)
+            if not rt or rt.account_id != account.id:
+                yield "event: error\ndata: {\"error\": \"not found\"}\n\n"
+                return
+
+            start = time.monotonic()
+            timeout = MAX_WAIT_SEC
+            keepalive_every = 10.0
+            last_keep = start
+
+            def _load():
+                return (
+                    db.query(ReadingWordGloss)
+                    .filter(
+                        ReadingWordGloss.account_id == account.id,
+                        ReadingWordGloss.text_id == text_id,
+                    )
+                    .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
+                    .all()
+                )
+
+            def _try_reconstruct_from_logs() -> None:
+                try:
+                    reconstruct_glosses_from_logs(
+                        db,
+                        account_id=account.id,
+                        text_id=text_id,
+                        text=rt.content or "",
+                        lang=rt.lang,
+                        prefer_db=True,
+                    )
+                except Exception:
+                    return
+
+            while True:
+                rows = _load()
+                if rows:
+                    payload = {
+                        "text_id": text_id,
+                        "words": [
+                            {
+                                "surface": w.surface,
+                                "lemma": w.lemma,
+                                "pos": w.pos,
+                                "pinyin": w.pinyin,
+                                "translation": w.translation,
+                                "lemma_translation": w.lemma_translation,
+                                "grammar": w.grammar,
+                                "span_start": w.span_start,
+                                "span_end": w.span_end,
+                            }
+                            for w in rows
+                        ],
+                    }
+                    data = json.dumps(payload, ensure_ascii=False)
+                    yield f"event: words\ndata: {data}\n\n"
+                    break
+
+                now = time.monotonic()
+                if now - start > timeout:
+                    yield "event: timeout\ndata: {}\n\n"
+                    break
+
+                if now - last_keep > keepalive_every:
+                    last_keep = now
+                    yield "event: ping\ndata: {}\n\n"
+
+                # Single best-effort reconstruction attempt before next sleep if rows are still empty
+                if not rows:
+                    _try_reconstruct_from_logs()
+
+                await asyncio.sleep(0.5)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @router.get("/reading/{text_id}/translations")
-def get_translations(
+async def get_translations(
     text_id: int,
     unit: Literal["sentence", "paragraph", "text"],
     target_lang: Optional[str] = None,
+    wait: Optional[float] = None,
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -348,20 +416,34 @@ def get_translations(
         )
         target_lang = profile.target_lang if profile else "en"
 
-    rows = (
-        db.query(ReadingTextTranslation)
-        .filter(
-            ReadingTextTranslation.text_id == text_id,
-            ReadingTextTranslation.account_id == account.id,
-            ReadingTextTranslation.unit == unit,
-            ReadingTextTranslation.target_lang == target_lang,
+    def _load_rows():
+        return (
+            db.query(ReadingTextTranslation)
+            .filter(
+                ReadingTextTranslation.text_id == text_id,
+                ReadingTextTranslation.account_id == account.id,
+                ReadingTextTranslation.unit == unit,
+                ReadingTextTranslation.target_lang == target_lang,
+            )
+            .order_by(
+                ReadingTextTranslation.segment_index.asc().nullsfirst(),
+                ReadingTextTranslation.span_start.asc().nullslast(),
+            )
+            .all()
         )
-        .order_by(
-            ReadingTextTranslation.segment_index.asc().nullsfirst(),
-            ReadingTextTranslation.span_start.asc().nullslast(),
-        )
-        .all()
-    )
+
+    rows = _load_rows()
+    if (not rows) and wait and wait > 0:
+        deadline = time.time() + min(float(wait), MAX_WAIT_SEC)
+        while time.time() < deadline and not rows:
+            try:
+                db.expire_all()
+            except Exception:
+                pass
+            rows = _load_rows()
+            if rows:
+                break
+            await asyncio.sleep(0.5)
     items = [
         {
             "start": r.span_start,
@@ -419,8 +501,9 @@ def get_reading_lookups(
 
 
 @router.get("/reading/{text_id}/words")
-def get_reading_words(
+async def get_reading_words(
     text_id: int,
+    wait: Optional[float] = None,
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -428,15 +511,47 @@ def get_reading_words(
     if not rt or rt.account_id != account.id:
         raise HTTPException(404, "reading text not found")
 
-    rows = (
-        db.query(ReadingWordGloss)
-        .filter(
-            ReadingWordGloss.account_id == account.id,
-            ReadingWordGloss.text_id == text_id,
+    def _load_rows():
+        return (
+            db.query(ReadingWordGloss)
+            .filter(
+                ReadingWordGloss.account_id == account.id,
+                ReadingWordGloss.text_id == text_id,
+            )
+            .order_by(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+            .all()
         )
-        .order_by(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
-        .all()
-    )
+
+    rows = _load_rows()
+
+    # Optional long-poll until words are available (no streaming)
+    if (not rows) and wait and wait > 0:
+        deadline = time.time() + min(float(wait), MAX_WAIT_SEC)
+
+        def _try_reconstruct_from_logs() -> None:
+            try:
+                reconstruct_glosses_from_logs(
+                    db,
+                    account_id=account.id,
+                    text_id=text_id,
+                    text=rt.content or "",
+                    lang=rt.lang,
+                    prefer_db=True,
+                )
+            except Exception:
+                return
+
+        while time.time() < deadline and not rows:
+            try:
+                db.expire_all()
+            except Exception:
+                pass
+            # try reconstruct once per loop
+            _try_reconstruct_from_logs()
+            rows = _load_rows()
+            if rows:
+                break
+            await asyncio.sleep(0.5)
 
     return {
         "text_id": text_id,
