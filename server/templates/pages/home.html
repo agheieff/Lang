@@ -46,6 +46,9 @@
         if (!textEl) return;
         const textId = textEl.dataset.textId;
         if (!textId) return;
+        // Prevent duplicate initializations for the same rendered block
+        if (textEl.dataset.wordsInit === '1') return;
+        textEl.dataset.wordsInit = '1';
         if (textEl.querySelector('[data-word-index]')) return;
         const embedded = getEmbeddedWords();
         let words = Array.isArray(embedded) ? embedded : [];
@@ -55,6 +58,8 @@
         } else {
           // Long-poll for words (single request held server-side until available or timeout)
           try {
+            if (textEl.dataset.wordsFetching === '1') return;
+            textEl.dataset.wordsFetching = '1';
             const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
             if (res.ok) {
               const data = await res.json();
@@ -71,6 +76,7 @@
               }
             }
           } catch {}
+          finally { textEl.dataset.wordsFetching = '0'; }
         }
       }
       async function pollWords(textEl, textId){
@@ -161,10 +167,12 @@
       }
 
       function _styleWordSpan(span, wi, isZh){
-        // Use a consistent underline style to avoid confusion
-        span.className = 'cursor-pointer underline decoration-dotted';
-        span.style.textDecorationThickness = '2px';
-        span.style.textUnderlineOffset = '2px';
+        // Apply classes; CSS below handles underline rendering
+        if (isZh) {
+          span.className = 'word-span word-span--zh';
+        } else {
+          span.className = 'word-span';
+        }
       }
 
       // Map a character offset (in the plain text where <br> counts as "\n") to a DOM Text node and offset
@@ -183,11 +191,8 @@
           if (node.nodeType === Node.ELEMENT_NODE) {
             const el = node;
             if (el.hasAttribute && el.hasAttribute('data-word-index')) {
-              // Count text length within wrapped span but do not return inside it
+              // Treat wrapped span as atomic text: advance idx by its length and continue scanning siblings
               const len = (el.textContent || '').length;
-              if (charIndex <= idx + len) {
-                return null; // target should not fall inside existing wrapped spans (non-overlapping)
-              }
               idx += len;
               return null;
             }
@@ -251,6 +256,28 @@
       document.addEventListener('htmx:afterSettle', maybeInit);
     })();
     </script>
+    <style>
+      /* Generic clickable word */
+      .word-span {
+        cursor: pointer;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      /* Chinese: render a solid underline with a tiny trailing gap */
+      .word-span--zh {
+        text-decoration: none;        /* disable default underline */
+        position: relative;
+        /* solid underline using background so we can stop early */
+        background-image: linear-gradient(currentColor, currentColor);
+        background-repeat: no-repeat;
+        background-position: 0 100%;
+        /* leave a small gap (2px) at the end to show boundary */
+        background-size: calc(100% - var(--gap, 2px)) 1.5px;
+      }
+      .word-span:hover {
+        background-color: rgba(0,0,0,0.04);
+      }
+    </style>
   </div>
   {% endif %}
 
