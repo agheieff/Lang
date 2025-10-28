@@ -58,19 +58,61 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 });
 
-function loadWords() {
+async function loadWords() {
   const hideNew = document.getElementById('hide-new').checked;
   const minStab = document.getElementById('min-stab').value;
   const search = document.getElementById('search').value.trim().toLowerCase();
 
-  let url = '/srs/words?lang=zh';
-  if (minStab) url += `&min_S=${minStab}`;
+  const lang = ("{{ lang }}" || 'es');
+  const params = new URLSearchParams({ lang: String(lang) });
+  if (minStab) params.set('min_S', String(minStab));
 
-  // Use htmx to load the words table
-  htmx.ajax('GET', url, {
-    target: '#words-table',
-    swap: 'innerHTML'
+  try {
+    const res = await fetch(`/srs/words?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return;
+    const items = await res.json();
+    const filtered = items.filter(it => {
+      if (hideNew && (!it || ((it.n || 0) === 0 && (Number(it.stability) || 0) <= 0))) return false;
+      if (search && (!String(it.lemma || '').toLowerCase().includes(search))) return false;
+      return true;
+    });
+    renderWordsTable(filtered);
+  } catch (e) {
+    // ignore
+  }
+}
+
+function renderWordsTable(items) {
+  const tbody = document.getElementById('words-table');
+  const countEl = document.getElementById('word-count');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  const rows = (items || []).map(it => {
+    const p = (Number(it.p_click) || 0);
+    const S = (Number(it.stability) || 0);
+    const n = (Number(it.n) || 0);
+    const D = (Number(it.diversity) || 0);
+    const freq = (it.freq_rank != null ? `#${it.freq_rank}` : '—');
+    const lvl = (it.level_code || '—');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="px-4 py-2 whitespace-nowrap">${escapeHtml(it.lemma || '')}</td>
+      <td class="px-4 py-2">${freq}</td>
+      <td class="px-4 py-2">${escapeHtml(lvl)}</td>
+      <td class="px-4 py-2">${(p*100).toFixed(0)}%</td>
+      <td class="px-4 py-2">${n}</td>
+      <td class="px-4 py-2">${S.toFixed(2)}</td>
+      <td class="px-4 py-2">${D}</td>
+      <td class="px-4 py-2 text-gray-400">—</td>
+    `;
+    return tr;
   });
+  for (const r of rows) tbody.appendChild(r);
+  if (countEl) countEl.textContent = String(rows.length);
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
 }
 </script>
 {% endblock %}

@@ -95,10 +95,35 @@
         if (!el) return null;
         try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
       }
-      // SSE removed: long-poll request is used instead
+      // Use backend-provided span offsets when available to avoid drift
       function makeClickable(textEl, words){
         const container = document.getElementById('current-reading');
         const isZh = !!(container && (container.dataset.lang || '').toLowerCase().startsWith('zh'));
+        const hasSpans = Array.isArray(words) && words.every(w => Number.isInteger(w.span_start) && Number.isInteger(w.span_end));
+
+        if (hasSpans) {
+          // Process in order; wrap exact [start,end) ranges
+          for (let wi = 0; wi < words.length; wi++) {
+            const w = words[wi];
+            const startPos = _resolveDomPosAt(textEl, w.span_start);
+            const endPos = _resolveDomPosAt(textEl, w.span_end);
+            if (!startPos || !endPos) continue;
+            try {
+              const range = document.createRange();
+              range.setStart(startPos.node, startPos.offset);
+              range.setEnd(endPos.node, endPos.offset);
+              const wrapper = document.createElement('span');
+              _styleWordSpan(wrapper, wi, isZh);
+              wrapper.dataset.wordIndex = String(wi);
+              const frag = range.extractContents();
+              wrapper.appendChild(frag);
+              range.insertNode(wrapper);
+            } catch {}
+          }
+          return;
+        }
+
+        // Fallback: naive substring scan within text nodes (less reliable)
         let wi = 0;
         const walker = document.createTreeWalker(
           textEl,
@@ -117,44 +142,63 @@
           let text = node.nodeValue || '';
           let pos = 0;
           while (wi < words.length) {
-            const w = (words[wi].surface || '').toString();
-            if (!w) { wi++; continue; }
-            const idx = text.indexOf(w, pos);
+            const form = (words[wi].surface || '').toString();
+            if (!form) { wi++; continue; }
+            const idx = text.indexOf(form, pos);
             if (idx === -1) break;
-            if (idx > 0) {
-              node = node.splitText(idx);
-              text = node.nodeValue || '';
-            }
-            const after = node.splitText(w.length);
+            if (idx > 0) { node = node.splitText(idx); text = node.nodeValue || ''; }
+            const after = node.splitText(form.length);
             const span = document.createElement('span');
-            // Styling: make word boundaries visible for Chinese by alternating underline styles/colors
-            if (isZh) {
-              span.className = 'cursor-pointer';
-              span.style.textDecoration = 'underline';
-              span.style.textDecorationThickness = '2px';
-              span.style.textUnderlineOffset = '2px';
-              // Alternate color/style per word index to make boundaries clear
-              if ((wi % 2) === 0) {
-                span.style.textDecorationStyle = 'solid';
-                span.style.textDecorationColor = '#6b7280'; /* gray-500 */
-              } else {
-                span.style.textDecorationStyle = 'dashed';
-                span.style.textDecorationColor = '#9ca3af'; /* gray-400 */
-              }
-            } else {
-              span.className = 'cursor-pointer underline decoration-dotted';
-              span.style.textDecorationThickness = '2px';
-              span.style.textUnderlineOffset = '2px';
-            }
+            _styleWordSpan(span, wi, isZh);
             span.dataset.wordIndex = String(wi);
-            span.textContent = w;
+            span.textContent = form;
             node.parentNode.replaceChild(span, node);
-            node = after;
-            text = after.nodeValue || '';
-            pos = 0;
-            wi++;
+            node = after; text = after.nodeValue || ''; pos = 0; wi++;
           }
         }
+      }
+
+      function _styleWordSpan(span, wi, isZh){
+        // Use a consistent underline style to avoid confusion
+        span.className = 'cursor-pointer underline decoration-dotted';
+        span.style.textDecorationThickness = '2px';
+        span.style.textUnderlineOffset = '2px';
+      }
+
+      // Map a character offset (in the plain text where <br> counts as "\n") to a DOM Text node and offset
+      function _resolveDomPosAt(root, charIndex){
+        let idx = 0;
+        function walk(node){
+          if (!node) return null;
+          if (node.nodeType === Node.TEXT_NODE) {
+            const len = (node.nodeValue || '').length;
+            if (charIndex <= idx + len) {
+              return { node: node, offset: Math.max(0, charIndex - idx) };
+            }
+            idx += len;
+            return null;
+          }
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node;
+            if (el.hasAttribute && el.hasAttribute('data-word-index')) {
+              // Count text length within wrapped span but do not return inside it
+              const len = (el.textContent || '').length;
+              if (charIndex <= idx + len) {
+                return null; // target should not fall inside existing wrapped spans (non-overlapping)
+              }
+              idx += len;
+              return null;
+            }
+            // Treat <br> as a single "\n" character in the plain text stream
+            if (el.tagName === 'BR') { idx += 1; return null; }
+            for (let child = el.firstChild; child; child = child.nextSibling) {
+              const res = walk(child);
+              if (res) return res;
+            }
+          }
+          return null;
+        }
+        return walk(root);
       }
       function attachTooltip(textEl, words){
         const tooltip = document.getElementById('word-tooltip');

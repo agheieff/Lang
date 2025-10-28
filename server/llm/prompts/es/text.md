@@ -1,5 +1,5 @@
 Please generate a text in Spanish for the comprehensible input training.
-Write it in {script] characters.
+Write it in {script} characters.
 The learner is around {level} level, please try to make the text correspond to that.
 Please try to make the text around {length} characters long.
 Try to include at least some of the following words in the text: {include_words}. Gently reinforce the target words in context and keep the language natural and engaging.

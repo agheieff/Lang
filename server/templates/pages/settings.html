@@ -56,7 +56,7 @@
       >
       <div id="length-status" class="mt-2 text-sm text-gray-500"></div>
       <p class="mt-1 text-sm text-gray-500">
-        Target length in words (50-2000 words). Shorter texts are easier for beginners.
+        Target length in {{ 'characters' if current_profile.lang and current_profile.lang.startswith('zh') else 'words' }} (50-2000 {{ 'characters' if current_profile.lang and current_profile.lang.startswith('zh') else 'words' }}). Shorter texts are easier for beginners.
       </p>
     </div>
 

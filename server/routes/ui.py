@@ -40,10 +40,22 @@ def words_page(
     request: Request,
     lang: Optional[str] = None,
     account: Account = Depends(_get_current_account),
+    db: Session = Depends(get_account_db),
 ):
     t = _templates()
+    # Default to the user's first profile language if not provided
+    eff_lang: Optional[str] = None
+    if lang:
+        eff_lang = lang
+    else:
+        try:
+            from ..models import Profile
+            prof = db.query(Profile).filter(Profile.account_id == account.id).first()
+            eff_lang = prof.lang if prof else None
+        except Exception:
+            eff_lang = None
     return t.TemplateResponse(
-        "pages/words.html", {"request": request, "title": "My Words", "lang": lang or "es"}
+        "pages/words.html", {"request": request, "title": "My Words", "lang": eff_lang or "es"}
     )
 
 
@@ -128,12 +140,5 @@ def home_page(
     return t.TemplateResponse("pages/home.html", context)
 
 
-@router.get("/logout")
-def logout() -> RedirectResponse:
-    resp = RedirectResponse(url="/", status_code=302)
-    try:
-        resp.delete_cookie("access_token", path="/")
-    except Exception:
-        pass
-    return resp
+## Logout handled by /auth/logout in the auth router
 

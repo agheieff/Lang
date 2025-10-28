@@ -31,16 +31,21 @@ router = APIRouter(tags=["reading"])
 
 MAX_WAIT_SEC = 25.0
 def _safe_html(text: Optional[str]) -> str:
-    """Escape untrusted text for safe HTML display. Preserve newlines as <br>."""
+    """Escape untrusted text for safe HTML display. Preserve newlines as <br>.
+
+    Also normalizes CRLF/CR to LF before processing to keep offsets consistent.
+    """
     if not text:
         return ""
     try:
+        norm = str(text).replace("\r\n", "\n").replace("\r", "\n")
         from markupsafe import escape  # type: ignore
-        esc = str(escape(text))
+        esc = str(escape(norm))
     except Exception:
         # Minimal escape fallback
+        norm = str(text).replace("\r\n", "\n").replace("\r", "\n")
         esc = (
-            str(text)
+            norm
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
@@ -69,23 +74,22 @@ def _words_json(rows):
 
 def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
     words_json = _words_json(words_rows)
-    return f'''
-      <div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">
-        {html_content}
-      </div>
-      <div class="mt-4 flex gap-2">
-        <button
-          hx-post="/reading/next"
-          hx-target="#current-reading"
-          hx-swap="innerHTML"
-          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-        >
-          Next text
-        </button>
-      </div>
-      <script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>
-      <div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>
-    '''
+    # Avoid any leading whitespace before content to keep span offsets aligned with DOM
+    return (
+        f'<div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">{html_content}</div>'
+        '<div class="mt-4 flex gap-2">'
+        '  <button'
+        '    hx-post="/reading/next"'
+        '    hx-target="#current-reading"'
+        '    hx-swap="innerHTML"'
+        '    class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"'
+        '  >'
+        '    Next text'
+        '  </button>'
+        '</div>'
+        f'<script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>'
+        '<div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>'
+    )
 
 
  

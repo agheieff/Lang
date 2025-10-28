@@ -96,6 +96,6 @@ if __name__ == "__main__":
         account_dbs = list(_ACCOUNTS_DIR.glob("*.db")) if _ACCOUNTS_DIR.exists() else []
         print(f"  Account databases: {len(account_dbs)}")
         print(f"  LLM logs dir exists: {LOG_DIR.exists()}")
-        print("\nNote: You may still have a browser cookie set. Visit /logout in the app or clear cookies for localhost to fully sign out.")
+        print("\nNote: You may still have a browser cookie set. Visit /auth/logout in the app or clear cookies for localhost to fully sign out.")
     else:
         print("Cancelled")
