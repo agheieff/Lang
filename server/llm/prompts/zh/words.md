@@ -5,7 +5,9 @@ Now please translate the following sentence from the text into English: {sentenc
 - pos – the part-of-speech label (e.g. "NOUN", "VERB", "ADJ", "PART", etc.)
 
 Tokenize the text into the smallest meaningful units (words, not individual characters unless they are single-character words).
+Choose the forms that can be found in a dictionary, for example "一个" should be tokenized as two, not as one, but something like "吃饭" should be tokenized as one word.
 Preserve the original order; the array must map one-to-one with the token sequence. Skip any punctuation you encounter.
+If you encounter the same word twice in the sentence, please put it twice in the response as well, the response should cover all the words in the sentence in their order, including duplicated ones.
 
 Here's an example for how the first sentence from the text from before would be done:
 

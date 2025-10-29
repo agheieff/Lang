@@ -50,11 +50,15 @@
         if (textEl.dataset.wordsInit === '1') return;
         textEl.dataset.wordsInit = '1';
         if (textEl.querySelector('[data-word-index]')) return;
+        // Ensure store for dynamic merges
+        if (!Array.isArray(container.__wordsStore)) container.__wordsStore = [];
         const embedded = getEmbeddedWords();
         let words = Array.isArray(embedded) ? embedded : [];
         if (words && words.length) {
           makeClickable(textEl, words);
           attachTooltip(textEl, words);
+          // Always fetch latest to merge any late-arriving spans
+          try { await fetchAndMergeWords(textEl, Number(textId)); } catch {}
         } else {
           // Long-poll for words (single request held server-side until available or timeout)
           try {
@@ -79,6 +83,17 @@
           finally { textEl.dataset.wordsFetching = '0'; }
         }
       }
+      async function fetchAndMergeWords(textEl, textId){
+        try{
+          const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
+          if (!res.ok) return;
+          const data = await res.json();
+          const ws = (data && Array.isArray(data.words)) ? data.words : [];
+          if (!ws.length) return;
+          // Wrap only missing spans
+          wrapBySpans(textEl, ws);
+        }catch{}
+      }
       async function pollWords(textEl, textId){
         if (!textEl || !textId) return;
         if (textEl.querySelector('[data-word-index]')) return; // already clickable
@@ -102,6 +117,45 @@
         try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
       }
       // Use backend-provided span offsets when available to avoid drift
+      function ensureStore(){
+        const container = document.getElementById('current-reading');
+        if (!Array.isArray(container.__wordsStore)) container.__wordsStore = [];
+        if (!container.__wordCounter) container.__wordCounter = 0;
+        return container;
+      }
+      function wrapBySpans(textEl, words){
+        const container = ensureStore();
+        let added = 0;
+        if (!Array.isArray(words)) return 0;
+        for (let wi = 0; wi < words.length; wi++){
+          const w = words[wi];
+          if (!Number.isInteger(w.span_start) || !Number.isInteger(w.span_end)) continue;
+          const s = Number(w.span_start), e = Number(w.span_end);
+          if (s<0 || e<=s) continue;
+          if (textEl.querySelector(`[data-span-start="${s}"][data-span-end="${e}"]`)) continue;
+          const startPos = _resolveDomPosAt(textEl, s);
+          const endPos = _resolveDomPosAt(textEl, e);
+          if (!startPos || !endPos) continue;
+          try{
+            const range = document.createRange();
+            range.setStart(startPos.node, startPos.offset);
+            range.setEnd(endPos.node, endPos.offset);
+            const wrapper = document.createElement('span');
+            _styleWordSpan(wrapper, container.__wordCounter, !!(document.getElementById('current-reading')?.dataset.lang||'').toLowerCase().startsWith('zh'));
+            wrapper.dataset.wordIndex = String(container.__wordCounter);
+            wrapper.dataset.spanStart = String(s);
+            wrapper.dataset.spanEnd = String(e);
+            const frag = range.extractContents();
+            wrapper.appendChild(frag);
+            range.insertNode(wrapper);
+            // Store for tooltip lookup
+            container.__wordsStore.push(w);
+            container.__wordCounter += 1;
+            added += 1;
+          }catch{}
+        }
+        return added;
+      }
       function makeClickable(textEl, words){
         const container = document.getElementById('current-reading');
         const isZh = !!(container && (container.dataset.lang || '').toLowerCase().startsWith('zh'));
@@ -109,24 +163,7 @@
 
         // First pass: wrap by exact spans for items that have them (in-order)
         if (spansExist) {
-          for (let wi = 0; wi < words.length; wi++) {
-            const w = words[wi];
-            if (!Number.isInteger(w.span_start) || !Number.isInteger(w.span_end)) continue;
-            const startPos = _resolveDomPosAt(textEl, w.span_start);
-            const endPos = _resolveDomPosAt(textEl, w.span_end);
-            if (!startPos || !endPos) continue;
-            try {
-              const range = document.createRange();
-              range.setStart(startPos.node, startPos.offset);
-              range.setEnd(endPos.node, endPos.offset);
-              const wrapper = document.createElement('span');
-              _styleWordSpan(wrapper, wi, isZh);
-              wrapper.dataset.wordIndex = String(wi);
-              const frag = range.extractContents();
-              wrapper.appendChild(frag);
-              range.insertNode(wrapper);
-            } catch {}
-          }
+          wrapBySpans(textEl, words);
         }
 
         // Fallback: naive substring scan within text nodes (less reliable)
@@ -157,10 +194,14 @@
             if (idx > 0) { node = node.splitText(idx); text = node.nodeValue || ''; }
             const after = node.splitText(form.length);
             const span = document.createElement('span');
-            _styleWordSpan(span, wi, isZh);
-            span.dataset.wordIndex = String(wi);
+            const container2 = ensureStore();
+            _styleWordSpan(span, container2.__wordCounter, isZh);
+            span.dataset.wordIndex = String(container2.__wordCounter);
             span.textContent = form;
             node.parentNode.replaceChild(span, node);
+            // push fallback word object for tooltip minimal info
+            container2.__wordsStore.push(words[wi]);
+            container2.__wordCounter += 1;
             node = after; text = after.nodeValue || ''; pos = 0; wi++;
           }
         }
@@ -232,8 +273,39 @@
           if (!(t instanceof Element)) return;
           const idx = t.getAttribute('data-word-index');
           if (idx == null) return;
-          const w = words[Number(idx)];
+          const container = document.getElementById('current-reading');
+          const store = (container && Array.isArray(container.__wordsStore)) ? container.__wordsStore : words;
+          const w = store[Number(idx)];
           if (!w) return;
+          try {
+            const container = document.getElementById('current-reading');
+            if (container) {
+              if (!Array.isArray(container.__lookups)) container.__lookups = [];
+              const ev = {
+                surface: w.surface ?? null,
+                lemma: w.lemma ?? null,
+                pos: w.pos ?? null,
+                span_start: (Number.isInteger(w.span_start) ? Number(w.span_start) : null),
+                span_end: (Number.isInteger(w.span_end) ? Number(w.span_end) : null)
+              };
+              container.__lookups.push(ev);
+              // Persist immediately to survive reload/close
+              try {
+                const textEl2 = document.getElementById('reading-text');
+                const tid = textEl2 && textEl2.dataset ? String(textEl2.dataset.textId||'') : '';
+                if (tid) {
+                  const key = 'arc_rl_' + tid;
+                  let saved = null; try { saved = JSON.parse(localStorage.getItem(key) || 'null'); } catch {}
+                  if (!saved || typeof saved !== 'object') {
+                    saved = { started_ms: Date.now(), lookups: [] };
+                  }
+                  if (!Array.isArray(saved.lookups)) saved.lookups = [];
+                  saved.lookups.push(ev);
+                  try { localStorage.setItem(key, JSON.stringify(saved)); } catch {}
+                }
+              } catch {}
+            }
+          } catch {}
           tooltip.innerHTML = render(w);
           tooltip.classList.remove('hidden');
           positionTooltip(t);

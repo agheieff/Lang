@@ -534,35 +534,40 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                         return None
 
                     try:
-                        words_parallel = max(1, int(os.getenv("ARC_WORDS_PARALLEL", "1")))
+                        words_parallel = int(os.getenv("ARC_WORDS_PARALLEL", "10"))
                     except Exception:
-                        words_parallel = 1
+                        words_parallel = 10
+                    # Always split by sentence; use parallelism when >1, otherwise sequential per sentence
+                    words_parallel = max(1, words_parallel)
 
                     tr_res = None
-                    wd_res = None
                     wd_seg_results: List[Tuple[int, str, Optional[tuple[str, Dict, str, Optional[str]]], List[Dict]]] = []
 
-                    if words_parallel <= 1:
-                        def _call_words_single() -> Optional[tuple[str, Dict, str, Optional[str]]]:
-                            return _attempt_words(w_messages, job_dir_path / "words.json")
+                    sent_spans = _split_sentences(text_html_, lang_)
+                    # Build per-sentence messages preserving reading context
+                    per_msgs: List[Tuple[int, str, List[Dict]]] = []
+                    for (s, e, seg) in sent_spans:
+                        msgs = build_word_translation_prompt(lang_, target_lang2, seg)
+                        words_ctx = [
+                            {"role": "system", "content": msgs[0]["content"]},
+                            {"role": "user", "content": reading_user_content2},
+                            {"role": "assistant", "content": text_html_},
+                            {"role": "user", "content": msgs[1]["content"]},
+                        ]
+                        per_msgs.append((s, seg, words_ctx))
+
+                    if words_parallel == 1:
+                        # Run structured in parallel with sequential per-sentence words
                         with ThreadPoolExecutor(max_workers=2) as ex:
                             fut_tr = ex.submit(_call_structured)
-                            fut_wd = ex.submit(_call_words_single)
+                            for i, (s, seg, m) in enumerate(per_msgs):
+                                try:
+                                    tup = _attempt_words(m, job_dir_path / f"words_{i}.json")
+                                except Exception:
+                                    tup = None
+                                wd_seg_results.append((s, seg, tup, m))
                             tr_res = fut_tr.result()
-                            wd_res = fut_wd.result()
                     else:
-                        sent_spans = _split_sentences(text_html_, lang_)
-                        # Build per-sentence messages preserving reading context
-                        per_msgs: List[Tuple[int, str, List[Dict]]] = []
-                        for (s, e, seg) in sent_spans:
-                            msgs = build_word_translation_prompt(lang_, target_lang2, seg)
-                            words_ctx = [
-                                {"role": "system", "content": msgs[0]["content"]},
-                                {"role": "user", "content": reading_user_content2},
-                                {"role": "assistant", "content": text_html_},
-                                {"role": "user", "content": msgs[1]["content"]},
-                            ]
-                            per_msgs.append((s, seg, words_ctx))
                         max_workers = max(2, min(words_parallel, len(per_msgs)) + 1)
                         with ThreadPoolExecutor(max_workers=max_workers) as ex:
                             fut_tr = ex.submit(_call_structured)
@@ -583,8 +588,8 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             tr_parsed = extract_structured_translation(tr_buf)
                             if tr_parsed:
                                 target = tr_parsed.get("target_lang") or target_lang2
+                                idx = 0
                                 for p in tr_parsed.get("paragraphs", []):
-                                    idx = 0
                                     for s in p.get("sentences", []):
                                         if "text" in s and "translation" in s:
                                             db2.add(ReadingTextTranslation(

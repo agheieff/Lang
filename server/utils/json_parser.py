@@ -183,83 +183,86 @@ def extract_partial_json_string(buffer: str, key: str = "text") -> Optional[str]
 
 
 def extract_structured_translation(response: str) -> Optional[Dict[str, Any]]:
-    """
-    Extract structured translation from LLM response.
+    """Extract structured sentence translations and normalize to
+    {"paragraphs": [{"sentences": [{"text": str, "translation": str}, ...]}, ...]}.
 
-    Args:
-        response: The raw response from LLM
+    Accepts the provider schema found in recent logs:
+    {"text": [ {"paragraph": [ {"sentence": {"text": str, "translation": str}}, ... ]}, ... ]}
 
-    Returns:
-        The structured translation data if found, otherwise None
+    Falls back to already-normalized {"paragraphs": [{"sentences": [...]}]} when present.
     """
     if not response or response.strip() == "":
         return None
 
-    # Reuse balanced extraction from extract_word_translations
-    def _extract_balanced(text: str, start: int) -> Optional[str]:
-        depth = 0
-        i = start
-        n = len(text)
-        in_str = False
-        esc = False
-        while i < n:
-            ch = text[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-            else:
-                if ch == '"':
-                    in_str = True
-                elif ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i+1]
-            i += 1
+    def _json_from_any(s: str) -> Optional[Dict[str, Any]]:
+        # 1) Try direct JSON
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        # 2) Try code-fenced
+        m = re.search(r"```json\s*([\s\S]*?)```", s)
+        if m:
+            body = m.group(1).strip()
+            try:
+                obj = json.loads(body)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+        # 3) Try to extract first object braces
+        first = s.find('{')
+        last = s.rfind('}')
+        if first != -1 and last != -1 and last > first:
+            frag = s[first:last+1]
+            try:
+                obj = json.loads(frag)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
         return None
 
-    fence = re.search(r"```json\s*", response)
-    if fence:
-        start_brace = response.find('{', fence.end())
-        if start_brace != -1:
-            blob = _extract_balanced(response, start_brace)
-            if blob:
-                try:
-                    data = json.loads(blob)
-                    if isinstance(data, dict) and isinstance(data.get("paragraphs"), list):
-                        return data
-                except Exception:
-                    pass
+    data = _json_from_any(response)
+    if not isinstance(data, dict):
+        return None
 
-    candidates: list[int] = []
-    idx_para = response.find('"paragraphs"')
-    if idx_para != -1:
-        brace_before = response.rfind('{', 0, idx_para)
-        if brace_before != -1:
-            candidates.append(brace_before)
-    first_brace = response.find('{')
-    if first_brace != -1:
-        candidates.append(first_brace)
+    # Case A: already normalized shape
+    if isinstance(data.get("paragraphs"), list):
+        return data
 
-    seen: set[int] = set()
-    for pos in candidates:
-        if pos in seen:
-            continue
-        seen.add(pos)
-        blob = _extract_balanced(response, pos)
-        if not blob:
-            continue
-        try:
-            data = json.loads(blob)
-            if isinstance(data, dict) and isinstance(data.get("paragraphs"), list):
-                return data
-        except Exception:
-            continue
+    # Case B: provider schema: {"text":[{"paragraph":[{"sentence":{...}}, ...]}, ...]}
+    txt = data.get("text")
+    if isinstance(txt, list):
+        paragraphs_out: list[dict] = []
+        for para in txt:
+            if not isinstance(para, dict):
+                continue
+            sent_items = para.get("paragraph")
+            if not isinstance(sent_items, list):
+                continue
+            sentences: list[dict] = []
+            for item in sent_items:
+                if not isinstance(item, dict):
+                    continue
+                sent = item.get("sentence")
+                if not isinstance(sent, dict):
+                    continue
+                t = sent.get("text")
+                tr = sent.get("translation")
+                if t is None or tr is None:
+                    continue
+                sentences.append({"text": str(t), "translation": str(tr)})
+            if sentences:
+                paragraphs_out.append({"sentences": sentences})
+        if paragraphs_out:
+            out: Dict[str, Any] = {"paragraphs": paragraphs_out}
+            # carry target_lang if present
+            if isinstance(data.get("target_lang"), str):
+                out["target_lang"] = data["target_lang"]
+            return out
 
     return None
 
