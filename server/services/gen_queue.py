@@ -336,7 +336,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             provider=provider,
                             model=model_id,
                             base_url=base_url,
-                            out_path=job_dir / "reading.json",
+                            out_path=job_dir / "text.json",
                         )
                         chosen_provider, chosen_model, chosen_base = used_provider, used_model, base_url
                         last_err = None

@@ -44,6 +44,7 @@ class PromptSpec:
     include_words: Optional[List[str]]
     script: Optional[str] = None  # for zh source formatting
     ci_target: Optional[float] = None
+    preferences: Optional[str] = None
 
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
@@ -105,6 +106,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         "length": simple_length,
         "include_words": simple_include,
         "script": script_label,
+        "preferences": (spec.preferences or ""),
     }
 
     sys_content = _safe_format(sys_tpl, mapping)

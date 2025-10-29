@@ -49,6 +49,18 @@ def build_reading_prompt_spec(
     words = include_words or _pick_words(db, u, lang, count=12, new_ratio=base_new_ratio)
     level_hint = compose_level_hint(db, u, lang)
 
+    # Preferences: free-form topics/styles from profile settings
+    preferences: Optional[str] = None
+    try:
+        if prof and getattr(prof, "text_preferences", None):
+            preferences = str(prof.text_preferences)
+        elif prof and isinstance(getattr(prof, "settings", None), dict):
+            p = prof.settings.get("text_preferences") or prof.settings.get("preferences")
+            if p:
+                preferences = str(p)
+    except Exception:
+        preferences = None
+
     spec = PromptSpec(
         lang=lang,
         unit=unit,
@@ -57,5 +69,6 @@ def build_reading_prompt_spec(
         include_words=words,
         script=script,
         ci_target=ci_target,
+        preferences=preferences,
     )
     return spec, words, level_hint
