@@ -22,9 +22,9 @@
         class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
         placeholder="Describe topics, themes, or content types you'd like to see in generated readings. For example: 'travel, technology, daily life, cultural topics, business conversations'"
         hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
-        hx-vals='js:{text_preferences: this.value}'
         hx-trigger="change delay:500ms"
         hx-ext="json-enc"
+        hx-on--config-request="(function(){try{event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';event.detail.parameters={text_preferences: (this.value||'').trim()};}catch(e){}})()"
         hx-target="#preferences-status"
         hx-swap="innerHTML"
       >{{ current_profile.text_preferences or '' }}</textarea>
@@ -48,9 +48,9 @@
         value="{{ current_profile.text_length or 300 }}"
         class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
         hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
-        hx-vals='js:{text_length: parseInt(this.value)}'
         hx-trigger="change delay:500ms"
         hx-ext="json-enc"
+        hx-on--config-request="(function(){try{event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';var n=parseInt(this.value,10);if(!isFinite(n)) n=null;event.detail.parameters={text_length: n};}catch(e){}})()"
         hx-target="#length-status"
         hx-swap="innerHTML"
       >
