@@ -24,7 +24,7 @@
         hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
         hx-trigger="change delay:500ms"
         hx-ext="json-enc"
-        hx-on--config-request="(function(){try{event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';event.detail.parameters={text_preferences: (this.value||'').trim()};}catch(e){}})()"
+        hx-on--config-request="(function(){try{var el=event.detail&&event.detail.elt?event.detail.elt:null;var val=el&&('value'in el)?el.value:'';event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';event.detail.parameters={text_preferences: String(val||'').trim()};}catch(e){}})()"
         hx-target="#preferences-status"
         hx-swap="innerHTML"
       >{{ current_profile.text_preferences or '' }}</textarea>
@@ -50,7 +50,7 @@
         hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
         hx-trigger="change delay:500ms"
         hx-ext="json-enc"
-        hx-on--config-request="(function(){try{event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';var n=parseInt(this.value,10);if(!isFinite(n)) n=null;event.detail.parameters={text_length: n};}catch(e){}})()"
+        hx-on--config-request="(function(){try{var el=event.detail&&event.detail.elt?event.detail.elt:null;var raw=el&&('value'in el)?el.value:null;var n=parseInt(raw,10);if(!isFinite(n)) n=null;event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';event.detail.parameters={text_length: n};}catch(e){}})()"
         hx-target="#length-status"
         hx-swap="innerHTML"
       >
