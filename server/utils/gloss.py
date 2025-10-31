@@ -173,15 +173,28 @@ def _reconstruct_from_file_logs(
         for lang_dir in sorted([p for p in acc_dir.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
             for job in sorted([p for p in lang_dir.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
                 meta_path = job / "meta.json"
-                words_path = job / "words.json"
                 try:
-                    if not meta_path.exists() or not words_path.exists():
+                    if not meta_path.exists():
                         continue
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     if int(meta.get("text_id")) != int(text_id):
                         continue
-                    wlog = json.loads(words_path.read_text(encoding="utf-8"))
-                    items = _parse_word_items_from_response_blob(wlog.get("response"))
+                    # Collect items from single-file words.json or per-sentence words_*.json
+                    items: List[Dict[str, Any]] = []
+                    # Prefer any words_*.json files; fall back to words.json
+                    word_files = list(sorted(job.glob("words_*.json")))
+                    if not word_files:
+                        wp = job / "words.json"
+                        if wp.exists():
+                            word_files = [wp]
+                    for wf in word_files:
+                        try:
+                            wlog = json.loads(wf.read_text(encoding="utf-8"))
+                        except Exception:
+                            continue
+                        its = _parse_word_items_from_response_blob((wlog or {}).get("response"))
+                        if its:
+                            items.extend([w for w in its if isinstance(w, dict)])
                     if not items:
                         continue
                     spans = compute_spans(text, items, key="word")

@@ -392,7 +392,12 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     except Exception:
                         pass
                 return
-            final_text = extract_text_from_llm_response(reading_buf) or reading_buf
+            # Normalize newlines to keep character offsets consistent with DOM mapping (<br> counts as one char)
+            final_text_raw = extract_text_from_llm_response(reading_buf) or reading_buf
+            try:
+                final_text = str(final_text_raw).replace("\r\n", "\n").replace("\r", "\n")
+            except Exception:
+                final_text = final_text_raw
 
             if not final_text or not final_text.strip():
                 # Drop skeleton on empty output
@@ -692,19 +697,11 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             except Exception:
                                 pass
 
-                        try:
-                            words_parallel_val = max(1, int(os.getenv("ARC_WORDS_PARALLEL", "1")))
-                        except Exception:
-                            words_parallel_val = 1
-                        if words_parallel_val <= 1:
-                            _persist(0, text_html_, wd_res, w_messages)
-                        else:
-                            # Use the same sentence splitting as above order
-                            sent_spans2 = _split_sentences(text_html_, lang_)
-                            # Ensure mapping by start offset
-                            seg_map = {s: (s, e, seg) for (s, e, seg) in sent_spans2}
-                            for s, seg, tup, msgs_used in wd_seg_results:
-                                _persist(s, seg, tup, msgs_used)
+                        # We always split by sentences above and collected results in wd_seg_results;
+                        # persist each segment result. This avoids undefined variables and keeps behavior consistent
+                        # regardless of ARC_WORDS_PARALLEL at persistence time.
+                        for s, seg, tup, msgs_used in wd_seg_results:
+                            _persist(s, seg, tup, msgs_used)
                     except Exception:
                         pass
 

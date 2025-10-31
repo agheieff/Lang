@@ -81,7 +81,8 @@ def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
     # Avoid any leading whitespace before content to keep span offsets aligned with DOM
     return (
         f'<div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">{html_content}</div>'
-        '<div class="mt-4 flex items-center gap-3">'
+        '<div class="mt-4 flex items-end w-full">'
+        '  <div class="flex items-center gap-3 flex-1">'
         '  <button id="next-btn"'
         '    hx-post="/reading/next"'
         '    hx-target="#current-reading"'
@@ -94,6 +95,12 @@ def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
         '    disabled'
         '  >Next text</button>'
         '  <span id="next-status" class="ml-3 text-sm text-gray-500">Loading next…</span>'
+        '  </div>'
+        '  <button id="see-translation-btn" type="button" class="ml-4 shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50">See translation</button>'
+        '</div>'
+        '<div id="translation-panel" class="hidden mt-4">'
+        '  <hr class="my-3">'
+        '  <div id="translation-content" class="prose max-w-none text-gray-800 whitespace-pre-wrap"></div>'
         '</div>'
         f'<script id="reading-words-json" type="application/json">{json.dumps(words_json, ensure_ascii=False)}</script>'
         '<div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>'
@@ -147,6 +154,48 @@ def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
         '      return { text_id: Number(curId||0), time_spent_ms: spent, lookups: lookups };'
         '    }catch(e){ return { text_id: Number(curId||0), time_spent_ms: 0, lookups: [] }; }'
         '  };'
+        '  try{'
+        '    var btnTr=document.getElementById("see-translation-btn");'
+        '    var panel=document.getElementById("translation-panel");'
+        '    var panelText=document.getElementById("translation-content");'
+        '    function _joinTranslations(arr){'
+        '      var out=[]; for(var i=0;i<arr.length;i++){ var t=arr[i] && arr[i].translation; if(typeof t==="string"&&t){ out.push(t); } } return out.join(" ");'
+        '    }'
+        '    function _loadCached(){'
+        '      try{'
+        '        var prefix="arc_rtt_"+String(curId)+"_";'
+        '        for(var i=0;i<localStorage.length;i++){'   
+        '          var k=localStorage.key(i); if(!k||k.indexOf(prefix)!==0) continue;'
+        '          var v=JSON.parse(localStorage.getItem(k)||"null");'
+        '          if(v && v.unit==="sentence" && Array.isArray(v.items)) return v;'
+        '        }'
+        '      }catch(e){}'
+        '      return null;'
+        '    }'
+        '    async function _fetchSentences(){'
+        '      try{'
+        '        var res=await fetch("/reading/"+String(curId)+"/translations?unit=sentence&wait=25", {headers:{"Accept":"application/json"}});'
+        '        if(!res.ok) return null; var data=await res.json();'
+        '        var tgt=(data&&data.target_lang)||"en"; var key="arc_rtt_"+String(curId)+"_"+tgt+"_sentence";'
+        '        try{ localStorage.setItem(key, JSON.stringify(data)); }catch(e){}'
+        '        return data;'
+        '      }catch(e){ return null; }'
+        '    }'
+        '    async function _toggleTranslation(){'
+        '      if(panel.classList.contains("hidden")){' 
+        '        var data=_loadCached(); if(!data) data=await _fetchSentences();'
+        '        if(!data||!Array.isArray(data.items)||!data.items.length) return;'
+        '        var full=_joinTranslations(data.items);'
+        '        panelText.textContent=full;'
+        '        panel.classList.remove("hidden");'
+        '        btnTr.textContent="Hide translation";'
+        '      } else {'
+        '        panel.classList.add("hidden");'
+        '        btnTr.textContent="See translation";'
+        '      }'
+        '    }'
+        '    if(btnTr && panel && panelText){ btnTr.addEventListener("click", _toggleTranslation); }'
+        '  }catch(e){}'
         '})();</script>'
     )
 
@@ -749,8 +798,16 @@ async def next_ready(
                         pass
                 return {"ready": True, "text_id": rt.id, "ready_reason": "manual"}
             ready, reason = _is_ready(rt)
-            if ready:
+            # If both signals are present, return immediately
+            if ready and reason == "both":
                 return {"ready": True, "text_id": rt.id, "ready_reason": reason}
+            # If we're in grace (content + one signal) but a wait deadline exists, keep waiting
+            # to allow the missing signal to arrive; only return grace once the deadline elapses.
+            if ready and reason == "grace":
+                if deadline is None or time.time() >= deadline:
+                    return {"ready": True, "text_id": rt.id, "ready_reason": reason}
+                # else: fall through to wait/retry below
+            # Otherwise (not ready yet), continue waiting below until deadline
         if deadline is None or time.time() >= deadline:
             return {"ready": False, "text_id": (rt.id if rt else None)}
         # Try to reconstruct words if content exists but words are missing

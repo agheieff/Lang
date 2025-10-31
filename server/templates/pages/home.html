@@ -83,6 +83,24 @@
           finally { textEl.dataset.wordsFetching = '0'; }
         }
       }
+
+      async function initSentenceTranslations(){
+        const textEl = document.getElementById('reading-text');
+        if (!textEl) return;
+        const textId = textEl.dataset && textEl.dataset.textId ? Number(textEl.dataset.textId) : 0;
+        if (!textId) return;
+        if (textEl.dataset.trInit === '1') return;
+        textEl.dataset.trInit = '1';
+        try{
+          const res = await fetch(`/reading/${textId}/translations?unit=sentence&wait=25`, { headers: { 'Accept': 'application/json' } });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data || !Array.isArray(data.items)) return;
+          const tgt = (data && typeof data.target_lang === 'string' && data.target_lang) ? data.target_lang : 'en';
+          const key = `arc_rtt_${textId}_${tgt}_sentence`;
+          try{ localStorage.setItem(key, JSON.stringify(data)); }catch{}
+        }catch{}
+      }
       async function fetchAndMergeWords(textEl, textId){
         try{
           const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
@@ -167,7 +185,9 @@
         }
 
         // Fallback: naive substring scan within text nodes (less reliable)
-        let wi = 0;
+        // Only for words without backend-provided spans to avoid duplicate wrapping and drift
+        const missing = Array.isArray(words) ? words.filter(w => !(Number.isInteger(w.span_start) && Number.isInteger(w.span_end))) : [];
+        let mi = 0;
         const walker = document.createTreeWalker(
           textEl,
           NodeFilter.SHOW_TEXT,
@@ -180,14 +200,12 @@
             }
           }
         );
-        while (wi < words.length && walker.nextNode()) {
+        while (mi < missing.length && walker.nextNode()) {
           let node = walker.currentNode;
           let text = node.nodeValue || '';
           let pos = 0;
-          while (wi < words.length) {
-            // Skip words already wrapped by span pass
-            if (textEl.querySelector(`[data-word-index="${wi}"]`)) { wi++; continue; }
-            const form = (words[wi].surface || '').toString();
+          while (mi < missing.length) {
+            const form = (missing[mi].surface || '').toString();
             if (!form) { wi++; continue; }
             const idx = text.indexOf(form, pos);
             if (idx === -1) break;
@@ -200,9 +218,9 @@
             span.textContent = form;
             node.parentNode.replaceChild(span, node);
             // push fallback word object for tooltip minimal info
-            container2.__wordsStore.push(words[wi]);
+            container2.__wordsStore.push(missing[mi]);
             container2.__wordCounter += 1;
-            node = after; text = after.nodeValue || ''; pos = 0; wi++;
+            node = after; text = after.nodeValue || ''; pos = 0; mi++;
           }
         }
       }
@@ -322,6 +340,7 @@
       function maybeInit(ev){
         if (ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading') {
           initWordClicks();
+          initSentenceTranslations();
         }
       }
       document.addEventListener('htmx:afterSwap', maybeInit);
