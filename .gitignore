@@ -21,6 +21,7 @@
 
 # Allow specific file patterns
 !README*
+!PLAN.md
 !LICENSE*
 !CHANGELOG*
 !CONTRIBUTING*

@@ -8,6 +8,8 @@
         - [ ] Consider if and when to switch to prompting in the target language, and not the interface one
     - [ ] Better user interests system
     - [ ] Add titles for text in LLM generation and Frontend
+    - [ ] Improve the sentence split for translations - combine short sentences, and split long ones
+        - [ ] At the same time keep the lookup by actual sentences, should be straightforward
     - [ ] LLM Backend
         - [ ] Test out for openrouter rate limits - right now everything runs on one API key
         - [ ] Allow for defining providers other than openrouter
@@ -31,7 +33,7 @@
             - [x] Basic design implementation
             - [x] Fix the bugs so that it actually works
                 - [x] Seems like sentence translation doesn't work on parsed and highlighted (clickable) words specifically
-        - [ ] Move the lookup from a request to local storage, like for words
+        - [x] Move the lookup from a request to local storage, like for words
         - [x] Coherent colors and design
         - [ ] Find the top line of the given text chunk, and display above it, irregardless of cursor position
     - [ ] Finish and test the word list viewer
@@ -41,12 +43,14 @@
         - [ ] UI for that
 - [ ] UX
     - [x] URGENT - fix the bug of shifted word tokenization
-    - [ ] TODO Fix the "Hide translation" not working
-    - [ ] Move the <hr> above the translation into the translated text div
+    - [x] Remove the login and sign up delay
+    - [x] TODO Fix the "Hide translation" not working
+    - [x] Move the <hr> above the translation into the translated text div
     - [ ] Keyboard shortcuts and making them redefinable in settings
     - [ ] BYOK in user settings
     - [ ] Model and provide choice in user settings
 - [ ] UI & Theming
+    - [ ] Add a 404 page
     - [ ] Add dark theme
     - [ ] Add a theme manager - possibility for user defined themes for each class
         - [ ] Ensure each item on the screen has a class for theme manager to work
@@ -56,6 +60,9 @@
         - [ ] Make the tiers definable on signup for starters
     - [ ] Admin panel for managing existing users and their tiers
     - [ ] Think about rate limits and permissions for different tiers
+    - [ ] Add Sign in with Google
+        - [ ] Last used (in local storage or something)
+    - [ ] Check the error messages in the UI on 409, 422, etc
 - [ ] Gamification
     - [ ] Max's idea - adapt the progression to the style of the user
     - [ ] -//- Choose your own adventure RPG
