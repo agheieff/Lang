@@ -29,7 +29,7 @@
          hx-swap="innerHTML"
          hx-target="#current-reading"
          hx-disinherit="*"
-         hx-select="*"
+         hx-select="#reading-block"
          data-lang="{{ profile_lang or '' }}">
       <div class="animate-pulse space-y-3" aria-hidden="true">
         <div class="h-4 bg-gray-200 rounded w-3/4"></div>
@@ -40,6 +40,43 @@
     </div>
     <script>
     (function(){
+      // Enable the "Next text" button when the next text is fully ready (words + sentences)
+      function initNextReadyPolling(){
+        const container = document.getElementById('current-reading');
+        if (!container) return;
+        const textEl = container.querySelector('#reading-text');
+        const btn = container.querySelector('#next-btn');
+        const st = container.querySelector('#next-status');
+        // Only start after a reading block is rendered (button exists)
+        if (!textEl || !btn) return;
+        const curId = String(textEl.dataset && textEl.dataset.textId || '');
+        // Avoid duplicate timers for the same rendered text
+        if (container.dataset.nextPollFor === curId) return;
+        container.dataset.nextPollFor = curId;
+        if (container.__nextPollTimer) { try { clearTimeout(container.__nextPollTimer); } catch(_) {} }
+
+        const poll = async () => {
+          try {
+            const res = await fetch('/reading/next/ready?wait=25', { headers: { 'Accept': 'application/json' } });
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.ready) {
+                if (data.ready_reason === 'both') {
+                  try { btn.disabled = false; } catch(_) {}
+                  try { if (st) { if (st.parentNode) st.parentNode.removeChild(st); else st.textContent = ''; } } catch(_) {}
+                  container.__nextPollTimer = null;
+                  return; // stop polling when fully ready
+                } else {
+                  try { btn.disabled = true; } catch(_) {}
+                  try { if (st) st.textContent = 'Preparing next...'; } catch(_) {}
+                }
+              }
+            }
+          } catch(_) {}
+          container.__nextPollTimer = setTimeout(poll, 1500);
+        };
+        poll();
+      }
       async function initWordClicks(){
         const container = document.getElementById('current-reading');
         const textEl = container && container.querySelector('#reading-text');
@@ -91,14 +128,86 @@
         if (!textId) return;
         if (textEl.dataset.trInit === '1') return;
         textEl.dataset.trInit = '1';
+        function normalize(s){ return String(s||'').replace(/[\s\u00A0]+/g,' ').trim(); }
+        function readSentenceCacheAny(){
+          try{
+            for(let i=0;i<localStorage.length;i++){
+              const k = localStorage.key(i) || '';
+              if(k.startsWith(`arc_rtt_${textId}_`) && k.endsWith('_sentence')){
+                try{ const v = JSON.parse(localStorage.getItem(k) || 'null'); if(v && Array.isArray(v.items)) return { key: k, data: v }; }catch{}
+              }
+            }
+          }catch{}
+          return null;
+        }
+        function buildSentenceOffsets(plainText, items){
+          let pos = 0; const out = [];
+          for(const it of items){
+            const src = normalize(it.source);
+            if(!src){ out.push({ start: null, end: null, item: it }); continue; }
+            let foundAt = plainText.indexOf(it.source, pos);
+            if(foundAt < 0){
+              const windowEnd = Math.min(plainText.length, pos + 4000);
+              const windowStr = normalize(plainText.slice(pos, windowEnd));
+              const idxInWin = windowStr.indexOf(src);
+              if(idxInWin >= 0){
+                let i = pos, seen = 0;
+                while(i < windowEnd && seen < idxInWin){
+                  const ch = plainText[i];
+                  if(/\s/.test(ch)){ while(i < windowEnd && /\s/.test(plainText[i])) i++; seen++; }
+                  else { i++; seen++; }
+                }
+                foundAt = i;
+              }
+            }
+            if(foundAt >= 0){ const endAt = foundAt + (it.source||'').length; out.push({ start: foundAt, end: endAt, item: it }); pos = endAt; }
+            else { out.push({ start: null, end: null, item: it }); }
+          }
+          return out;
+        }
+        function deriveAndStoreCaches(data){
+          try{
+            const tgt = (data && typeof data.target_lang === 'string' && data.target_lang) ? data.target_lang : 'en';
+            const sKey = `arc_rtt_${textId}_${tgt}_sentence`;
+            try{ localStorage.setItem(sKey, JSON.stringify(data)); }catch{}
+            const textEl2 = document.getElementById('reading-text');
+            if(textEl2){
+              const plain = (function serializePlainText(root){
+                let out = ''; function walk(node){ if(!node) return; if(node.nodeType===Node.TEXT_NODE){ out += node.nodeValue||''; return; } if(node.nodeType===Node.ELEMENT_NODE){ const el=node; if(el.hasAttribute&&el.hasAttribute('data-word-index')){ out += el.textContent||''; return; } if(el.tagName==='BR'){ out+='\n'; return; } for(let c=el.firstChild;c;c=c.nextSibling){ walk(c); } } }
+                walk(root); return out; })(textEl2);
+              const mapping = buildSentenceOffsets(plain, Array.isArray(data.items)?data.items:[]);
+              // Paragraphs split by blank line
+              const paras = []; let i=0, n=plain.length;
+              while(i < n){ let s=i; while(s<n && plain[s]==='\n') s++; if(s>=n) break; let e=s; while(e<n-1 && !(plain[e]==='\n' && plain[e+1]==='\n')) e++; while(e<n && plain[e]!== '\n') e++; paras.push({start:s,end:Math.min(n,e)}); i=e; }
+              const pItems = [];
+              for(const p of paras){
+                const parts = [];
+                for(const m of mapping){ if(m.start==null||m.end==null) continue; if(m.start>=p.end) break; if(m.end<=p.start) continue; if(m.item && m.item.translation) parts.push(String(m.item.translation)); }
+                const src = String(plain.slice(p.start, p.end));
+                pItems.push({ start: p.start, end: p.end, source: src, translation: parts.join(' ') });
+              }
+              const pData = { unit: 'paragraph', target_lang: tgt, items: pItems };
+              const pKey = `arc_rtt_${textId}_${tgt}_paragraph`;
+              try{ localStorage.setItem(pKey, JSON.stringify(pData)); }catch{}
+              const tData = { unit: 'text', target_lang: tgt, items: [{ translation: (Array.isArray(data.items)?data.items:[]).map(it=>String(it.translation||'')).join(' ') }] };
+              const tKey = `arc_rtt_${textId}_${tgt}_text`;
+              try{ localStorage.setItem(tKey, JSON.stringify(tData)); }catch{}
+            }
+          }catch{}
+        }
+        try{
+          const existing = readSentenceCacheAny();
+          if(existing && existing.data && Array.isArray(existing.data.items) && existing.data.items.length){
+            deriveAndStoreCaches(existing.data);
+            return;
+          }
+        }catch{}
         try{
           const res = await fetch(`/reading/${textId}/translations?unit=sentence&wait=25`, { headers: { 'Accept': 'application/json' } });
           if (!res.ok) return;
           const data = await res.json();
           if (!data || !Array.isArray(data.items)) return;
-          const tgt = (data && typeof data.target_lang === 'string' && data.target_lang) ? data.target_lang : 'en';
-          const key = `arc_rtt_${textId}_${tgt}_sentence`;
-          try{ localStorage.setItem(key, JSON.stringify(data)); }catch{}
+          deriveAndStoreCaches(data);
         }catch{}
       }
       async function fetchAndMergeWords(textEl, textId){
@@ -134,12 +243,45 @@
         if (!el) return null;
         try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
       }
+      // Build plain text from DOM where <br> counts as a single "\n" and existing [data-word-index] spans are treated as atomic
+      function serializePlainText(root){
+        let out = '';
+        function walk(node){
+          if(!node) return;
+          if(node.nodeType === Node.TEXT_NODE){ out += node.nodeValue || ''; return; }
+          if(node.nodeType === Node.ELEMENT_NODE){
+            const el = node;
+            if(el.hasAttribute && el.hasAttribute('data-word-index')){ out += el.textContent || ''; return; }
+            if(el.tagName === 'BR'){ out += '\n'; return; }
+            for(let c = el.firstChild; c; c = c.nextSibling){ walk(c); }
+          }
+        }
+        walk(root);
+        return out;
+      }
       // Use backend-provided span offsets when available to avoid drift
       function ensureStore(){
         const container = document.getElementById('current-reading');
         if (!Array.isArray(container.__wordsStore)) container.__wordsStore = [];
         if (!container.__wordCounter) container.__wordCounter = 0;
         return container;
+      }
+      // Try a small local correction if the substring at [s,e] doesn't equal the surface
+      function _maybeAdjustSpan(root, s, e, surface){
+        try{
+          if(typeof s !== 'number' || typeof e !== 'number') return null;
+          if(!surface || !surface.length) return null;
+          const plain = serializePlainText(root);
+          const want = String(surface);
+          if(plain.slice(s, e) === want) return { s, e };
+          const maxShift = 4;
+          for(let d=-maxShift; d<=maxShift; d++){
+            const s2 = s + d; const e2 = s2 + want.length;
+            if(s2 < 0 || e2 > plain.length) continue;
+            if(plain.slice(s2, e2) === want){ return { s: s2, e: e2 }; }
+          }
+        }catch{}
+        return null;
       }
       function wrapBySpans(textEl, words){
         const container = ensureStore();
@@ -148,9 +290,20 @@
         for (let wi = 0; wi < words.length; wi++){
           const w = words[wi];
           if (!Number.isInteger(w.span_start) || !Number.isInteger(w.span_end)) continue;
-          const s = Number(w.span_start), e = Number(w.span_end);
+          let s = Number(w.span_start), e = Number(w.span_end);
           if (s<0 || e<=s) continue;
           if (textEl.querySelector(`[data-span-start="${s}"][data-span-end="${e}"]`)) continue;
+          // Small window correction to account for rare offset drift (e.g., ±2 chars)
+          try{
+            const adj = _maybeAdjustSpan(textEl, s, e, w.surface);
+            if(adj && (adj.s !== s || adj.e !== e)){
+              // Skip if an adjusted wrapper already exists
+              if(textEl.querySelector(`[data-span-start="${adj.s}"][data-span-end="${adj.e}"]`)){
+                continue;
+              }
+              s = adj.s; e = adj.e;
+            }
+          }catch{}
           const startPos = _resolveDomPosAt(textEl, s);
           const endPos = _resolveDomPosAt(textEl, e);
           if (!startPos || !endPos) continue;
@@ -206,7 +359,7 @@
           let pos = 0;
           while (mi < missing.length) {
             const form = (missing[mi].surface || '').toString();
-            if (!form) { wi++; continue; }
+            if (!form) { mi++; continue; }
             const idx = text.indexOf(form, pos);
             if (idx === -1) break;
             if (idx > 0) { node = node.splitText(idx); text = node.nodeValue || ''; }
@@ -304,7 +457,8 @@
                 lemma: w.lemma ?? null,
                 pos: w.pos ?? null,
                 span_start: (Number.isInteger(w.span_start) ? Number(w.span_start) : null),
-                span_end: (Number.isInteger(w.span_end) ? Number(w.span_end) : null)
+                span_end: (Number.isInteger(w.span_end) ? Number(w.span_end) : null),
+                ts_ms: Date.now()
               };
               container.__lookups.push(ev);
               // Persist immediately to survive reload/close
@@ -341,6 +495,7 @@
         if (ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading') {
           initWordClicks();
           initSentenceTranslations();
+          initNextReadyPolling();
         }
       }
       document.addEventListener('htmx:afterSwap', maybeInit);
