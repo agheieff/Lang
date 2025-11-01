@@ -1,6 +1,61 @@
-- Right click for sentence/paragraph/text translation
-- Integrate the srs and connect everything together
-- Integrate interests in the prompts
-- Improve the prompt for better translation
-- Improve prompts in general
-
+- [ ] Content Generation & Quality
+    - [ ] Text generation quality
+        - [ ] Overeager LLM problem
+            - [ ] Randomize the interests
+            - [ ] Randomize the word list
+        - [ ] Repetitions of the same topic
+            - [ ] Series, for a given narrow topic, save the info the user has been exposed to, and feed it into the prompt for continuation, not repetition
+        - [ ] Consider if and when to switch to prompting in the target language, and not the interface one
+    - [ ] Better user interests system
+    - [ ] Add titles for text in LLM generation and Frontend
+    - [ ] LLM Backend
+        - [ ] Test out for openrouter rate limits - right now everything runs on one API key
+        - [ ] Allow for defining providers other than openrouter
+        - [ ] Configure the model choice for the text generation
+- [ ] Testing
+    - [ ] Fixed sample of fake-llm inputs to avoid delays each time and ensure the same quality while developing
+    - [ ] Simple pytest implementation
+- [ ] Learning Systems
+    - [ ] SRS logic
+        - [ ] Test out the basic SRS logic
+        - [ ] Add sentence/paragraph/text translations into the calculation
+        - [ ] Improve the logic for separating lemma vs form issues for fusional languages for scoring
+    - [ ] Grammar
+        - [ ] Compile the list of grammar patterns for Chinese
+        - [ ] Figure out prompting for LLMs to use given grammar patterns in a sentence
+        - [ ] Come up with a scoring systems for grammar patterns
+        - [ ] Hook up the word, sentence, paragraph and text lookups to updates for the scoring system
+- [ ] Core Functionality
+    - [ ] Add sentence and paragraph translations
+        - [x] Basic functionality on rightclick
+            - [x] Basic design implementation
+            - [x] Fix the bugs so that it actually works
+                - [x] Seems like sentence translation doesn't work on parsed and highlighted (clickable) words specifically
+        - [ ] Move the lookup from a request to local storage, like for words
+        - [x] Coherent colors and design
+        - [ ] Find the top line of the given text chunk, and display above it, irregardless of cursor position
+    - [ ] Finish and test the word list viewer
+    - [ ] Add overall progress estimations and other eye candy in stats
+        - [ ] Configure the mechanisms for estimating language progress
+        - [ ] -//- for learned words, how to split the quantitative data for them into discrete categories
+        - [ ] UI for that
+- [ ] UX
+    - [x] URGENT - fix the bug of shifted word tokenization
+    - [ ] TODO Fix the "Hide translation" not working
+    - [ ] Move the <hr> above the translation into the translated text div
+    - [ ] Keyboard shortcuts and making them redefinable in settings
+    - [ ] BYOK in user settings
+    - [ ] Model and provide choice in user settings
+- [ ] UI & Theming
+    - [ ] Add dark theme
+    - [ ] Add a theme manager - possibility for user defined themes for each class
+        - [ ] Ensure each item on the screen has a class for theme manager to work
+- [ ] Come up with a project name and branding
+- [ ] Deployment & User Management
+    - [ ] Add tiers
+        - [ ] Make the tiers definable on signup for starters
+    - [ ] Admin panel for managing existing users and their tiers
+    - [ ] Think about rate limits and permissions for different tiers
+- [ ] Gamification
+    - [ ] Max's idea - adapt the progression to the style of the user
+    - [ ] -//- Choose your own adventure RPG
