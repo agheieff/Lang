@@ -40,10 +40,8 @@
           </div>
         `;
 
-        // Redirect to home page after a short delay
-        setTimeout(() => {
-          window.location.href = '/';
-        }, 1500);
+        // Redirect immediately for fastest transition
+        try { window.location.replace('/'); } catch(_) { window.location.href = '/'; }
       }
     }
   }
