@@ -120,9 +120,7 @@ def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
         '      hx-target="#current-reading"'
         '      hx-select="#reading-block"'
         '      hx-swap="innerHTML"'
-        '      hx-ext="json-enc"'
-        '      hx-headers=\'{"Content-Type":"application/json"}\''
-        '      hx-vals="js:window.arcBuildNextParams && window.arcBuildNextParams()"'
+        '      hx-on--config-request="(function(){try{var p=(window.arcBuildNextParams&&window.arcBuildNextParams())||{};event.detail.headers=event.detail.headers||{};event.detail.headers[\'Content-Type\']=\'application/json\';event.detail.body=JSON.stringify(p);}catch(e){}})()"'
         '      class="px-4 py-2 rounded-lg transition-colors text-white bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"'
         '      disabled aria-disabled="true">Next text</button>'
         '    <span id="next-status" class="ml-3 text-sm text-gray-500" aria-live="polite">Loading next…</span>'
@@ -169,6 +167,11 @@ async def current_reading_block(
         )
 
     _sel = SelectionService()
+    # Ensure something is queued or in progress (non-blocking; respects unopened/pending requests)
+    try:
+        GenerationOrchestrator().ensure_text_available(db, account.id, prof.lang)
+    except Exception:
+        logger.debug("ensure_text_available failed in current_reading_block", exc_info=True)
 
     def _pick_or_start() -> Optional[ReadingText]:
         return _sel.pick_current_or_new(db, account.id, prof.lang)
@@ -218,6 +221,21 @@ async def current_reading_block(
               </div>
             '''
         )
+
+    # Mark as opened on first render and pre-queue the next if none is in flight
+    try:
+        if getattr(text_obj, "opened_at", None) is None:
+            text_obj.opened_at = datetime.utcnow()
+            db.commit()
+            try:
+                GenerationOrchestrator().ensure_text_available(db, account.id, prof.lang)
+            except Exception:
+                logger.debug("ensure_text_available failed post-open in current_reading_block", exc_info=True)
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     text_id = text_obj.id
     text_html = _safe_html(text_obj.content)

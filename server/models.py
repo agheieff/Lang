@@ -340,6 +340,18 @@ class LLMModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class NextReadyOverride(Base):
+    __tablename__ = "next_ready_overrides"
+    __table_args__ = (
+        UniqueConstraint("account_id", "lang", name="uq_nro_account_lang"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
+    lang: Mapped[str] = mapped_column(String(16), index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+
+
 # LanguageWordList removed - word lists are generated dynamically from user lexemes
 
 

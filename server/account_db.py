@@ -36,6 +36,8 @@ PER_ACCOUNT_TABLES = {
     "reading_word_glosses",
     "translation_logs",
     "reading_lookups",
+    # readiness override
+    "next_ready_overrides",
     # request logs
     "llm_request_logs",
     # curated/user-specific lists
