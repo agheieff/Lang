@@ -1,6 +1,8 @@
-Now please translate this text into English. Please output valid json, with this schema:
+Now please translate this text into English. Please output valid json, with this schema (include title too):
 
 {
+    "title": "去公园散步",
+    "title_translation": "A walk in the park",
     "text": [
         {
             "paragraph": [

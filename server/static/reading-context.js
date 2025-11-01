@@ -342,10 +342,57 @@
     });
   }
 
-  function init(){ registerRule(); }
+  // Title: build translation from embedded title words
+  function loadEmbeddedTitleWords(){
+    try{
+      const el = document.getElementById('reading-title-words-json');
+      if(!el) return [];
+      const data = JSON.parse(el.textContent || '[]');
+      return Array.isArray(data) ? data : [];
+    }catch(_e){ return []; }
+  }
+
+  function buildTitleTranslation(){
+    const words = loadEmbeddedTitleWords();
+    if(!words || !words.length) return null;
+    const parts = [];
+    for(const w of words){
+      if(w && typeof w.translation === 'string' && w.translation.trim()){
+        parts.push(String(w.translation).trim());
+      }
+    }
+    if(!parts.length) return null;
+    return parts.join(' ');
+  }
+
+  function showTitleTranslationAtEvent(ev){
+    const tr = buildTitleTranslation();
+    if(!tr){
+      showPopupAt(ev.clientX, ev.clientY, '<div class="text-gray-500">No translation available yet.</div>', { maxWidth: '520px' });
+      return;
+    }
+    const html = `<div class="text-sm">${escapeHtml(tr)}</div>`;
+    showPopupAt(ev.clientX, ev.clientY, html, { maxWidth: '520px' });
+  }
+
+  function registerTitleRule(){
+    if(!window.arcContextMenu) return;
+    const titleEl = document.getElementById('reading-title');
+    if(!titleEl) return;
+    if(window.__arcCtxUnregTitle){ try{ window.__arcCtxUnregTitle(); }catch(_e){} }
+    window.__arcCtxUnregTitle = window.arcContextMenu.register({
+      selector: '#reading-title',
+      when: () => true,
+      items: (ctx) => [
+        { label: 'Translate title', onClick: () => showTitleTranslationAtEvent(ctx.event) },
+      ]
+    });
+  }
+
+  function init(){ registerRule(); registerTitleRule(); }
 
   ready(init);
   document.addEventListener('htmx:afterSwap', function(ev){
-    if(ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading'){ registerRule(); }
+    if(ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading'){ registerRule(); registerTitleRule(); }
   });
 })();

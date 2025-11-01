@@ -18,6 +18,7 @@ from ..utils.json_parser import (
     extract_text_from_llm_response,
     extract_structured_translation,
     extract_word_translations,
+    extract_json_from_text,
 )
 from ..llm.client import _strip_thinking_blocks, _pick_openrouter_model, chat_complete_with_raw
 import threading
@@ -399,6 +400,13 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
             except Exception:
                 final_text = final_text_raw
 
+            # Extract optional title for this reading (ignored by UI; used for words_0.json only)
+            try:
+                _title_val = extract_json_from_text(reading_buf, "title")
+                reading_title = (str(_title_val) if _title_val is not None else None)
+            except Exception:
+                reading_title = None
+
             if not final_text or not final_text.strip():
                 # Drop skeleton on empty output
                 try:
@@ -458,6 +466,8 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                 base_url_: Optional[str],
                 job_dir_path: Path,
                 reading_messages: List[Dict],
+                reading_title: Optional[str] = None,
+                reading_raw: Optional[str] = None,
             ):
                 db2 = _account_session(account_id_)
                 try:
@@ -475,6 +485,15 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     )
                     tr_messages = ctx2["structured"]
                     w_messages = ctx2["words"]
+                    # Use the full first response (may include title) as assistant context
+                    try:
+                        full_assistant = reading_raw if (reading_raw and str(reading_raw).strip()) else text_html_
+                        if isinstance(tr_messages, list) and len(tr_messages) > 2:
+                            tr_messages[2]["content"] = full_assistant
+                        if isinstance(w_messages, list) and len(w_messages) > 2:
+                            w_messages[2]["content"] = full_assistant
+                    except Exception:
+                        pass
 
                     # Run structured + words (optionally per-sentence) concurrently
                     from concurrent.futures import ThreadPoolExecutor
@@ -548,6 +567,39 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     tr_res = None
                     wd_seg_results: List[Tuple[int, str, Optional[tuple[str, Dict, str, Optional[str]]], List[Dict]]] = []
 
+                    # 0) Optional: translate title words and save to words_0.json; do not persist to DB
+                    if reading_title and str(reading_title).strip():
+                        try:
+                            title_msgs = build_word_translation_prompt(lang_, target_lang2, reading_title)
+                            title_ctx = [
+                                {"role": "system", "content": title_msgs[0]["content"]},
+                                {"role": "user", "content": reading_user_content2},
+                                {"role": "assistant", "content": (reading_raw if (reading_raw and str(reading_raw).strip()) else text_html_)},
+                                {"role": "user", "content": title_msgs[1]["content"]},
+                            ]
+                            try:
+                                tup_title = _attempt_words(title_ctx, job_dir_path / "words_0.json")
+                            except Exception:
+                                tup_title = None
+                            # Log distinctly so DB-based reconstruction won't consider it
+                            try:
+                                _log_llm_request(
+                                    db2,
+                                    account_id=account_id_,
+                                    text_id=text_id_,
+                                    kind="title_word_translation",
+                                    provider=provider_,
+                                    model=model_id_,
+                                    base_url=base_url_,
+                                    messages=title_ctx,
+                                    resp=(tup_title[1] if tup_title else None),
+                                    status="ok",
+                                )
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
                     sent_spans = _split_sentences(text_html_, lang_)
                     # Build per-sentence messages preserving reading context
                     per_msgs: List[Tuple[int, str, List[Dict]]] = []
@@ -556,7 +608,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                         words_ctx = [
                             {"role": "system", "content": msgs[0]["content"]},
                             {"role": "user", "content": reading_user_content2},
-                            {"role": "assistant", "content": text_html_},
+                            {"role": "assistant", "content": (reading_raw if (reading_raw and str(reading_raw).strip()) else text_html_)},
                             {"role": "user", "content": msgs[1]["content"]},
                         ]
                         per_msgs.append((s, seg, words_ctx))
@@ -567,7 +619,8 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             fut_tr = ex.submit(_call_structured)
                             for i, (s, seg, m) in enumerate(per_msgs):
                                 try:
-                                    tup = _attempt_words(m, job_dir_path / f"words_{i}.json")
+                                    # Shift by +1 so words_1 is the first sentence
+                                    tup = _attempt_words(m, job_dir_path / f"words_{i+1}.json")
                                 except Exception:
                                     tup = None
                                 wd_seg_results.append((s, seg, tup, m))
@@ -578,7 +631,8 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             fut_tr = ex.submit(_call_structured)
                             futs = []
                             for i, (s, seg, m) in enumerate(per_msgs):
-                                futs.append((s, seg, m, ex.submit(_attempt_words, m, job_dir_path / f"words_{i}.json")))
+                                # Shift by +1 so words_1 is the first sentence
+                                futs.append((s, seg, m, ex.submit(_attempt_words, m, job_dir_path / f"words_{i+1}.json")))
                             tr_res = fut_tr.result()
                             for s, seg, m, f in futs:
                                 try:
@@ -730,7 +784,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
 
             threading.Thread(
                 target=_finish_translations,
-                args=(account_id, lang, rt.id, final_text, (chosen_provider or "openrouter"), chosen_model, chosen_base, job_dir, messages),
+                args=(account_id, lang, rt.id, final_text, (chosen_provider or "openrouter"), chosen_model, chosen_base, job_dir, messages, reading_title, reading_buf),
                 daemon=True,
             ).start()
 

@@ -183,6 +183,8 @@ def _reconstruct_from_file_logs(
                     items: List[Dict[str, Any]] = []
                     # Prefer any words_*.json files; fall back to words.json
                     word_files = list(sorted(job.glob("words_*.json")))
+                    # Skip title translation file words_0.json; UI spans map only to body text
+                    word_files = [wf for wf in word_files if wf.name != "words_0.json"]
                     if not word_files:
                         wp = job / "words.json"
                         if wp.exists():

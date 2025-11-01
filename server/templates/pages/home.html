@@ -80,24 +80,33 @@
       async function initWordClicks(){
         const container = document.getElementById('current-reading');
         const textEl = container && container.querySelector('#reading-text');
+        const titleEl = container && container.querySelector('#reading-title');
+        if (!Array.isArray(container.__wordsStore)) container.__wordsStore = [];
+
+        // Initialize title words (clickable via fallback substring scan)
+        if (titleEl && titleEl.dataset.titleWordsInit !== '1'){
+          titleEl.dataset.titleWordsInit = '1';
+          const tw = getEmbeddedTitleWords();
+          if (Array.isArray(tw) && tw.length) {
+            makeClickable(titleEl, tw);
+            attachTooltip(titleEl, tw);
+          }
+        }
+
+        // Initialize body text words as before
         if (!textEl) return;
         const textId = textEl.dataset.textId;
         if (!textId) return;
-        // Prevent duplicate initializations for the same rendered block
         if (textEl.dataset.wordsInit === '1') return;
         textEl.dataset.wordsInit = '1';
         if (textEl.querySelector('[data-word-index]')) return;
-        // Ensure store for dynamic merges
-        if (!Array.isArray(container.__wordsStore)) container.__wordsStore = [];
         const embedded = getEmbeddedWords();
         let words = Array.isArray(embedded) ? embedded : [];
         if (words && words.length) {
           makeClickable(textEl, words);
           attachTooltip(textEl, words);
-          // Always fetch latest to merge any late-arriving spans
           try { await fetchAndMergeWords(textEl, Number(textId)); } catch {}
         } else {
-          // Long-poll for words (single request held server-side until available or timeout)
           try {
             if (textEl.dataset.wordsFetching === '1') return;
             textEl.dataset.wordsFetching = '1';
@@ -109,7 +118,6 @@
                 makeClickable(textEl, ws);
                 attachTooltip(textEl, ws);
               } else {
-                // Auto-retry until words arrive (best-effort)
                 if (!textEl.dataset.wordsPolling) {
                   textEl.dataset.wordsPolling = '1';
                   pollWords(textEl, Number(textId));
@@ -240,6 +248,11 @@
       }
       function getEmbeddedWords(){
         const el = document.getElementById('reading-words-json');
+        if (!el) return null;
+        try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
+      }
+      function getEmbeddedTitleWords(){
+        const el = document.getElementById('reading-title-words-json');
         if (!el) return null;
         try { return JSON.parse(el.textContent || '[]'); } catch { return null; }
       }

@@ -22,6 +22,8 @@ from ..models import (
     ReadingTextTranslation,
     ReadingWordGloss,
 )
+from ..models import LLMRequestLog
+from ..utils.json_parser import extract_json_from_text, extract_word_translations
 from ..schemas.reading import LookupEvent, NextPayload
 from ..services.selection_service import SelectionService
 from ..services.readiness_service import ReadinessService
@@ -106,40 +108,44 @@ def _words_json(rows):
     ]
 
 
-def _render_reading_block(text_id: int, html_content: str, words_rows) -> str:
+def _render_reading_block(text_id: int, html_content: str, words_rows, title_html: str | None = None, title_words: Optional[list] = None) -> str:
     words_json = _words_json(words_rows)
     json_text = json.dumps(words_json, ensure_ascii=False).replace('</', '<\\/')
+    title_part = (f'<h2 id="reading-title" class="text-2xl font-bold mb-3">{title_html}</h2>' if title_html else '')
+    title_words_json = json.dumps(title_words or [], ensure_ascii=False).replace('</', '<\\/')
     # Avoid any leading whitespace before content to keep span offsets aligned with DOM
     return (
         '<div id="reading-block">'
-        f'<div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">{html_content}</div>'
-        '<div class="mt-4 flex items-end w-full">'
-        '  <div class="flex items-center gap-3 flex-1">'
-        '    <button id="next-btn"'
-        '      hx-post="/reading/next"'
-        '      hx-target="#current-reading"'
-        '      hx-select="#reading-block"'
-        '      hx-swap="innerHTML"'
-        '      hx-on--config-request="(function(){try{var p=(window.arcBuildNextParams&&window.arcBuildNextParams())||{};event.detail.headers=event.detail.headers||{};event.detail.headers[\'Content-Type\']=\'application/json\';event.detail.body=JSON.stringify(p);}catch(e){}})()"'
-        '      class="px-4 py-2 rounded-lg transition-colors text-white bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"'
-        '      disabled aria-disabled="true">Next text</button>'
-        '    <span id="next-status" class="ml-3 text-sm text-gray-500" aria-live="polite">Loading next…</span>'
-        '  </div>'
-        '  <button id="see-translation-btn" type="button"'
-        '    class="ml-4 shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"'
-        '    onclick="window.arcToggleTranslation && window.arcToggleTranslation(event)"'
-        '    aria-expanded="false">See translation</button>'
-        '</div>'
-        '<div id="translation-panel" class="hidden mt-4" hidden>'
-        '  <div id="translation-content" class="prose max-w-none text-gray-800">'
-        '    <hr class="my-3">'
-        '    <div id="translation-text" class="whitespace-pre-wrap"></div>'
-        '  </div>'
-        '</div>'
-        f'<script id="reading-words-json" type="application/json">{json_text}</script>'
-        '<div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>'
-        '<script src="/static/reading.js" defer></script>'
-        '</div>'
+        + title_part
+        + f'<div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">{html_content}</div>'
+        + '<div class="mt-4 flex items-end w-full">'
+        + '  <div class="flex items-center gap-3 flex-1">'
+        + '    <button id="next-btn"'
+        + '      hx-post="/reading/next"'
+        + '      hx-target="#current-reading"'
+        + '      hx-select="#reading-block"'
+        + '      hx-swap="innerHTML"'
+        + '      hx-on--config-request="(function(){try{var p=(window.arcBuildNextParams&&window.arcBuildNextParams())||{};event.detail.headers=event.detail.headers||{};event.detail.headers[\'Content-Type\']=\'application/json\';event.detail.body=JSON.stringify(p);}catch(e){}})()"'
+        + '      class="px-4 py-2 rounded-lg transition-colors text-white bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"'
+        + '      disabled aria-disabled="true">Next text</button>'
+        + '    <span id="next-status" class="ml-3 text-sm text-gray-500" aria-live="polite">Loading next…</span>'
+        + '  </div>'
+        + '  <button id="see-translation-btn" type="button"'
+        + '    class="ml-4 shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"'
+        + '    onclick="window.arcToggleTranslation && window.arcToggleTranslation(event)"'
+        + '    aria-expanded="false">See translation</button>'
+        + '</div>'
+        + '<div id="translation-panel" class="hidden mt-4" hidden>'
+        + '  <div id="translation-content" class="prose max-w-none text-gray-800">'
+        + '    <hr class="my-3">'
+        + '    <div id="translation-text" class="whitespace-pre-wrap"></div>'
+        + '  </div>'
+        + '</div>'
+        + f'<script id="reading-words-json" type="application/json">{json_text}</script>'
+        + (f'<script id="reading-title-words-json" type="application/json">{title_words_json}</script>' if (title_html and title_words_json) else '')
+        + '<div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>'
+        + '<script src="/static/reading.js" defer></script>'
+        + '</div>'
     )
 
 
@@ -240,6 +246,93 @@ async def current_reading_block(
     text_id = text_obj.id
     text_html = _safe_html(text_obj.content)
 
+    # Best-effort: extract title from latest reading log for this text
+    title_html: Optional[str] = None
+    title_words_list: list = []
+    try:
+        row = (
+            db.query(LLMRequestLog)
+            .filter(
+                LLMRequestLog.account_id == account.id,
+                LLMRequestLog.text_id == text_id,
+                LLMRequestLog.kind == "reading",
+                LLMRequestLog.status == "ok",
+            )
+            .order_by(LLMRequestLog.created_at.desc())
+            .first()
+        )
+        if row and getattr(row, "response", None):
+            raw = row.response
+            content_str: Optional[str] = None
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict):
+                    try:
+                        ch = obj.get("choices")
+                        if isinstance(ch, list) and ch:
+                            msg = ch[0].get("message") if isinstance(ch[0], dict) else None
+                            if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                                content_str = msg.get("content")
+                    except Exception:
+                        content_str = None
+                    if content_str is None and isinstance(obj.get("content"), str):
+                        content_str = obj.get("content")
+                if content_str is None:
+                    content_str = raw if isinstance(raw, str) else None
+            except Exception:
+                content_str = raw if isinstance(raw, str) else None
+            if content_str:
+                t = extract_json_from_text(content_str, "title")
+                if t is not None:
+                    title_html = _safe_html(str(t))
+    except Exception:
+        title_html = None
+
+    # Best-effort: extract title words from dedicated title word translation log
+    try:
+        row2 = (
+            db.query(LLMRequestLog)
+            .filter(
+                LLMRequestLog.account_id == account.id,
+                LLMRequestLog.text_id == text_id,
+                LLMRequestLog.kind == "title_word_translation",
+                LLMRequestLog.status == "ok",
+            )
+            .order_by(LLMRequestLog.created_at.desc())
+            .first()
+        )
+        if row2 and getattr(row2, "response", None):
+            try:
+                obj = json.loads(row2.response)
+            except Exception:
+                obj = row2.response
+            content2 = None
+            try:
+                if isinstance(obj, dict):
+                    choices = obj.get("choices")
+                    if isinstance(choices, list) and choices:
+                        msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+                        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                            content2 = msg.get("content")
+                if content2 is None and isinstance(obj, str):
+                    content2 = obj
+            except Exception:
+                content2 = None
+            if content2:
+                parsed = extract_word_translations(content2)
+                if parsed and isinstance(parsed.get("words"), list):
+                    # Do not include spans for title since it's outside #reading-text
+                    ws = [w for w in parsed.get("words", []) if isinstance(w, dict)]
+                    for w in ws:
+                        try:
+                            w.pop("span_start", None)
+                            w.pop("span_end", None)
+                        except Exception:
+                            pass
+                    title_words_list = ws
+    except Exception:
+        pass
+
     # Include words immediately if available; otherwise the client will subscribe via SSE and update when ready
     rows = (
         db.query(ReadingWordGloss)
@@ -247,7 +340,7 @@ async def current_reading_block(
         .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
         .all()
     )
-    inner = _render_reading_block(text_id, text_html, rows)
+    inner = _render_reading_block(text_id, text_html, rows, title_html, title_words_list)
     return HTMLResponse(content=inner)
 
 ## Models moved to server.schemas.reading

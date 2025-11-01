@@ -6,5 +6,5 @@ Try to include at least some of the following words in the text: {include_words}
 Separate paragraphs with double newlines (\n\n).
 Try to make the text fit the users style and topic preferences: {preferences}
 
-Please put the text itself in json, here's an example of how to structure that:
-{"text":"今天天气很好，阳光明媚。微风轻轻吹过脸庞。\n\n我们一起去公园散步吧。"}
+Please put the title and the text itself in json, here's an example of how to structure that:
+{"title":"去公园散步","text":"今天天气很好，阳光明媚。微风轻轻吹过脸庞。\n\n我们一起去公园散步吧。"}
