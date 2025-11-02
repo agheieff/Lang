@@ -25,6 +25,14 @@ class GenerationOrchestrator:
         
         failed_texts = self.retry_service.get_failed_texts_for_retry(db, account_id, lang, limit=3)
         
+        try:
+            if not failed_texts:
+                print(f"[RETRY] No failed texts found - everything looks good!")
+            else:
+                print(f"[RETRY] Found {len(failed_texts)} failed texts, retrying: {[t.id for t in failed_texts]}")
+        except Exception:
+            pass
+        
         # Trigger retries in background threads to avoid blocking
         for text in failed_texts:
             def retry_in_background():
