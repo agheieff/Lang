@@ -469,6 +469,10 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                 reading_title: Optional[str] = None,
                 reading_raw: Optional[str] = None,
             ):
+                try:
+                    print(f"[GEN] Starting _finish_translations for text_id={text_id_} account_id={account_id_} lang={lang_}")
+                except Exception:
+                    pass
                 db2 = _account_session(account_id_)
                 try:
                     # Rebuild translation contexts
@@ -600,7 +604,15 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                         except Exception:
                             pass
 
+                    try:
+                        print(f"[GEN] Splitting sentences for text_id={text_id_}")
+                    except Exception:
+                        pass
                     sent_spans = _split_sentences(text_html_, lang_)
+                    try:
+                        print(f"[GEN] Split into {len(sent_spans)} sentences for text_id={text_id_}")
+                    except Exception:
+                        pass
                     # Build per-sentence messages preserving reading context
                     per_msgs: List[Tuple[int, str, List[Dict]]] = []
                     for (s, e, seg) in sent_spans:
@@ -776,6 +788,13 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                     except Exception:
                         pass
                     _enforce_retention(account_id_, lang_)
+                except Exception as e:
+                    try:
+                        print(f"[GEN] Exception in _finish_translations for text_id={text_id_}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    except Exception:
+                        pass
                 finally:
                     try:
                         db2.close()
