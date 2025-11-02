@@ -62,16 +62,24 @@ class RetryService:
         if not components.get("words", False) and not components.get("sentences", False):
             return (False, "no_failed_components")
         
-        # Check existing attempts
-        attempts = (
-            db.query(GenerationRetryAttempt)
-            .filter(
-                GenerationRetryAttempt.account_id == account_id,
-                GenerationRetryAttempt.text_id == text_id,
+        # Check existing attempts - handle case where table doesn't exist yet
+        attempts = []
+        try:
+            attempts = (
+                db.query(GenerationRetryAttempt)
+                .filter(
+                    GenerationRetryAttempt.account_id == account_id,
+                    GenerationRetryAttempt.text_id == text_id,
+                )
+                .order_by(GenerationRetryAttempt.attempt_number.desc())
+                .all()
             )
-            .order_by(GenerationRetryAttempt.attempt_number.desc())
-            .all()
-        )
+        except Exception as e:
+            # Table doesn't exist - this is expected for first-time use
+            if "no such table" in str(e):
+                pass
+            else:
+                raise
         
         if len(attempts) >= self.settings["max_attempts"]:
             return (False, f"max_attempts_reached ({self.settings['max_attempts']})")
