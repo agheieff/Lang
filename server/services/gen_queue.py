@@ -841,14 +841,132 @@ def retry_missing_words(account_id: int, text_id: int, log_dir: Path) -> bool:
             if not rt or not rt.content:
                 return False
             
-            # Retry word generation logic here (similar to _finish_translations but words only)
-            # ... implementation would go here ...
-            return True
+            # Load profile to get target language
+            prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
+            if not prof:
+                return False
+            target_lang = prof.target_lang or "en"
+            
+            try:
+                print(f"[RETRY] Retrying words for text_id={text_id}")
+                
+                # Load existing logs to get messages
+                text_json = log_dir / "text.json"
+                if not text_json.exists():
+                    print(f"[RETRY] No text.json found for text_id={text_id}")
+                    return False
+                
+                text_log = json.loads(text_json.read_text(encoding="utf-8"))
+                original_messages = text_log["request"]["messages"]
+                text_content = text_log["response"]["choices"][0]["message"]["content"]
+                
+                # Parse text content to get title and main text
+                import re as _re
+                text_match = _re.search(r'\{[^}]*"text":\s*"([^"]+)"', text_content)
+                main_text = text_match.group(1) if text_match else text_content
+                
+                # Split into sentences for word generation
+                from .llm.prompts import build_word_translation_prompt
+                sent_spans = _split_sentences(main_text, rt.lang)
+                
+                print(f"[RETRY] Processing {len(sent_spans)} sentences for words")
+                
+                # Setup for API calls
+                provider = "openrouter"
+                model_id = _pick_openrouter_model(None)
+                
+                # Process each sentence for word translation
+                for i, (s, e, seg) in enumerate(sent_spans):
+                    try:
+                        # Build word translation prompt
+                        title_msgs = build_word_translation_prompt(rt.lang, target_lang, seg)
+                        words_ctx = [
+                            {"role": "system", "content": title_msgs[0]["content"]},
+                            {"role": "user", "content": original_messages[1]["content"]},
+                            {"role": "assistant", "content": text_content},
+                            {"role": "user", "content": title_msgs[1]["content"]},
+                        ]
+                        
+                        # Call LLM API
+                        words_response = chat_complete_with_raw(
+                            words_ctx,
+                            provider=provider,
+                            model=model_id,
+                            max_tokens=16384,
+                        )
+                        words_buf, _ = words_response
+                        
+                        # Log the retry
+                        words_file = log_dir / f"words_retry_{i+1}.json"
+                        words_log = {
+                            "request": {
+                                "provider": provider,
+                                "model": model_id,
+                                "messages": words_ctx,
+                                "retry": True
+                            },
+                            "response": _
+                        }
+                        words_file.write_text(json.dumps(words_log, ensure_ascii=False, indent=2), encoding="utf-8")
+                        
+                        # Parse and save word translations
+                        wd_parsed = extract_word_translations(words_buf)
+                        if wd_parsed and wd_parsed.get("words"):
+                            words_list = [w for w in wd_parsed.get("words", []) if isinstance(w, dict) and w.get("word")]
+                            if words_list:
+                                spans = compute_spans(seg, words_list, key="word")
+                                
+                                for it, sp in zip(words_list, spans):
+                                    if sp is None:
+                                        continue
+                                    gs = (s + sp[0], s + sp[1])
+                                    
+                                    _pos_local = it.get("pos") if isinstance(it, dict) else None
+                                    if not _pos_local and isinstance(it, dict):
+                                        _pos_local = it.get("part_of_speech")
+                                    
+                                    db.add(ReadingWordGloss(
+                                        account_id=account_id,
+                                        text_id=text_id,
+                                        lang=rt.lang,
+                                        surface=it["word"],
+                                        lemma=(None if str(rt.lang).startswith("zh") else it.get("lemma")),
+                                        pos=_pos_local,
+                                        pinyin=it.get("pinyin"),
+                                        translation=it["translation"],
+                                        lemma_translation=it.get("lemma_translation"),
+                                        grammar=it.get("grammar", {}),
+                                        span_start=gs[0],
+                                        span_end=gs[1],
+                                    ))
+                        
+                        print(f"[RETRY] Completed word retry for sentence {i+1}/{len(sent_spans)}")
+                        
+                    except Exception as e:
+                        print(f"[RETRY] Error retrying words for sentence {i+1}: {e}")
+                        continue
+                
+                # Commit all word translations
+                db.commit()
+                print(f"[RETRY] Successfully completed word retry for text_id={text_id}")
+                return True
+                
+            except Exception as e:
+                print(f"[RETRY] Error in word retry implementation: {e}")
+                import traceback
+                traceback.print_exc()
+                db.rollback()
+                return False
         else:
+            print(f"[RETRY] Words already exist for text_id={text_id}")
             return False  # No retry needed
     except Exception as e:
         try:
             print(f"[RETRY] Error in word retry for text_id={text_id}: {e}")
+        except Exception:
+            pass
+        try:
+            db.rollback()
         except Exception:
             pass
         return False
@@ -878,14 +996,118 @@ def retry_missing_sentences(account_id: int, text_id: int, log_dir: Path) -> boo
             if not rt or not rt.content:
                 return False
             
-            # Retry sentence generation logic here (similar to _finish_translations but sentences only)
-            # ... implementation would go here ...
-            return True
+            # Load profile to get target language
+            prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
+            if not prof:
+                return False
+            target_lang = prof.target_lang or "en"
+            
+            try:
+                print(f"[RETRY] Retrying sentences for text_id={text_id}")
+                
+                # Load existing logs to get messages
+                text_json = log_dir / "text.json"
+                if not text_json.exists():
+                    print(f"[RETRY] No text.json found for text_id={text_id}")
+                    return False
+                
+                text_log = json.loads(text_json.read_text(encoding="utf-8"))
+                original_messages = text_log["request"]["messages"]
+                text_content = text_log["response"]["choices"][0]["message"]["content"]
+                
+                # Parse text content to get main text
+                import re as _re
+                text_match = _re.search(r'\{[^}]*"text":\s*"([^"]+)"', text_content)
+                main_text = text_match.group(1) if text_match else text_content
+                main_text = main_text.replace('\\n', '\n')  # Convert escaped newlines
+                
+                # Setup for API calls
+                provider = "openrouter"
+                model_id = _pick_openrouter_model(None)
+                
+                # Call structured translation API
+                from ..llm.prompts import build_translation_contexts
+                ctx = build_translation_contexts(
+                    original_messages,
+                    source_lang=rt.lang,
+                    target_lang=target_lang,
+                    text=main_text,
+                )
+                tr_messages = ctx["structured"]
+                
+                # Add the full response as context
+                if isinstance(tr_messages, list) and len(tr_messages) > 2:
+                    tr_messages[2]["content"] = text_content
+                
+                print(f"[RETRY] Calling structured translation API")
+                
+                # Call LLM API for structured translation
+                structured_response = chat_complete_with_raw(
+                    tr_messages,
+                    provider=provider,
+                    model=model_id,
+                    max_tokens=16384,
+                )
+                tr_buf, tr_resp = structured_response
+                
+                # Log the retry
+                structured_file = log_dir / "structured_retry.json"
+                structured_log = {
+                    "request": {
+                        "provider": provider,
+                        "model": model_id,
+                        "messages": tr_messages,
+                        "retry": True
+                    },
+                    "response": tr_resp
+                }
+                structured_file.write_text(json.dumps(structured_log, ensure_ascii=False, indent=2), encoding="utf-8")
+                
+                # Parse and save sentence translations
+                tr_parsed = extract_structured_translation(tr_buf)
+                if tr_parsed and tr_parsed.get("paragraphs"):
+                    target_from_response = tr_parsed.get("target_lang") or target_lang
+                    idx = 0
+                    
+                    for p in tr_parsed.get("paragraphs", []):
+                        for s in p.get("sentences", []):
+                            if "text" in s and "translation" in s:
+                                db.add(ReadingTextTranslation(
+                                    account_id=account_id,
+                                    text_id=text_id,
+                                    unit="sentence",
+                                    target_lang=target_from_response,
+                                    segment_index=idx,
+                                    span_start=None,
+                                    span_end=None,
+                                    source_text=s["text"],
+                                    translated_text=s["translation"],
+                                    provider=provider,
+                                    model=model_id,
+                                ))
+                                idx += 1
+                
+                # Commit all sentence translations
+                db.commit()
+                print(f"[RETRY] Successfully completed sentence retry for text_id={text_id}")
+                return True
+                
+            except Exception as e:
+                print(f"[RETRY] Error in sentence retry implementation: {e}")
+                import traceback
+                traceback.print_exc()
+                db.rollback()
+                return False
         else:
+            print(f"[RETRY] Sentences already exist for text_id={text_id}")
             return False  # No retry needed
     except Exception as e:
         try:
             print(f"[RETRY] Error in sentence retry for text_id={text_id}: {e}")
+        except Exception:
+            pass
+        try:
+            db.rollback()
         except Exception:
             pass
         return False

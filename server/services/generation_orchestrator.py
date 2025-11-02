@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from .gen_queue import ensure_text_available as _queue_ensure, retry_failed_components
 from .retry_service import RetryService
 from .readiness_service import ReadinessService
+import threading
 
 
 class GenerationOrchestrator:
@@ -23,35 +24,30 @@ class GenerationOrchestrator:
             pass
         
         failed_texts = self.retry_service.get_failed_texts_for_retry(db, account_id, lang, limit=3)
-        retry_results = []
         
+        # Trigger retries in background threads to avoid blocking
         for text in failed_texts:
-            try:
-                result = retry_failed_components(account_id, text.id)
-                retry_results.append({
-                    "text_id": text.id,
-                    "result": result
-                })
-                
-                if not result.get("error"):
-                    try:
-                        print(f"[RETRY] Successfully initiated retry for text_id={text.id}")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        print(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")
-                    except Exception:
-                        pass
-                        
-            except Exception as e:
+            def retry_in_background():
                 try:
-                    print(f"[RETRY] Error retrying text_id={text.id}: {e}")
-                except Exception:
-                    pass
-                retry_results.append({
-                    "text_id": text.id, 
-                    "result": {"error": str(e)}
-                })
+                    result = retry_failed_components(account_id, text.id)
+                    if result.get("error"):
+                        try:
+                            print(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            print(f"[RETRY] Successfully initiated retry for text_id={text.id}")
+                        except Exception:
+                            pass
+                            
+                except Exception as e:
+                    try:
+                        print(f"[RETRY] Error retrying text_id={text.id}: {e}")
+                    except Exception:
+                        pass
+            
+            thread = threading.Thread(target=retry_in_background, daemon=True, name=f"retry-{account_id}-{text.id}")
+            thread.start()
         
-        return retry_results
+        return [{"text_id": t.id, "status": "retry_initiated"} for t in failed_texts]
