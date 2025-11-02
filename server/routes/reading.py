@@ -669,6 +669,12 @@ async def next_ready(
 
     # Ensure something is queued
 
+    # Check and retry failed texts before queuing new ones
+    try:
+        retry_results = _gen.check_and_retry_failed_texts(db, account.id, prof.lang)
+    except Exception:
+        logger.debug("retry_failed_texts failed", exc_info=True)
+    
     # Ensure something is queued
     try:
         _gen.ensure_text_available(db, account.id, prof.lang)
@@ -697,6 +703,24 @@ async def next_ready(
                 if getattr(rt, "content", None):
                     return {"ready": True, "text_id": rt.id, "ready_reason": "manual"}
             ready, reason = _ready.evaluate(db, rt, account.id)
+            
+            # Check if text needs retry
+            needs_retry = False
+            retry_status = None
+            try:
+                failed_components = _ready.get_failed_components(db, account.id, rt.id)
+                if failed_components["words"] or failed_components["sentences"]:
+                    retry_service = _gen.retry_service
+                    can_retry, retry_reason = retry_service.can_retry(db, account.id, rt.id, failed_components)
+                    needs_retry = can_retry
+                    retry_status = {
+                        "can_retry": can_retry,
+                        "reason": retry_reason,
+                        "failed_components": failed_components
+                    }
+            except Exception:
+                logger.debug("retry status check failed", exc_info=True)
+            
             # If both signals are present, return immediately
             if ready and reason == "both":
                 return {"ready": True, "text_id": rt.id, "ready_reason": reason}
@@ -706,6 +730,16 @@ async def next_ready(
                 if deadline is None or time.time() >= deadline:
                     return {"ready": True, "text_id": rt.id, "ready_reason": reason}
                 # else: fall through to wait/retry below
+            
+            # Return retry information if waiting and retry is available
+            if needs_retry and not ready:
+                return {
+                    "ready": False, 
+                    "text_id": rt.id, 
+                    "ready_reason": "waiting",
+                    "retry_info": retry_status
+                }
+            
             # Otherwise (not ready yet), continue waiting below until deadline
         if deadline is None or time.time() >= deadline:
             return {"ready": False, "text_id": (rt.id if rt else None)}

@@ -70,6 +70,24 @@ class ReadinessService:
             pass
         return (False, "waiting")
 
+    def get_failed_components(self, db: Session, account_id: int, text_id: int) -> dict:
+        """Return dict with missing components: {'words': bool, 'sentences': bool}"""
+        if not db:
+            return {"words": False, "sentences": False}
+        
+        has_words = self._has_words(db, account_id, text_id)
+        has_sentences = self._has_sentences(db, account_id, text_id)
+        
+        return {
+            "words": not has_words,
+            "sentences": not has_sentences
+        }
+
+    def needs_retry(self, db: Session, account_id: int, text_id: int) -> bool:
+        """Check if text has any missing components that need retry"""
+        failed = self.get_failed_components(db, account_id, text_id)
+        return failed["words"] or failed["sentences"]
+
     def force_once(self, db: Session, account_id: int, lang: str, ttl_s: int = 60) -> None:
         exp = datetime.utcnow() + timedelta(seconds=max(1, int(ttl_s)))
         row = (

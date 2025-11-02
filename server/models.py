@@ -373,3 +373,30 @@ class LLMRequestLog(Base):
     response: Mapped[Optional[str]] = mapped_column(String, default=None)
     error: Mapped[Optional[str]] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GenerationRetryAttempt(Base):
+    """Track retry attempts for failed generation components."""
+    __tablename__ = "generation_retry_attempts"
+    __table_args__ = (
+        Index("ix_genretry_account_text", "account_id", "text_id"),
+        Index("ix_genretry_created", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    # Which components failed: bitmap: 1=words, 2=sentences, 4=structured (combinations allowed)
+    failed_components: Mapped[int] = mapped_column(Integer, default=0)  # bitmask: bits 0-1=words, 2-3=sentences, etc.
+    # Retry attempt number (starts at 1)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    # Overall status of this retry attempt
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|completed|failed
+    # What was actually completed in this attempt
+    completed_components: Mapped[int] = mapped_column(Integer, default=0)  # bitmask of what succeeded
+    # Error details if failed
+    error_details: Mapped[Optional[str]] = mapped_column(String, default=None)
+    # When this retry was attempted
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # When this retry completed
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
