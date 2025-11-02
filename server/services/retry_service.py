@@ -12,7 +12,24 @@ from sqlalchemy.orm import Session
 
 from ..models import GenerationRetryAttempt, ReadingText
 from .readiness_service import ReadinessService
-from .gen_queue import _job_dir, _log_dir_root
+
+
+def _job_dir(account_id: int, lang: str) -> Path:
+    """Create job directory for generation logging."""
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    base = Path.cwd() / "data" / "llm_stream_logs"
+    base.mkdir(parents=True, exist_ok=True)
+    d = base / str(int(account_id)) / lang / ts
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _log_dir_root() -> Path:
+    """Get root directory for LLM stream logs."""
+    base = os.getenv("ARC_OR_LOG_DIR", str(Path.cwd() / "data" / "llm_stream_logs"))
+    p = Path(base)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 class RetryService:

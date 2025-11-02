@@ -941,8 +941,8 @@ def retry_failed_components(account_id: int, text_id: int) -> dict:
             completed_components["sentences"] = results["sentences"]
         
         # Mark retry as completed
-        retry_service.mark_retry_completed(db, retry_record.id, completed_components, 
-                                         error_details=None if all(results[k] for k in ["words", "sentences"] else "partial_failure")
+        error_msg = None if all(results[k] for k in ["words", "sentences"]) else "partial_failure"
+        retry_service.mark_retry_completed(db, retry_record.id, completed_components, error_details=error_msg)
                                         
     except Exception as e:
         try:
