@@ -209,7 +209,8 @@ class RetryService:
                 print(f"[RETRY] Text {text.id} needs_retry={needs_retry}")
                 
                 if needs_retry:
-                    can_retry, reason = self.can_retry(db, account_id, text.id, {})
+                    failed_components = self.readiness.get_failed_components(db, account_id, text.id)
+                    can_retry, reason = self.can_retry(db, account_id, text.id, failed_components)
                     print(f"[RETRY] Text {text.id} can_retry={can_retry}, reason={reason}")
                     
                     if can_retry:
