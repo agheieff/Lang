@@ -143,7 +143,7 @@ def _render_reading_block(text_id: int, html_content: str, words_rows, title_htm
         + '</div>'
         + f'<script id="reading-words-json" type="application/json">{json_text}</script>'
         + (f'<script id="reading-title-words-json" type="application/json">{title_words_json}</script>' if (title_html and title_words_json) else '')
-        + '<div id="word-tooltip" class="hidden absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs"></div>'
+        + '<div id="word-tooltip" class="absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs hidden"></div>'
         + '<script src="/static/reading.js" defer></script>'
         + '</div>'
     )

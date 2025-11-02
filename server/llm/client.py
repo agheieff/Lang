@@ -12,6 +12,9 @@ try:
 except Exception:  # pragma: no cover - optional during dev
     _or_complete = None  # type: ignore
 
+# Global counter for LLM requests
+_llm_request_counter = 0
+
 
 def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, timeout: int = 60) -> Any:
     body = None
@@ -113,6 +116,8 @@ def chat_complete_with_raw(
 
     Mirrors chat_complete but also returns the raw provider JSON when available.
     """
+    global _llm_request_counter
+    
     # Resolve temperature from env when not provided
     if temperature is None:
         try:
@@ -124,8 +129,11 @@ def chat_complete_with_raw(
         if _or_complete is None:
             raise RuntimeError("openrouter client not available")
         model_id = _pick_openrouter_model(model)
+        request_id = _llm_request_counter
+        _llm_request_counter += 1
+        
         try:
-            print(f"[LLM] Calling provider=openrouter model={model_id} messages={len(messages)}")
+            print(f"[LLM] requesting words_{request_id}")
         except Exception:
             pass
         resp = _or_complete(
@@ -143,7 +151,7 @@ def chat_complete_with_raw(
                         content = msg.get("content")
                         if isinstance(content, str):
                             try:
-                                print(f"[LLM] Received response len={len(content)}")
+                                print(f"[LLM] received words_{request_id}")
                             except Exception:
                                 pass
                             return _strip_thinking_blocks(content), resp
@@ -154,8 +162,11 @@ def chat_complete_with_raw(
 
     # Local OpenAI-compatible API
     model_id = resolve_model(base_url, model)
+    request_id = _llm_request_counter
+    _llm_request_counter += 1
+    
     try:
-        print(f"[LLM] Calling provider=local base_url={base_url} model={model_id} messages={len(messages)}")
+        print(f"[LLM] requesting words_{request_id}")
     except Exception:
         pass
     data = {
@@ -178,7 +189,7 @@ def chat_complete_with_raw(
     if not isinstance(content, str):
         raise RuntimeError("no content in message")
     try:
-        print(f"[LLM] Received response len={len(content)}")
+        print(f"[LLM] received words_{request_id}")
     except Exception:
         pass
     return _strip_thinking_blocks(content), resp

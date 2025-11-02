@@ -435,6 +435,9 @@
       function attachTooltip(textEl, words){
         const tooltip = document.getElementById('word-tooltip');
         if (!tooltip) return;
+        
+        // Ensure tooltip is initially hidden
+        tooltip.classList.add('hidden');
         function render(w){
           const parts = [];
           if (w.surface) parts.push(`<div class="font-semibold">${escapeHtml(w.surface)}</div>`);
@@ -457,6 +460,12 @@
           if (!(t instanceof Element)) return;
           const idx = t.getAttribute('data-word-index');
           if (idx == null) return;
+          
+          // Stop propagation to prevent the global click handler from immediately hiding it
+          e.stopPropagation();
+          
+          console.log('Word clicked, idx:', idx);
+          
           const container = document.getElementById('current-reading');
           const store = (container && Array.isArray(container.__wordsStore)) ? container.__wordsStore : words;
           const w = store[Number(idx)];
@@ -493,13 +502,26 @@
           } catch {}
           tooltip.innerHTML = render(w);
           tooltip.classList.remove('hidden');
+          console.log('Showing tooltip, classes:', tooltip.className);
           positionTooltip(t);
         });
-        document.addEventListener('click', (e) => {
+        
+        // Use a separate function for the global click handler
+        function handleGlobalClick(e) {
           const el = e.target;
-          if (tooltip.contains(el) || (textEl.contains(el) && el.getAttribute && el.getAttribute('data-word-index') != null)) return;
+          // Check if click is on tooltip or on a word span
+          if (tooltip.contains(el) || (textEl.contains(el) && el.getAttribute && el.getAttribute('data-word-index') != null)) {
+            console.log('Click on tooltip or word, not hiding');
+            return;
+          }
+          console.log('Global click hiding tooltip');
           tooltip.classList.add('hidden');
-        });
+          console.log('Hiding tooltip, classes:', tooltip.className);
+        }
+        
+        // Remove any existing global click listener to prevent duplicates
+        document.removeEventListener('click', handleGlobalClick);
+        document.addEventListener('click', handleGlobalClick);
         function escapeHtml(s){
           return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
         }
