@@ -200,12 +200,30 @@ class RetryService:
         )
         
         failed_texts = []
-        for text in texts:
-            if self.readiness.needs_retry(db, account_id, text.id):
-                can_retry, reason = self.can_retry(db, account_id, text.id, {})
-                if can_retry:
-                    failed_texts.append(text)
-                    if len(failed_texts) >= limit:
-                        break
-        
+        try:
+            print(f"[RETRY] Found {len(texts)} unopened texts with content")
+            for text in texts:
+                print(f"[RETRY] Checking text_id={text.id} for retry needs")
+                
+                needs_retry = self.readiness.needs_retry(db, account_id, text.id)
+                print(f"[RETRY] Text {text.id} needs_retry={needs_retry}")
+                
+                if needs_retry:
+                    can_retry, reason = self.can_retry(db, account_id, text.id, {})
+                    print(f"[RETRY] Text {text.id} can_retry={can_retry}, reason={reason}")
+                    
+                    if can_retry:
+                        failed_texts.append(text)
+                        print(f"[RETRY] Adding text {text.id} to retry queue")
+                        if len(failed_texts) >= limit:
+                            break
+                    else:
+                        print(f"[RETRY] Text {text.id} cannot retry: {reason}")
+                else:
+                    print(f"[RETRY] Text {text.id} does not need retry")
+        except Exception as e:
+            print(f"[RETRY] Error in failed text detection: {e}")
+            import traceback
+            traceback.print_exc()
+                
         return failed_texts
