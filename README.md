@@ -1,5 +1,7 @@
 # Arcadia Lang
 
+### DISCLAIMER: It doesn't work, there is no stable version. Come back later
+
 A click-to-translate web application for language learning, featuring pluggable language parsing and dictionary providers with intelligent spaced repetition.
 
 ## Overview
