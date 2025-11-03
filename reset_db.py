@@ -1,5 +1,5 @@
 """Development utility to reset the database and per-account DBs.
-Also removes local LLM generation logs under ARC_OR_LOG_DIR (or data/llm_stream_logs).
+Also removes local LLM generation logs and session logs under ARC_OR_LOG_DIR (or data/llm_stream_logs and data/session_logs).
 """
 import os
 import sys
@@ -14,6 +14,9 @@ from server.account_db import _ACCOUNTS_DIR
 
 # LLM generation logs directory
 LOG_DIR = Path(os.getenv("ARC_OR_LOG_DIR") or (Path.cwd() / "data" / "llm_stream_logs"))
+
+# Session logs directory  
+SESSION_LOG_DIR = Path(os.getenv("ARC_OR_LOG_DIR") or (Path.cwd() / "data" / "session_logs"))
 
 if __name__ == "__main__":
     print("Current database info:")
@@ -31,6 +34,7 @@ if __name__ == "__main__":
 
     # Show LLM logs dir
     print(f"  LLM logs dir: {LOG_DIR} {'(exists)' if LOG_DIR.exists() else '(missing)'}")
+    print(f"  Session logs dir: {SESSION_LOG_DIR} {'(exists)' if SESSION_LOG_DIR.exists() else '(missing)'}")
 
     response = input("\nReset ALL databases? This will DELETE ALL DATA (y/N): ")
     if response.lower() == 'y':
@@ -74,6 +78,14 @@ if __name__ == "__main__":
                 print(f"✓ Deleted LLM logs directory: {LOG_DIR}")
             except Exception as e:
                 print(f"! Failed to delete LLM logs: {e}")
+
+        # Delete session logs directory
+        if SESSION_LOG_DIR.exists():
+            try:
+                shutil.rmtree(SESSION_LOG_DIR)
+                print(f"✓ Deleted session logs directory: {SESSION_LOG_DIR}")
+            except Exception as e:
+                print(f"! Failed to delete session logs: {e}")
 
         # Delete any local cookie jar used by CLI tools
         try:

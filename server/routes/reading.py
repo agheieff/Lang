@@ -121,11 +121,7 @@ def _render_reading_block(text_id: int, html_content: str, words_rows, title_htm
         + '<div class="mt-4 flex items-end w-full">'
         + '  <div class="flex items-center gap-3 flex-1">'
         + '    <button id="next-btn"'
-        + '      hx-post="/reading/next"'
-        + '      hx-target="#current-reading"'
-        + '      hx-select="#reading-block"'
-        + '      hx-swap="innerHTML"'
-        + '      hx-on--config-request="(function(){try{var p=(window.arcBuildNextParams&&window.arcBuildNextParams())||{};event.detail.headers=event.detail.headers||{};event.detail.headers[\'Content-Type\']=\'application/json\';event.detail.body=JSON.stringify(p);}catch(e){}})()"'
+        + '      onclick="window.handleNextText()"'
         + '      class="px-4 py-2 rounded-lg transition-colors text-white bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"'
         + '      disabled aria-disabled="true">Next text</button>'
         + '    <span id="next-status" class="ml-3 text-sm text-gray-500" aria-live="polite">Loading next…</span>'
@@ -357,19 +353,38 @@ async def next_text(
     if not prof:
         raise HTTPException(400, "profile not found")
 
-    # Parse JSON manually if needed
+    # Parse JSON or form data 
+    session_data = None
     try:
-        if req is None and (request.headers.get("content-type", "").lower().startswith("application/json")):
+        # Try to get from form first
+        if request.headers.get("content-type", "").lower().startswith("application/x-www-form-urlencoded"):
+            form_data = await request.form()
+            session_data_str = form_data.get("session_data")
+            if session_data_str:
+                logger.info(f"Received session data from form")
+                session_data = json.loads(session_data_str)
+        
+        # If no form data, try JSON
+        if session_data is None and (request.headers.get("content-type", "").lower().startswith("application/json")):
             try:
                 data = await request.json()
+                # Log the received data for debugging
+                logger.info(f"Received next text payload: {data}")
                 req = NextPayload(**data)  # type: ignore[arg-type]
-            except Exception:
-                req = None
-    except Exception:
-        req = req
+            except Exception as e:
+                # If NextPayload validation fails, try using raw data
+                logger.warning(f"NextPayload validation failed, using raw data: {e}")
+                session_data = data
+    except Exception as e:
+        logger.warning(f"Failed to parse request data: {e}")
+    
+    # Process session data whether from form or JSON
+    if session_data:
+        ProgressService().record_session(db, account.id, session_data)
 
     # Record analytics (Phase 0: structured log only)
-    ProgressService().record_session(db, account.id, req)
+    if req is not None:
+        ProgressService().record_session(db, account.id, req)
 
     # Mark current as read
     ProgressService().complete_and_mark_read(db, account.id, getattr(prof, "current_text_id", None))
@@ -391,6 +406,7 @@ async def next_text(
         return RedirectResponse(url="/reading/current", status_code=303)
     if request.headers.get("accept", "").lower().find("application/json") >= 0 or request.headers.get("content-type", "").lower().startswith("application/json"):
         return {"ok": True}
+    # For form submissions, always redirect
     return RedirectResponse(url="/reading/current", status_code=303)
 
 
