@@ -1,0 +1,277 @@
+"""
+Session processing service.
+Handles processing of user interaction data from local storage when user moves to next text.
+Separated from generation pipeline to maintain clear separation of concerns.
+"""
+
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+
+from sqlalchemy.orm import Session
+
+from ..models import (
+    ReadingLookup,
+    ReadingWordGloss,
+    Profile,
+    Lexeme,
+    UserLexeme,
+)
+from ..services.srs_service import SrsService
+
+
+class SessionProcessingService:
+    """
+    Processes user session data from local storage.
+    
+    This service handles:
+    - Processing word click/lookup events
+    - Updating SRS (spaced repetition system) data
+    - Recording user progress
+    - Updating user proficiency levels
+    
+    It does NOT handle:
+    - Text generation (handled by TextGenerationService)
+    - Translation generation (handled by TranslationService)
+    - Notifications (handled by NotificationService)
+    """
+    
+    def __init__(self):
+        self.srs_service = SrsService()
+    
+    def process_session_data(self, 
+                            db: Session, 
+                            account_id: int, 
+                            text_id: int,
+                            session_data: Dict[str, Any]) -> bool:
+        """
+        Process session data from a text reading session.
+        
+        Args:
+            db: Database session
+            account_id: User account ID
+            text_id: Text ID that was just completed
+            session_data: Session data from local storage containing:
+                - lookups: Word lookup events
+                - interactions: User interactions with words
+                - time_spent: Time spent on the text
+                - other metrics
+            
+        Returns:
+            True if processing succeeded, False otherwise
+        """
+        try:
+            print(f"[SESSION_PROCESSING] Processing session data for account_id={account_id} text_id={text_id}")
+            
+            # Process word lookups
+            lookups_processed = self._process_word_lookups(db, account_id, text_id, session_data.get("lookups", []))
+            
+            # Update SRS data
+            srs_updated = self._update_srs_data(db, account_id, session_data)
+            
+            # Record user progress
+            progress_updated = self._record_progress(db, account_id, text_id, session_data)
+            
+            # Update user level if needed
+            self._update_user_level(db, account_id)
+            
+            print(f"[SESSION_PROCESSING] Session processing completed: lookups={lookups_processed} srs={srs_updated} progress={progress_updated}")
+            return True
+            
+        except Exception as e:
+            print(f"[SESSION_PROCESSING] Error processing session data: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return False
+    
+    def _process_word_lookups(self, 
+                            db: Session, 
+                            account_id: int, 
+                            text_id: int, 
+                            lookups: List[Dict]) -> int:
+        """Process word lookup events from session data."""
+        processed_count = 0
+        
+        for lookup in lookups:
+            try:
+                # Extract lookup data
+                word_surface = lookup.get("word")
+                span_start = lookup.get("span_start")
+                span_end = lookup.get("span_end")
+                pos = lookup.get("pos")
+                lemma = lookup.get("lemma")
+                translations = lookup.get("translations", [])
+                timestamp = lookup.get("timestamp")
+                
+                if not word_surface or span_start is None or span_end is None:
+                    continue
+                
+                # Create lookup record
+                lookup_record = ReadingLookup(
+                    account_id=account_id,
+                    text_id=text_id,
+                    span_start=span_start,
+                    span_end=span_end,
+                    surface=word_surface,
+                    lemma=lemma,
+                    pos=pos,
+                    translations=translations,
+                    created_at=datetime.fromisoformat(timestamp) if timestamp else datetime.utcnow()
+                )
+                
+                db.add(lookup_record)
+                processed_count += 1
+                
+            except Exception as e:
+                print(f"[SESSION_PROCESSING] Error processing lookup: {e}")
+                continue
+        
+        return processed_count
+    
+    def _update_srs_data(self, db: Session, account_id: int, session_data: Dict) -> bool:
+        """Update SRS data based on session interactions."""
+        try:
+            interactions = session_data.get("interactions", [])
+            
+            for interaction in interactions:
+                word_surface = interaction.get("word")
+                event_type = interaction.get("event_type")  # "lookup", "click", "exposure"
+                timestamp = interaction.get("timestamp")
+                
+                if not word_surface or not event_type:
+                    continue
+                
+                # Get or create lexeme
+                lexeme = db.query(Lexeme).filter(
+                    Lexeme.surface == word_surface
+                ).first()
+                
+                if not lexeme:
+                    # Create new lexeme
+                    lexeme = Lexeme(
+                        surface=word_surface,
+                        lang=session_data.get("lang", "zh")
+                    )
+                    db.add(lexeme)
+                    db.flush()
+                
+                # Get or create user lexeme
+                user_lexeme = db.query(UserLexeme).filter(
+                    UserLexeme.account_id == account_id,
+                    UserLexeme.lexeme_id == lexeme.id
+                ).first()
+                
+                if not user_lexeme:
+                    user_lexeme = UserLexeme(
+                        account_id=account_id,
+                        lexeme_id=lexeme.id,
+                        lang=session_data.get("lang", "zh")
+                    )
+                    db.add(user_lexeme)
+                    db.flush()
+                
+                # Update SRS data
+                self.srs_service.update_word_data(
+                    db, 
+                    account_id, 
+                    user_lexeme.id, 
+                    event_type,
+                    datetime.fromisoformat(timestamp) if timestamp else datetime.utcnow()
+                )
+            
+            return True
+            
+        except Exception as e:
+            print(f"[SESSION_PROCESSING] Error updating SRS data: {e}")
+            return False
+    
+    def _record_progress(self, 
+                        db: Session, 
+                        account_id: int, 
+                        text_id: int, 
+                        session_data: Dict) -> bool:
+        """Record user progress metrics."""
+        try:
+            # Update text state to mark as read
+            from ..models import ReadingText
+            text = db.query(ReadingText).filter(
+                ReadingText.id == text_id,
+                ReadingText.account_id == account_id
+            ).first()
+            
+            if text:
+                text.read_at = datetime.utcnow()
+                
+                # Store additional metrics if available
+                if "time_spent" in session_data:
+                    # Could add a time_spent column to ReadingText in future
+                    pass
+                
+                if "completion_percentage" in session_data:
+                    # Could track how much of text was actually read
+                    pass
+            
+            # Update profile statistics
+            profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+            if profile:
+                # Increment texts read counter (could add to profile model)
+                pass
+            
+            return True
+            
+        except Exception as e:
+            print(f"[SESSION_PROCESSING] Error recording progress: {e}")
+            return False
+    
+    def _update_user_level(self, db: Session, account_id: int) -> None:
+        """Update user's estimated proficiency level."""
+        try:
+            # Use existing level calculation logic
+            from ..level import update_level_estimate
+            update_level_estimate(db, account_id)
+            
+        except Exception as e:
+            print(f"[SESSION_PROCESSING] Error updating user level: {e}")
+    
+    def generate_summary_report(self, 
+                               db: Session, 
+                               account_id: int, 
+                               text_id: int) -> Dict:
+        """Generate a summary of the session processing for this text."""
+        try:
+            from ..models import ReadingText, ReadingLookup
+            
+            # Get text info
+            text = db.query(ReadingText).filter(
+                ReadingText.id == text_id,
+                ReadingText.account_id == account_id
+            ).first()
+            
+            if not text:
+                return {"error": "Text not found"}
+            
+            # Count lookups
+            lookup_count = db.query(ReadingLookup).filter(
+                ReadingLookup.account_id == account_id,
+                ReadingLookup.text_id == text_id
+            ).count()
+            
+            # Get unique words
+            unique_words = db.query(ReadingLookup.surface).filter(
+                ReadingLookup.account_id == account_id,
+                ReadingLookup.text_id == text_id
+            ).distinct().count()
+            
+            return {
+                "text_id": text_id,
+                "text_length": len(text.content) if text.content else 0,
+                "lookup_count": lookup_count,
+                "unique_words_count": unique_words,
+                "read_at": text.read_at.isoformat() if text.read_at else None,
+                "opened_at": text.opened_at.isoformat() if text.opened_at else None,
+            }
+            
+        except Exception as e:
+            print(f"[SESSION_PROCESSING] Error generating summary: {e}")
+            return {"error": str(e)}

@@ -24,6 +24,7 @@
    "python-jose>=3.3.0",
    "ruff>=0.6.0",
    "requests>=2.32.5",
+   "python-multipart>=0.0.20",
 ]
 
  [project.optional-dependencies]
@@ -52,6 +53,15 @@ packages = { find = { include = ["Lang*", "server*" ] } }
 managed = true
 [tool.uv.scripts]
 serve = "uvicorn server.main:app --reload --port 8000"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.1",
+    "pytest-watch>=4.2.0",
+]
 
 ## UI is now self-contained - no external libs needed
 ## local auth is vendored under server/auth

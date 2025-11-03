@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Body, Request
 from sqlalchemy.orm import Session
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 import json
 import time
 import asyncio
@@ -30,6 +30,8 @@ from ..services.readiness_service import ReadinessService
 from ..services.reconstruction_service import ReconstructionService
 from ..services.progress_service import ProgressService
 from ..services.generation_orchestrator import GenerationOrchestrator
+from ..utils.text_segmentation import split_sentences
+from ..services.notification_service import get_notification_service
 from ..settings import get_settings
 
 
@@ -108,7 +110,7 @@ def _words_json(rows):
     ]
 
 
-def _render_reading_block(text_id: int, html_content: str, words_rows, title_html: str | None = None, title_words: Optional[list] = None) -> str:
+def _render_reading_block(text_id: int, html_content: str, words_rows, title_html: str | None = None, title_words: Optional[list] = None, title_translation: str | None = None) -> str:
     words_json = _words_json(words_rows)
     json_text = json.dumps(words_json, ensure_ascii=False).replace('</', '<\\/')
     title_part = (f'<h2 id="reading-title" class="text-2xl font-bold mb-3">{title_html}</h2>' if title_html else '')
@@ -139,7 +141,9 @@ def _render_reading_block(text_id: int, html_content: str, words_rows, title_htm
         + '</div>'
         + f'<script id="reading-words-json" type="application/json">{json_text}</script>'
         + (f'<script id="reading-title-words-json" type="application/json">{title_words_json}</script>' if (title_html and title_words_json) else '')
+        + (f'<script id="reading-title-translation" type="application/json">{json.dumps(title_translation, ensure_ascii=False) if title_translation else ""}</script>' if title_translation else '')
         + '<div id="word-tooltip" class="absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs hidden"></div>'
+        + '<script src="/static/reading-sse.js"></script>'
         + '<script src="/static/reading.js" defer></script>'
         + '</div>'
     )
@@ -155,7 +159,8 @@ async def current_reading_block(
 ):
     """Return the Current Reading block HTML.
 
-    Long-polls up to MAX_WAIT_SEC for a ready text; when found, returns HTML with embedded words JSON.
+    Uses the new generation orchestrator for cleaner state management.
+    Will show content immediately available and rely on SSE for updates.
     """
     prof = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not prof:
@@ -168,83 +173,75 @@ async def current_reading_block(
             '''
         )
 
-    _sel = SelectionService()
-    # Ensure something is queued or in progress (non-blocking; respects unopened/pending requests)
+    orchestrator = GenerationOrchestrator()
+    state_manager = orchestrator.state_manager
+    
+    # Ensure something is queued or in progress
     try:
-        GenerationOrchestrator().ensure_text_available(db, account.id, prof.lang)
+        orchestrator.ensure_text_available(db, account.id, prof.lang)
     except Exception:
         logger.debug("ensure_text_available failed in current_reading_block", exc_info=True)
 
-    def _pick_or_start() -> Optional[ReadingText]:
-        return _sel.pick_current_or_new(db, account.id, prof.lang)
-
-    # Wait for a text to be available
-    text_obj = _pick_or_start()
-    if text_obj is None:
-        text_obj = await wait_until(_pick_or_start, MAX_WAIT_SEC, db)
+    # Get the best available text
+    text_obj = state_manager.get_unopened_text(db, account.id, prof.lang)
 
     if text_obj is None:
-        return HTMLResponse(
-            content='''
-              <div class="text-center py-8"
-                   hx-get="/reading/current"
-                   hx-trigger="load, every:2s"
-                   hx-swap="innerHTML"
-                   hx-target="#current-reading"
-                   hx-select="#reading-block">
-                <div class="animate-pulse space-y-3">
-                  <div class="h-4 bg-gray-200 rounded w-3/4"></div>
-                  <div class="h-4 bg-gray-200 rounded w-5/6"></div>
-                  <div class="h-4 bg-gray-200 rounded w-2/3"></div>
-                  <div class="h-4 bg-gray-200 rounded w-4/5"></div>
+        # Check if something is generating
+        generating = state_manager.get_generating_text(db, account.id, prof.lang)
+        if generating:
+            # Show generating loader
+            return HTMLResponse(
+                content='''
+                <div id="current-reading" 
+                     data-sse-endpoint="/reading/events/sse"
+                     class="text-center py-8">
+                  <div class="animate-pulse space-y-3">
+                    <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+                    <div class="h-4 bg-gray-200 rounded w-5/6"></div>
+                    <div class="h-4 bg-gray-200 rounded w-2/3"></div>
+                    <div class="h-4 bg-gray-200 rounded w-4/5"></div>
+                  </div>
+                  <div class="mt-2 text-sm text-gray-500">Generating text…</div>
                 </div>
-                <div class="mt-2 text-sm text-gray-500">Loading text…</div>
-              </div>
-            '''
-        )
-
-    # If text is still generating, show placeholder that auto-reloads
-    if not getattr(text_obj, "content", None):
-        return HTMLResponse(
-            content='''
-              <div class="text-center py-8"
-                   hx-get="/reading/current"
-                   hx-trigger="load, every:2s"
-                   hx-swap="innerHTML"
-                   hx-target="#current-reading"
-                   hx-select="#reading-block">
-                <div class="animate-pulse space-y-3">
-                  <div class="h-4 bg-gray-200 rounded w-3/4"></div>
-                  <div class="h-4 bg-gray-200 rounded w-5/6"></div>
-                  <div class="h-4 bg-gray-200 rounded w-2/3"></div>
-                  <div class="h-4 bg-gray-200 rounded w-4/5"></div>
+                '''
+            )
+        else:
+            # Show general loading
+            return HTMLResponse(
+                content='''
+                <div id="current-reading"
+                     data-sse-endpoint="/reading/events/sse"
+                     class="text-center py-8">
+                  <div class="animate-pulse space-y-3">
+                    <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+                    <div class="h-4 bg-gray-200 rounded w-5/6"></div>
+                    <div class="h-4 bg-gray-200 rounded w-2/3"></div>
+                    <div class="h-4 bg-gray-200 rounded w-4/5"></div>
+                  </div>
+                  <div class="mt-2 text-sm text-gray-500">Loading text…</div>
                 </div>
-                <div class="mt-2 text-sm text-gray-500">Generating…</div>
-              </div>
-            '''
-        )
+                '''
+            )
 
-    # Mark as opened on first render and pre-queue the next if none is in flight
+    # Mark as opened on first render and pre-queue the next
     try:
-        if getattr(text_obj, "opened_at", None) is None:
-            text_obj.opened_at = datetime.utcnow()
-            db.commit()
-            try:
-                GenerationOrchestrator().ensure_text_available(db, account.id, prof.lang)
-            except Exception:
-                logger.debug("ensure_text_available failed post-open in current_reading_block", exc_info=True)
+        state_manager.mark_opened(db, account.id, text_obj.id)
+        # Pre-queue next text
+        orchestrator.ensure_text_available(db, account.id, prof.lang, prefetch=True)
     except Exception:
         try:
             db.rollback()
         except Exception:
             pass
 
+    # Render the text content
     text_id = text_obj.id
     text_html = _safe_html(text_obj.content)
-
-    # Best-effort: extract title from latest reading log for this text
+    
+    # Extract title and title words (existing logic)
     title_html: Optional[str] = None
     title_words_list: list = []
+    title_translation = None
     try:
         row = (
             db.query(LLMRequestLog)
@@ -281,10 +278,11 @@ async def current_reading_block(
                 t = extract_json_from_text(content_str, "title")
                 if t is not None:
                     title_html = _safe_html(str(t))
+                title_translation = extract_json_from_text(content_str, "title_translation")
     except Exception:
         title_html = None
 
-    # Best-effort: extract title words from dedicated title word translation log
+    # Extract title words
     try:
         row2 = (
             db.query(LLMRequestLog)
@@ -317,7 +315,6 @@ async def current_reading_block(
             if content2:
                 parsed = extract_word_translations(content2)
                 if parsed and isinstance(parsed.get("words"), list):
-                    # Do not include spans for title since it's outside #reading-text
                     ws = [w for w in parsed.get("words", []) if isinstance(w, dict)]
                     for w in ws:
                         try:
@@ -329,15 +326,42 @@ async def current_reading_block(
     except Exception:
         pass
 
-    # Include words immediately if available; otherwise the client will subscribe via SSE and update when ready
+    # Include words immediately if available
     rows = (
         db.query(ReadingWordGloss)
         .filter(ReadingWordGloss.account_id == account.id, ReadingWordGloss.text_id == text_id)
         .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
         .all()
     )
-    inner = _render_reading_block(text_id, text_html, rows, title_html, title_words_list)
-    return HTMLResponse(content=inner)
+    
+    # Check if translations are ready
+    is_fully_ready = len(rows) > 0 or state_manager.is_ready(db, account.id, text_id)
+    
+    # Add SSE endpoint and state to help client
+    sse_endpoint = f"/reading/events/sse?text_id={text_id}"
+    
+    # Render with SSE connection info
+    inner = _render_reading_block(text_id, text_html, rows, title_html, title_words_list, title_translation)
+    
+    # Wrap with SSE metadata for the client
+    content_with_sse = f'''
+        <div id="current-reading"
+             data-sse-endpoint="{sse_endpoint}"
+             data-text-id="{text_id}"
+             data-is-ready="false">
+            {inner}
+            <script id="reading-seeds" type="application/json">
+                {{
+                    "sse_endpoint": "{sse_endpoint}",
+                    "text_id": {text_id},
+                    "ready": {str(is_fully_ready).lower()},
+                    "account_id": {account.id}
+                }}
+            </script>
+        </div>
+    '''
+    
+    return HTMLResponse(content=content_with_sse)
 
 ## Models moved to server.schemas.reading
 
@@ -345,7 +369,6 @@ async def current_reading_block(
 @router.post("/reading/next")
 async def next_text(
     request: Request,
-    req: Optional[NextPayload] = Body(default=None),
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -353,50 +376,55 @@ async def next_text(
     if not prof:
         raise HTTPException(400, "profile not found")
 
-    # Parse JSON or form data 
+    # Get session data
     session_data = None
     try:
+        content_type = request.headers.get("content-type", "").lower()
+        
         # Try to get from form first
-        if request.headers.get("content-type", "").lower().startswith("application/x-www-form-urlencoded"):
+        if content_type.startswith("application/x-www-form-urlencoded"):
             form_data = await request.form()
             session_data_str = form_data.get("session_data")
             if session_data_str:
-                logger.info(f"Received session data from form")
                 session_data = json.loads(session_data_str)
         
         # If no form data, try JSON
-        if session_data is None and (request.headers.get("content-type", "").lower().startswith("application/json")):
+        elif content_type.startswith("application/json"):
             try:
                 data = await request.json()
-                # Log the received data for debugging
-                logger.info(f"Received next text payload: {data}")
-                req = NextPayload(**data)  # type: ignore[arg-type]
-            except Exception as e:
-                # If NextPayload validation fails, try using raw data
-                logger.warning(f"NextPayload validation failed, using raw data: {e}")
                 session_data = data
+            except Exception as e:
+                logger.warning(f"Failed to parse JSON data: {e}")
+                
     except Exception as e:
         logger.warning(f"Failed to parse request data: {e}")
     
     # Process session data whether from form or JSON
     if session_data:
-        ProgressService().record_session(db, account.id, session_data)
+        from ..services.session_processing_service import SessionProcessingService
+        session_service = SessionProcessingService()
+        session_service.process_session_data(db, account.id, prof.current_text_id or 0, session_data)
 
-    # Record analytics (Phase 0: structured log only)
-    if req is not None:
-        ProgressService().record_session(db, account.id, req)
-
-    # Mark current as read
-    ProgressService().complete_and_mark_read(db, account.id, getattr(prof, "current_text_id", None))
-
-    # Clear pointer and schedule next; delegate selection/rendering to GET /reading/current
+    # Use the orchestrator for state management
+    orchestrator = GenerationOrchestrator()
+    state_manager = orchestrator.state_manager
+    
+    # Mark current text as read
+    if prof.current_text_id:
+        try:
+            state_manager.mark_read(db, account.id, prof.current_text_id)
+        except Exception:
+            logger.debug("Failed to mark text as read", exc_info=True)
+    
+    # Clear pointer and schedule next
     try:
-        prof.current_text_id = None
-        db.commit()
+        state_manager.clear_current_pointer(db, account.id)
     except Exception:
-        logger.debug("failed to clear current_text_id or commit in next_text", exc_info=True)
+        logger.debug("Failed to clear current pointer", exc_info=True)
+    
+    # Ensure next text is available
     try:
-        GenerationOrchestrator().ensure_text_available(db, account.id, prof.lang)
+        orchestrator.ensure_text_available(db, account.id, prof.lang)
     except Exception:
         logger.debug("ensure_text_available failed in next_text", exc_info=True)
 
@@ -410,7 +438,29 @@ async def next_text(
     return RedirectResponse(url="/reading/current", status_code=303)
 
 
-## SSE endpoint removed in favor of async long-polling
+@router.get("/reading/events/sse")
+async def reading_events_sse(
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    """
+    SSE endpoint for real-time updates about reading events.
+    Client connects to this endpoint to get notifications about:
+    - generation_started
+    - content_ready  
+    - translations_ready
+    - generation_failed
+    """
+    prof = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not prof:
+        return Response(content="data: {\"error\": \"No profile found\"}\n\n", 
+                       media_type="text/event-stream")
+    
+    # Get the global notification service
+    notification_service = get_notification_service()
+    
+    # Create SSE stream for this account
+    return notification_service.create_sse_stream(account.id, prof.lang)
 
 
 @router.get("/reading/{text_id}/translations")
@@ -505,22 +555,7 @@ async def get_translations(
     # Best-effort span reconstruction for legacy rows without spans (do not write back; return only)
     sent_spans: list[tuple[int, int, str]] = []
     if unit == "sentence" and any(getattr(r, "span_start", None) is None or getattr(r, "span_end", None) is None for r in rows):
-        def _split_sentences(text: str, lang: str):
-            if not text:
-                return []
-            import re as _re
-            if str(lang).startswith("zh"):
-                pattern = r"[^。！？!?…]+(?:[。！？!?…]+|$)"
-            else:
-                pattern = r"[^\.!?]+(?:[\.!?]+|$)"
-            out = []
-            for m in _re.finditer(pattern, text):
-                s, e = m.span()
-                seg = (text or "")[s:e]
-                if seg and seg.strip():
-                    out.append((s, e, seg))
-            return out
-        sent_spans = _split_sentences(rt.content or "", rt.lang)
+        sent_spans = split_sentences(rt.content or "", rt.lang)
 
     def _row_item(r):
         s0 = r.span_start
@@ -775,4 +810,122 @@ async def next_ready(
         except Exception:
             logger.debug("rollback failed before selecting next in next_ready", exc_info=True)
         rt = _next_unopened()
+
+
+@router.get("/reading/next/ready/sse")
+async def next_ready_sse(
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    """Server-Sent Events endpoint for next text readiness notifications."""
+    prof = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not prof:
+        return Response(content="data: {\"ready\": false, \"text_id\": null}\n\n", 
+                       media_type="text/event-stream", 
+                       headers={"Cache-Control": "no-cache", 
+                               "Connection": "keep-alive",
+                               "Access-Control-Allow-Origin": "*"})
+
+    async def event_stream():
+        try:
+            # Send initial status
+            yield "data: {\"ready\": false, \"text_id\": null, \"status\": \"connecting\"}\n\n"
+            
+            _ready = ReadinessService()
+            _gen = GenerationOrchestrator()
+            
+            # Check and retry failed texts before queuing new ones
+            try:
+                _gen.check_and_retry_failed_texts(db, account.id, prof.lang)
+            except Exception:
+                logger.debug("retry_failed_texts failed", exc_info=True)
+            
+            # Ensure something is queued
+            try:
+                _gen.ensure_text_available(db, account.id, prof.lang)
+            except Exception:
+                logger.debug("ensure_text_available failed", exc_info=True)
+
+            last_status = None
+            while True:
+                try:
+                    # Refresh transaction to see background thread commits
+                    try:
+                        db.rollback()
+                    except Exception:
+                        logger.debug("rollback failed in SSE loop", exc_info=True)
+                    
+                    rt = _ready.next_unopened(db, account.id, prof.lang)
+                    
+                    if rt:
+                        ready, reason = _ready.evaluate(db, rt, account.id)
+                        
+                        # Check if text needs retry
+                        needs_retry = False
+                        retry_status = None
+                        try:
+                            failed_components = _ready.get_failed_components(db, account.id, rt.id)
+                            if failed_components["words"] or failed_components["sentences"]:
+                                retry_service = _gen.retry_service
+                                can_retry, retry_reason = retry_service.can_retry(db, account.id, rt.id, failed_components)
+                                needs_retry = can_retry
+                                retry_status = {
+                                    "can_retry": can_retry,
+                                    "reason": retry_reason,
+                                    "failed_components": failed_components
+                                }
+                        except Exception:
+                            logger.debug("retry status check failed in SSE", exc_info=True)
+                        
+                        current_status = {
+                            "ready": ready and reason == "both",
+                            "text_id": rt.id,
+                            "ready_reason": reason if ready else "waiting",
+                            "retry_info": retry_status if needs_retry and not ready else None
+                        }
+                        
+                        # Only send update if status changed
+                        if current_status != last_status:
+                            data = json.dumps(current_status)
+                            yield f"data: {data}\n\n"
+                            last_status = current_status.copy()
+                        
+                        # If fully ready, close connection
+                        if ready and reason == "both":
+                            yield f"data: {{\"ready\": true, \"text_id\": {rt.id}, \"ready_reason\": \"both\", \"status\": \"complete\"}}\n\n"
+                            break
+                    else:
+                        current_status = {"ready": False, "text_id": None, "status": "waiting"}
+                        if current_status != last_status:
+                            data = json.dumps(current_status)
+                            yield f"data: {data}\n\n"
+                            last_status = current_status.copy()
+                    
+                    # Wait before next check (heartbeat)
+                    await asyncio.sleep(2.0)
+                    
+                except Exception as e:
+                    logger.error(f"Error in SSE stream: {e}")
+                    yield f"data: {{\"error\": \"stream_error\", \"message\": \"{str(e)}\"}}\n\n"
+                    break
+        
+        except asyncio.CancelledError:
+            logger.debug("SSE connection cancelled")
+        except Exception as e:
+            logger.error(f"SSE stream error: {e}")
+            yield f"data: {{\"error\": \"stream_error\", \"message\": \"{str(e)}\"}}\n\n"
+        finally:
+            logger.debug("SSE connection closed")
+
+    return StreamingResponse(
+        content=event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
 

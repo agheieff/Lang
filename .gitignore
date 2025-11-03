@@ -1,81 +1,28 @@
-# Whitelist approach: block everything, then allow specific patterns
-
-# Block everything
-*
-
-# Allow directories (recursively)
-!*/
-
-# Allow source code files
-!*.py
-!*.ts
-!*.js
-!*.md
-!*.toml
-!*.json
-!*.yml
-!*.yaml
-!*.css
-!*.html
-!*.sql
-
-# Allow specific file patterns
-!README*
-!PLAN.md
-!LICENSE*
-!CHANGELOG*
-!CONTRIBUTING*
-!pyproject.toml
-!package.json
-!vite.config.ts
-!uv.toml
-
-# Allow specific directories recursively
-!docs/**
-!frontend/**
-!Lang/**
-!server/**
-!scripts/**
-
-# Block build artifacts and dependencies
-node_modules/
-dist/
-.venv/
-.uv/
+# Python
 __pycache__/
 *.pyc
-*.pyo
 *.pyd
+.venv/
+*.egg-info/
+.eggs/
+
+# Testing
 .pytest_cache/
-.mypy_cache/
+
+# Code quality
 .ruff_cache/
-.parcel-cache/
 
-# Block generated files
-*.log
-*.tmp
-*.cache
-.coverage
-coverage.*
-htmlcov/
+# Database files
+*.db
+*.db-shm
+*.db-wal
 
-# Block data files
-data/**
-
-# Block environment files
+# Environment files
 .env
-.env.*
 
-# Block OS/editor files
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
+# Runtime lock files and logs
+data/gen_locks/**
+data/llm_stream_logs/**
 
-# Block package manager lock files (optional - uncomment if you want to commit them)
-#!package-lock.json
-#!uv.lock
-
-# Block server static assets
-server/static/assets/
-server/static/index.html
+# Development tool caches
+dev-tools/__pycache__/

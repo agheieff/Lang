@@ -200,26 +200,30 @@ class RetryService:
             raise
     
     def get_existing_log_directory(self, account_id: int, text_id: int) -> Optional[Path]:
-        """Find the existing log directory for a text to reuse for retry."""
-        base = _log_dir_root() / str(account_id) / "zh"  # TODO: pass lang properly
-        if not base.exists():
+        """Find the existing log directory for a text across all language folders.
+        Picks the most recent job dir with matching meta.text_id.
+        """
+        acc_root = _log_dir_root() / str(account_id)
+        if not acc_root.exists():
             return None
-        
-        # Look for the most recent directory containing this text_id
-        for job_dir in sorted(base.iterdir(), reverse=True):
-            if not job_dir.is_dir():
-                continue
-            
-            meta_file = job_dir / "meta.json"
-            if meta_file.exists():
+
+        candidates: list[Path] = []
+        for lang_dir in sorted([p for p in acc_root.iterdir() if p.is_dir()]):
+            for job_dir in sorted([p for p in lang_dir.iterdir() if p.is_dir()], reverse=True):
+                meta_file = job_dir / "meta.json"
+                if not meta_file.exists():
+                    continue
                 try:
                     meta = json.loads(meta_file.read_text(encoding="utf-8"))
                     if meta.get("text_id") == text_id:
-                        return job_dir
+                        candidates.append(job_dir)
                 except Exception:
                     continue
-        
-        return None
+        if not candidates:
+            return None
+        # Return most recent by mtime
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
     
     def get_failed_texts_for_retry(self, db: Session, account_id: int, lang: str, limit: int = 5) -> list[ReadingText]:
         """Get texts that need retry, ordered by creation date."""

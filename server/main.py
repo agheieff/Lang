@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
+from fastapi import HTTPException
 
 from .db import DB_PATH, init_db
 from .api.profile import router as profile_router
@@ -27,6 +29,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Arcadia Lang", version="0.1.0")
+
+
+@app.exception_handler(404)
+async def not_found_exception_handler(request, exc):
+    return RedirectResponse(url="/", status_code=302)
 
 app.add_middleware(
     CORSMiddleware,

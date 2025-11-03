@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import os
+
+from server.llm_config.llm_models import ModelConfig
+from server.services.model_registry_service import get_model_registry
 
 try:
     # Local OpenRouter client from server/llm/openrouter/
@@ -83,19 +86,30 @@ def _strip_thinking_blocks(text: str) -> str:
 def chat_complete(
     messages: List[Dict[str, str]],
     *,
-    provider: Optional[str] = "openrouter",
+    provider: Optional[str] = None,
     model: Optional[str] = None,
-    base_url: str = "http://localhost:1234/v1",
+    model_config: Optional[ModelConfig] = None,
+    base_url: Optional[str] = None,
     temperature: Optional[float] = None,
 ) -> str:
     """Call LLM API and return text response.
 
-    Delegates to chat_complete_with_raw to keep a single codepath.
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        provider: Provider name (legacy, use model_config instead)
+        model: Model name (legacy, use model_config instead)
+        model_config: ModelConfig object with full model configuration
+        base_url: Override base URL (for legacy compatibility)
+        temperature: Sampling temperature
+
+    Returns:
+        str: The model's text response
     """
     text, _ = chat_complete_with_raw(
         messages,
         provider=provider,
         model=model,
+        model_config=model_config,
         base_url=base_url,
         temperature=temperature,
         max_tokens=16384,
@@ -106,17 +120,58 @@ def chat_complete(
 def chat_complete_with_raw(
     messages: List[Dict[str, str]],
     *,
-    provider: Optional[str] = "openrouter",
+    provider: Optional[str] = None,
     model: Optional[str] = None,
-    base_url: str = "http://localhost:1234/v1",
+    model_config: Optional[ModelConfig] = None,
+    base_url: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: int = 16384,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Call LLM API and return (cleaned_text, provider_response_dict_or_none).
 
-    Mirrors chat_complete but also returns the raw provider JSON when available.
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        provider: Provider name (legacy, use model_config instead)
+        model: Model name (legacy, use model_config instead)
+        model_config: ModelConfig object with full model configuration
+        base_url: Override base URL (for legacy compatibility)
+        temperature: Sampling temperature
+        max_tokens: Maximum tokens to generate
+
+    Returns:
+        tuple[str, Optional[Dict]]: (text_response, raw_provider_response)
     """
     global _llm_request_counter
+    
+    # Resolve configuration: prioritize model_config, then legacy parameters
+    if model_config:
+        # Use provided ModelConfig
+        resolved_provider = "openrouter" if "openrouter" in model_config.base_url else "local"
+        resolved_model = model_config.model
+        resolved_base_url = model_config.base_url
+        resolved_max_tokens = min(max_tokens, model_config.max_tokens)
+        api_key = model_config.get_api_key()
+    else:
+        # Legacy mode: use provided parameters
+        resolved_provider = provider or "openrouter"
+        resolved_model = model
+        resolved_base_url = base_url or "http://localhost:1234/v1"
+        resolved_max_tokens = max_tokens
+        api_key = None
+        
+        # Try to get model config from registry if no provider/model specified
+        if not provider and not model:
+            try:
+                registry = get_model_registry()
+                fallback_model = registry.get_default_model("Free")  # Use Free tier as fallback
+                model_config = fallback_model
+                resolved_provider = "openrouter" if "openrouter" in model_config.base_url else "local"
+                resolved_model = model_config.model
+                resolved_base_url = model_config.base_url
+                resolved_max_tokens = min(max_tokens, model_config.max_tokens)
+                api_key = model_config.get_api_key()
+            except Exception:
+                pass  # Fall back to legacy defaults
     
     # Resolve temperature from env when not provided
     if temperature is None:
@@ -125,10 +180,10 @@ def chat_complete_with_raw(
         except Exception:
             temperature = 0.7
 
-    if provider == "openrouter":
+    if resolved_provider == "openrouter":
         if _or_complete is None:
             raise RuntimeError("openrouter client not available")
-        model_id = _pick_openrouter_model(model)
+        model_id = _pick_openrouter_model(resolved_model)
         request_id = _llm_request_counter
         _llm_request_counter += 1
         
@@ -136,7 +191,7 @@ def chat_complete_with_raw(
             messages,
             model=model_id,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=resolved_max_tokens,
         )
         if isinstance(resp, dict):
             try:
@@ -153,7 +208,7 @@ def chat_complete_with_raw(
         raise RuntimeError("invalid openrouter response")
 
     # Local OpenAI-compatible API
-    model_id = resolve_model(base_url, model)
+    model_id = resolve_model(resolved_base_url, resolved_model)
     request_id = _llm_request_counter
     _llm_request_counter += 1
     
@@ -161,10 +216,10 @@ def chat_complete_with_raw(
         "model": model_id,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": resolved_max_tokens,
     }
     try:
-        resp = _http_json(base_url.rstrip("/") + "/chat/completions", "POST", data)
+        resp = _http_json(resolved_base_url.rstrip("/") + "/chat/completions", "POST", data)
     except (URLError, HTTPError) as e:
         raise RuntimeError(f"LLM backend error: {e}")
     choices = resp.get("choices")

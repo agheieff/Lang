@@ -1,0 +1,36 @@
+{
+  "models": [
+    {
+      "id": "kimi-free",
+      "display_name": "Kimi Free Model",
+      "model": "moonshotai/kimi-k2:free",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "max_tokens": 32768,
+      "allowed_tiers": ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"],
+      "capabilities": ["text"],
+      "cost_per_token": 0
+    },
+    {
+      "id": "deepseek-free",
+      "display_name": "Deepseek Free Model",
+      "model": "deepseek/deepseek-chat-v3.1:free",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "max_tokens": 32768,
+      "allowed_tiers": ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"],
+      "capabilities": ["text"],
+      "cost_per_token": 0
+    }
+  ],
+  "default_model": "kimi-free",
+  "provider_configs": {
+    "openrouter": {
+      "max_retries": 2,
+      "timeout": 60,
+      "referer": null,
+      "app_title": "Arcadia AI Chat"
+    }
+  },
+  "fallback_chain": ["kimi-free", "deepseek-free"]
+}

@@ -55,7 +55,8 @@
         container.dataset.nextPollFor = curId;
         if (container.__nextPollTimer) { try { clearTimeout(container.__nextPollTimer); } catch(_) {} }
 
-        const poll = async () => {
+        // Use SSE instead of polling with fallback
+        const pollFallback = async () => {
           try {
             const res = await fetch('/reading/next/ready?wait=25', { headers: { 'Accept': 'application/json' } });
             if (res.ok) {
@@ -73,9 +74,60 @@
               }
             }
           } catch(_) {}
-          container.__nextPollTimer = setTimeout(poll, 1500);
+          container.__nextPollTimer = setTimeout(pollFallback, 1500);
         };
-        poll();
+        
+        const eventSource = new EventSource('/reading/next/ready/sse');
+        
+        eventSource.onmessage = function(event) {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.error) {
+              console.error('SSE error:', data);
+              return;
+            }
+            
+            if (data.ready) {
+              if (data.ready_reason === 'both' || data.status === 'complete') {
+                try { btn.disabled = false; } catch(_) {}
+                try { if (st) { if (st.parentNode) st.parentNode.removeChild(st); else st.textContent = ''; } } catch(_) {}
+                eventSource.close(); // close SSE when ready
+                return;
+              } else {
+                try { btn.disabled = true; } catch(_) {}
+                try { if (st) st.textContent = 'Preparing next...'; } catch(_) {}
+              }
+            }
+            
+            if (data.retry_info && data.retry_info.can_retry) {
+              try { if (st) st.textContent = data.retry_info.reason || 'Retrying...'; } catch(_) {}
+            }
+          } catch(e) {
+            console.error('Error parsing SSE data:', e);
+          }
+        };
+        
+        eventSource.onerror = function(event) {
+          console.error('SSE connection error:', event);
+          try { if (st) st.textContent = 'Connection error...'; } catch(_) {}
+          try { 
+            if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+              eventSource.close(); 
+            }
+          } catch(_) {}
+          // Fallback to polling if SSE fails
+          container.__nextPollTimer = setTimeout(() => {
+            try { if (st) st.textContent = 'Fallback polling...'; } catch(_) {}
+            pollFallback(); // fallback to old polling method
+          }, 5000);
+        };
+        
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+          if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+            eventSource.close();
+          }
+        });
       }
       async function initWordClicks(){
         const container = document.getElementById('current-reading');
@@ -272,29 +324,10 @@
           return null;
         }
         function buildSentenceOffsets(plainText, items){
-          let pos = 0; const out = [];
-          for(const it of items){
-            const src = normalize(it.source);
-            if(!src){ out.push({ start: null, end: null, item: it }); continue; }
-            let foundAt = plainText.indexOf(it.source, pos);
-            if(foundAt < 0){
-              const windowEnd = Math.min(plainText.length, pos + 4000);
-              const windowStr = normalize(plainText.slice(pos, windowEnd));
-              const idxInWin = windowStr.indexOf(src);
-              if(idxInWin >= 0){
-                let i = pos, seen = 0;
-                while(i < windowEnd && seen < idxInWin){
-                  const ch = plainText[i];
-                  if(/\s/.test(ch)){ while(i < windowEnd && /\s/.test(plainText[i])) i++; seen++; }
-                  else { i++; seen++; }
-                }
-                foundAt = i;
-              }
-            }
-            if(foundAt >= 0){ const endAt = foundAt + (it.source||'').length; out.push({ start: foundAt, end: endAt, item: it }); pos = endAt; }
-            else { out.push({ start: null, end: null, item: it }); }
+          if(window.arcReadingUtils && window.arcReadingUtils.buildSentenceOffsets){
+            return window.arcReadingUtils.buildSentenceOffsets(plainText, items);
           }
-          return out;
+          return [];
         }
         function deriveAndStoreCaches(data){
           try{
@@ -308,32 +341,9 @@
             // Update sentence translations in unified session
             if (Array.isArray(data.items)) {
               const textEl2 = document.getElementById('reading-text');
-              const plain = (function serializePlainText(root) {
-                let out = '';
-                function walk(node) {
-                  if (!node) return;
-                  if (node.nodeType === Node.TEXT_NODE) {
-                    out += node.nodeValue || '';
-                    return;
-                  }
-                  if (node.nodeType === Node.ELEMENT_NODE) {
-                    const el = node;
-                    if (el.hasAttribute && el.hasAttribute('data-word-index')) {
-                      out += el.textContent || '';
-                      return;
-                    }
-                    if (el.tagName === 'BR') {
-                      out += '\n';
-                      return;
-                    }
-                    for (let c = el.firstChild; c; c = c.nextSibling) {
-                      walk(c);
-                    }
-                  }
-                }
-                walk(root);
-                return out;
-              })(textEl);
+              const plain = (window.arcReadingUtils && window.arcReadingUtils.serializePlainText)
+                ? window.arcReadingUtils.serializePlainText(textEl)
+                : (textEl.textContent || '');
               const mapping = buildSentenceOffsets(plain, data.items);
               
               // Update paragraph and sentence translations in session data
@@ -360,32 +370,9 @@
             // Restore: build and cache paragraph/text translations alongside sentences
             const textEl2 = document.getElementById('reading-text');
             if(textEl2){
-              const plain = (function serializePlainText(root) {
-                let out = '';
-                function walk(node) {
-                  if (!node) return;
-                  if (node.nodeType === Node.TEXT_NODE) {
-                    out += node.nodeValue || '';
-                    return;
-                  }
-                  if (node.nodeType === Node.ELEMENT_NODE) {
-                    const el = node;
-                    if (el.hasAttribute && el.hasAttribute('data-word-index')) {
-                      out += el.textContent || '';
-                      return;
-                    }
-                    if (el.tagName === 'BR') {
-                      out += '\n';
-                      return;
-                    }
-                    for (let c = el.firstChild; c; c = c.nextSibling) {
-                      walk(c);
-                    }
-                  }
-                }
-                walk(root);
-                return out;
-              })(textEl);
+              const plain = (window.arcReadingUtils && window.arcReadingUtils.serializePlainText)
+                ? window.arcReadingUtils.serializePlainText(textEl)
+                : (textEl.textContent || '');
               const mapping = buildSentenceOffsets(plain, Array.isArray(data.items)?data.items:[]);
               // Paragraphs split by blank line
               const paras = []; let i=0, n=plain.length;
@@ -454,19 +441,10 @@
       }
       // Build plain text from DOM where <br> counts as a single "\n" and existing [data-word-index] spans are treated as atomic
       function serializePlainText(root){
-        let out = '';
-        function walk(node){
-          if(!node) return;
-          if(node.nodeType === Node.TEXT_NODE){ out += node.nodeValue || ''; return; }
-          if(node.nodeType === Node.ELEMENT_NODE){
-            const el = node;
-            if(el.hasAttribute && el.hasAttribute('data-word-index')){ out += el.textContent || ''; return; }
-            if(el.tagName === 'BR'){ out += '\n'; return; }
-            for(let c = el.firstChild; c; c = c.nextSibling){ walk(c); }
-          }
+        if(window.arcReadingUtils && window.arcReadingUtils.serializePlainText){
+          return window.arcReadingUtils.serializePlainText(root);
         }
-        walk(root);
-        return out;
+        return (root && root.textContent) ? root.textContent : '';
       }
       // Use backend-provided span offsets when available to avoid drift
       function ensureStore(){

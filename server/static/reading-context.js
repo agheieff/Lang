@@ -342,7 +342,7 @@
     });
   }
 
-  // Title: build translation from embedded title words
+  // Title: use structured translation if available, fallback to word translations
   function loadEmbeddedTitleWords(){
     try{
       const el = document.getElementById('reading-title-words-json');
@@ -352,7 +352,21 @@
     }catch(_e){ return []; }
   }
 
+  function loadStructuredTitleTranslation(){
+    try{
+      const el = document.getElementById('reading-title-translation');
+      if(!el) return null;
+      const translation = JSON.parse(el.textContent || 'null');
+      return translation ? String(translation).trim() : null;
+    }catch(_e){ return null; }
+  }
+
   function buildTitleTranslation(){
+    // Prefer structured title translation from LLM response
+    const structuredTranslation = loadStructuredTitleTranslation();
+    if(structuredTranslation) return structuredTranslation;
+    
+    // Fallback to word-by-word translation
     const words = loadEmbeddedTitleWords();
     if(!words || !words.length) return null;
     const parts = [];
