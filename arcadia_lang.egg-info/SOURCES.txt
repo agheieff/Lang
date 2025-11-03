@@ -51,6 +51,7 @@ server/services/llm_logging.py
 server/services/progress_service.py
 server/services/readiness_service.py
 server/services/reconstruction_service.py
+server/services/retry_service.py
 server/services/selection_service.py
 server/services/srs_logic.py
 server/services/srs_service.py

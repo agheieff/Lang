@@ -530,7 +530,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                                 out.append((s, e, seg))
                         return out
 
-                    def _attempt_words(messages: List[Dict], out_path: Path) -> Optional[tuple[str, Dict, str, Optional[str]]]:
+                    def _attempt_words(messages: List[Dict], out_path: Path, sentence_idx: int, text_id: int) -> Optional[tuple[str, Dict, str, Optional[str]]]:
                         attempts = 1
                         if provider_ == "openrouter":
                             try:
@@ -540,13 +540,25 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                         last_err: Optional[Exception] = None
                         for attempt in range(attempts):
                             try:
-                                return _complete_and_log(
+                                # Extract sentence number from filename for logging
+                                sentence_num = "NA"
+                                try:
+                                    filename = str(out_path.name)
+                                    if filename.startswith("words_") and filename.endswith(".json"):
+                                        sentence_num = filename[6:-5]  # Extract number from "words_N.json"
+                                except Exception:
+                                    pass
+                                
+                                print(f"[LLM] requesting words_{sentence_num} for text_id={text_id} (sentence {sentence_idx}, attempt {attempt + 1})")
+                                result = _complete_and_log(
                                     messages,
                                     provider=provider_,
                                     model=model_id_,
                                     base_url=base_url_,
                                     out_path=out_path,
                                 )
+                                print(f"[LLM] received words_{sentence_num} for text_id={text_id} (sentence {sentence_idx}, attempt {attempt + 1})")
+                                return result
                             except Exception as e:
                                 last_err = e
                                 if provider_ != "openrouter" or attempt >= attempts - 1:
@@ -584,7 +596,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                                 {"role": "user", "content": title_msgs[1]["content"]},
                             ]
                             try:
-                                tup_title = _attempt_words(title_ctx, job_dir_path / "words_0.json")
+                                tup_title = _attempt_words(title_ctx, job_dir_path / "words_0.json", 0, text_id_)
                             except Exception:
                                 tup_title = None
                             # Log distinctly so DB-based reconstruction won't consider it
@@ -634,7 +646,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             for i, (s, seg, m) in enumerate(per_msgs):
                                 try:
                                     # Shift by +1 so words_1 is the first sentence
-                                    tup = _attempt_words(m, job_dir_path / f"words_{i+1}.json")
+                                    tup = _attempt_words(m, job_dir_path / f"words_{i+1}.json", i+1, text_id_)
                                 except Exception:
                                     tup = None
                                 wd_seg_results.append((s, seg, tup, m))
@@ -646,7 +658,7 @@ async def _run_generation_job(account_id: int, lang: str) -> None:
                             futs = []
                             for i, (s, seg, m) in enumerate(per_msgs):
                                 # Shift by +1 so words_1 is the first sentence
-                                futs.append((s, seg, m, ex.submit(_attempt_words, m, job_dir_path / f"words_{i+1}.json")))
+                                futs.append((s, seg, m, ex.submit(_attempt_words, m, job_dir_path / f"words_{i+1}.json", i+1, text_id_)))
                             tr_res = fut_tr.result()
                             for s, seg, m, f in futs:
                                 try:

@@ -132,10 +132,6 @@ def chat_complete_with_raw(
         request_id = _llm_request_counter
         _llm_request_counter += 1
         
-        try:
-            print(f"[LLM] requesting words_{request_id}")
-        except Exception:
-            pass
         resp = _or_complete(
             messages,
             model=model_id,
@@ -150,10 +146,6 @@ def chat_complete_with_raw(
                     if isinstance(msg, dict):
                         content = msg.get("content")
                         if isinstance(content, str):
-                            try:
-                                print(f"[LLM] received words_{request_id}")
-                            except Exception:
-                                pass
                             return _strip_thinking_blocks(content), resp
             except Exception:
                 pass
@@ -165,10 +157,6 @@ def chat_complete_with_raw(
     request_id = _llm_request_counter
     _llm_request_counter += 1
     
-    try:
-        print(f"[LLM] requesting words_{request_id}")
-    except Exception:
-        pass
     data = {
         "model": model_id,
         "messages": messages,
@@ -188,8 +176,4 @@ def chat_complete_with_raw(
     content = msg.get("content")
     if not isinstance(content, str):
         raise RuntimeError("no content in message")
-    try:
-        print(f"[LLM] received words_{request_id}")
-    except Exception:
-        pass
     return _strip_thinking_blocks(content), resp

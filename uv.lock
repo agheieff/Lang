@@ -36,13 +36,13 @@ name = "arcadia-lang"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "arcadia-ui-core" },
-    { name = "arcadia-ui-style" },
     { name = "argon2-cffi" },
     { name = "beautifulsoup4" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jieba" },
+    { name = "jinja2" },
+    { name = "markupsafe" },
     { name = "opencc-python-reimplemented" },
     { name = "passlib" },
     { name = "pydantic" },
@@ -72,14 +72,14 @@ zh = [
 
 [package.metadata]
 requires-dist = [
-    { name = "arcadia-ui-core", editable = "../libs/arcadia_ui_core" },
-    { name = "arcadia-ui-style", editable = "../libs/arcadia_ui_style" },
     { name = "argon2-cffi", specifier = ">=23.1.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.3" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.20.0" },
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "jieba", marker = "extra == 'zh'", specifier = ">=0.42.1" },
+    { name = "jinja2", specifier = ">=3.0.0" },
+    { name = "markupsafe", specifier = ">=2.0.0" },
     { name = "opencc-python-reimplemented", specifier = ">=0.1.7" },
     { name = "opencc-python-reimplemented", marker = "extra == 'zh'", specifier = ">=0.1.7" },
     { name = "passlib", specifier = ">=1.7.4" },
@@ -98,32 +98,6 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.23" },
 ]
 provides-extras = ["nlp", "dicts", "zh"]
-
-[[package]]
-name = "arcadia-ui-core"
-version = "0.1.0"
-source = { editable = "../libs/arcadia_ui_core" }
-dependencies = [
-    { name = "fastapi" },
-    { name = "jinja2" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.110" },
-    { name = "jinja2" },
-]
-
-[[package]]
-name = "arcadia-ui-style"
-version = "0.1.0"
-source = { editable = "../libs/arcadia_ui_style" }
-dependencies = [
-    { name = "arcadia-ui-core" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "arcadia-ui-core", specifier = ">=0.1.0" }]
 
 [[package]]
 name = "argon2-cffi"
