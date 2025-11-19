@@ -2,11 +2,19 @@
 window.arcToggleTranslation = function (e) {
   const btn = e && e.target;
   const panel = document.getElementById('translation-panel');
-  if (panel) {
-    const show = panel.classList.contains('hidden');
-    panel.hidden = !show;
-    panel.classList.toggle('hidden', !show);
-    if (btn) btn.setAttribute('aria-expanded', String(show));
+  if (!panel) return;
+
+  const show = panel.classList.contains('hidden');
+  panel.hidden = !show;
+  panel.classList.toggle('hidden', !show);
+  if (btn) btn.setAttribute('aria-expanded', String(show));
+
+  // When opening the panel, show a placeholder until translations arrive
+  if (show) {
+    const textEl = document.getElementById('translation-text');
+    if (textEl && !textEl.textContent.trim()) {
+      textEl.textContent = 'Translation is not ready yet.';
+    }
   }
 };
 

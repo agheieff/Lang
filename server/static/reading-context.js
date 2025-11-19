@@ -265,8 +265,6 @@
   // Register context menu rule for #reading-text
   function registerRule(){
     if(!window.arcContextMenu) return;
-    const textEl = $('reading-text');
-    if(!textEl) return;
     // avoid duplicate registrations on swaps
     if(window.__arcCtxUnregReading){ try{ window.__arcCtxUnregReading(); }catch(_e){} }
     window.__arcCtxUnregReading = window.arcContextMenu.register({

@@ -262,8 +262,19 @@
               
               // Update full translation for the text
               sessionData.full_translation = data.items.map(it => String(it.translation || '')).join(' ');
-              
+
               try { localStorage.setItem(sessionKey, JSON.stringify(sessionData)); } catch {}
+
+              // If the bottom translation panel exists, keep it in sync
+              try {
+                const full = (sessionData.full_translation || '').trim();
+                if (full) {
+                  const panelTextEl = document.getElementById('translation-text');
+                  if (panelTextEl) {
+                    panelTextEl.textContent = full;
+                  }
+                }
+              } catch (_e) {}
             }
 
             // Restore: build and cache paragraph/text translations alongside sentences
