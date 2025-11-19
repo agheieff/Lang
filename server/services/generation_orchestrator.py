@@ -103,46 +103,39 @@ class GenerationOrchestrator:
         self.notification_service = get_notification_service()
         self.file_lock = FileLock(ttl_seconds=float(os.getenv("ARC_GEN_LOCK_TTL_SEC", "300")))
     
-    def ensure_text_available(self, db: Session, account_id: int, lang: str, prefetch: bool = False) -> None:
+    def ensure_text_available(self, db: Session, account_id: int, lang: str) -> None:
         """
         SINGLE entry point for ensuring text availability.
         
         This is THE ONLY method that should start text generation.
         All other parts of the system call this method.
         
-        When prefetch=True, generate the next text even if one is already available.
-        When prefetch=False, only generate if no unopened texts exist.
+        Always generates a new text if and only if there are no unopened texts.
+        This maintains exactly one backup text without race conditions.
         
         Args:
             db: Database session
-            account_id: User account ID
+            account_id: User account ID  
             lang: Language code
-            prefetch: Whether to generate even if texts already exist
         """
         try:
-            print(f"[ORCHESTRATOR] ensure_text_available called: account_id={account_id} lang={lang} prefetch={prefetch}")
-            
             # Count unopened texts that have content
             unopened_count = self.state_manager.count_unopened_ready(db, account_id, lang)
-            print(f"[ORCHESTRATOR] Found {unopened_count} unopened ready texts")
             
-            if (not prefetch) and unopened_count > 0:
-                print("[ORCHESTRATOR] Already have texts available, skipping generation")
+            # Always skip generation if we have unopened texts
+            if unopened_count > 0:
                 return  # Already have texts available
             
             # Check if generation is already in progress
             if self.text_gen_service.is_generation_in_progress(account_id, lang):
-                print(f"[ORCHESTRATOR] Generation already in progress for account_id={account_id}")
                 return
             
             # Check if there's a text being generated
             generating_text = self.state_manager.get_generating_text(db, account_id, lang)
             if generating_text:
-                print(f"[ORCHESTRATOR] Text already generating: text_id={generating_text.id}")
                 return  # Already generating
             
             # Start new generation
-            print(f"[ORCHESTRATOR] Starting new generation job for account_id={account_id}")
             self._start_generation_job(db, account_id, lang)
             
         except Exception as e:
@@ -157,23 +150,13 @@ class GenerationOrchestrator:
         if not self.text_gen_service.mark_generation_started(account_id, lang):
             return  # Already in progress
         
-        # Fire-and-forget via a dedicated thread + event loop
+        # Fire-and-forget via a dedicated thread (use asyncio.run for any async stubs)
         def _worker():
-            loop = None
             try:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-                loop = asyncio.get_event_loop()
-                loop.run_until_complete(self._run_generation_job(db, account_id, lang))
+                asyncio.run(self._run_generation_job(db, account_id, lang))
             except Exception as e:
                 print(f"[ORCHESTRATOR] Worker exception: {e}")
             finally:
-                # Always cleanup
-                try:
-                    if loop:
-                        loop.stop()
-                        loop.close()
-                except Exception:
-                    pass
                 # Mark generation as completed (even on error)
                 self.text_gen_service.mark_generation_completed(account_id, lang)
         

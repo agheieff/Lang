@@ -284,19 +284,28 @@ class TranslationService:
             tr_parsed = extract_structured_translation(tr_buf)
             if not tr_parsed:
                 return False
-            
+            # Compute sentence spans based on current text
+            sent_spans = self._split_sentences(text_content, lang)
             idx = 0
             for p in tr_parsed.get("paragraphs", []):
                 for s in p.get("sentences", []):
                     if "text" in s and "translation" in s:
+                        # Map by order; if we have spans, attach them
+                        span_start = None
+                        span_end = None
+                        try:
+                            if 0 <= idx < len(sent_spans):
+                                span_start, span_end, _ = sent_spans[idx]
+                        except Exception:
+                            span_start, span_end = None, None
                         account_db.add(ReadingTextTranslation(
                             account_id=account_id,
                             text_id=text_id,
                             unit="sentence",
                             target_lang=target_lang,
                             segment_index=idx,
-                            span_start=None,
-                            span_end=None,
+                            span_start=span_start,
+                            span_end=span_end,
                             source_text=s["text"],
                             translated_text=s["translation"],
                             provider=provider,
@@ -313,6 +322,51 @@ class TranslationService:
     def _split_sentences(self, text: str, lang: str) -> List[Tuple[int, int, str]]:
         """Deprecated; delegate to utils.text_segmentation.split_sentences."""
         return split_sentences(text, lang)
+
+    def backfill_sentence_spans(self, account_db: Session, account_id: int, text_id: int) -> bool:
+        """Backfill span_start/span_end for existing sentence translations by index order.
+
+        Returns True if any updates were attempted.
+        """
+        try:
+            rt = account_db.query(ReadingText).filter(ReadingText.id == text_id, ReadingText.account_id == account_id).first()
+            if not rt or not getattr(rt, "content", None):
+                return False
+            sent_spans = self._split_sentences(rt.content, rt.lang)
+            rows = (
+                account_db.query(ReadingTextTranslation)
+                .filter(
+                    ReadingTextTranslation.account_id == account_id,
+                    ReadingTextTranslation.text_id == text_id,
+                    ReadingTextTranslation.unit == "sentence",
+                )
+                .order_by(ReadingTextTranslation.segment_index.asc().nullsfirst())
+                .all()
+            )
+            changed = False
+            for r in rows:
+                if r.segment_index is None:
+                    continue
+                if r.span_start is not None and r.span_end is not None:
+                    continue
+                idx = int(r.segment_index)
+                if 0 <= idx < len(sent_spans):
+                    s, e, _ = sent_spans[idx]
+                    r.span_start = s
+                    r.span_end = e
+                    changed = True
+            if changed:
+                try:
+                    account_db.commit()
+                except Exception:
+                    account_db.rollback()
+            return True
+        except Exception:
+            try:
+                account_db.rollback()
+            except Exception:
+                pass
+            return False
     
     # llm_call_and_log_to_file moved to llm_logging; keep class focused on orchestration
     

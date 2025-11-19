@@ -33,6 +33,9 @@ from ..services.generation_orchestrator import GenerationOrchestrator
 from ..utils.text_segmentation import split_sentences
 from ..services.notification_service import get_notification_service
 from ..settings import get_settings
+from ..services.title_extraction_service import TitleExtractionService
+from ..views.reading_renderer import render_reading_block, render_loading_block
+from ..services.translation_service import TranslationService
 
 
 router = APIRouter(tags=["reading"])
@@ -68,85 +71,7 @@ async def wait_until(pred, timeout: float, db: Session, interval: float = 0.5):
         await _tick(db, interval)
     return pred()
 
-def _safe_html(text: Optional[str]) -> str:
-    """Escape untrusted text for safe HTML display. Preserve newlines as <br>.
-
-    Also normalizes CRLF/CR to LF before processing to keep offsets consistent.
-    """
-    if not text:
-        return ""
-    try:
-        norm = str(text).replace("\r\n", "\n").replace("\r", "\n")
-        from markupsafe import escape  # type: ignore
-        esc = str(escape(norm))
-    except Exception:
-        # Minimal escape fallback
-        norm = str(text).replace("\r\n", "\n").replace("\r", "\n")
-        esc = (
-            norm
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&#39;")
-        )
-    return esc.replace("\n", "<br>")
-
-
-def _words_json(rows):
-    return [
-        {
-            "surface": w.surface,
-            "lemma": w.lemma,
-            "pos": w.pos,
-            "pinyin": w.pinyin,
-            "translation": w.translation,
-            "lemma_translation": w.lemma_translation,
-            "grammar": w.grammar,
-            "span_start": w.span_start,
-            "span_end": w.span_end,
-        }
-        for w in rows
-    ]
-
-
-def _render_reading_block(text_id: int, html_content: str, words_rows, title_html: str | None = None, title_words: Optional[list] = None, title_translation: str | None = None) -> str:
-    words_json = _words_json(words_rows)
-    json_text = json.dumps(words_json, ensure_ascii=False).replace('</', '<\\/')
-    title_part = (f'<h2 id="reading-title" class="text-2xl font-bold mb-3">{title_html}</h2>' if title_html else '')
-    title_words_json = json.dumps(title_words or [], ensure_ascii=False).replace('</', '<\\/')
-    # Avoid any leading whitespace before content to keep span offsets aligned with DOM
-    return (
-        '<div id="reading-block">'
-        + title_part
-        + f'<div id="reading-text" class="prose max-w-none" data-text-id="{text_id}">{html_content}</div>'
-        + '<div class="mt-4 flex items-end w-full">'
-        + '  <div class="flex items-center gap-3 flex-1">'
-        + '    <button id="next-btn"'
-        + '      onclick="window.handleNextText()"'
-        + '      class="px-4 py-2 rounded-lg transition-colors text-white bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"'
-        + '      disabled aria-disabled="true">Next text</button>'
-        + '    <span id="next-status" class="ml-3 text-sm text-gray-500" aria-live="polite">Loading next…</span>'
-        + '  </div>'
-        + '  <button id="see-translation-btn" type="button"'
-        + '    class="ml-4 shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50"'
-        + '    onclick="window.arcToggleTranslation && window.arcToggleTranslation(event)"'
-        + '    aria-expanded="false">See translation</button>'
-        + '</div>'
-        + '<div id="translation-panel" class="hidden mt-4" hidden>'
-        + '  <div id="translation-content" class="prose max-w-none text-gray-800">'
-        + '    <hr class="my-3">'
-        + '    <div id="translation-text" class="whitespace-pre-wrap"></div>'
-        + '  </div>'
-        + '</div>'
-        + f'<script id="reading-words-json" type="application/json">{json_text}</script>'
-        + (f'<script id="reading-title-words-json" type="application/json">{title_words_json}</script>' if (title_html and title_words_json) else '')
-        + (f'<script id="reading-title-translation" type="application/json">{json.dumps(title_translation, ensure_ascii=False) if title_translation else ""}</script>' if title_translation else '')
-        + '<div id="word-tooltip" class="absolute z-10 bg-white border border-gray-200 rounded-lg shadow p-3 text-sm max-w-xs hidden"></div>'
-        + '<script src="/static/reading-sse.js"></script>'
-        + '<script src="/static/reading.js" defer></script>'
-        + '</div>'
-    )
+## View helpers moved to server.views.reading_renderer
 
 
  
@@ -162,72 +87,63 @@ async def current_reading_block(
     Uses the new generation orchestrator for cleaner state management.
     Will show content immediately available and rely on SSE for updates.
     """
+    import time
+    start_time = time.time()
+    logger.info(f"[READING] current_reading_block called for account_id={account.id}")
+    
     prof = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not prof:
         return HTMLResponse(
-            content='''
-            <div id="current-reading" class="text-center py-8">
-              <p class="text-gray-500">No profile found yet.</p>
-              <a href="/profile" class="text-blue-600 underline">Create a profile</a>
-            </div>
-            '''
+            content=render_loading_block("loading")
         )
 
     orchestrator = GenerationOrchestrator()
     state_manager = orchestrator.state_manager
     
-    # Ensure something is queued or in progress
+    # Use SelectionService to get current text (current_text_id or pick new)
+    from ..services.selection_service import SelectionService
+    selection_service = SelectionService()
+    
+    # Get current text (either the one in profile.current_text_id or pick unopened)
+    text_obj = None
+    selection_start = time.time()
+    try:
+        text_obj = selection_service.pick_current_or_new(db, account.id, prof.lang)
+        logger.info(f"[READING] SelectionService.pick_current_or_new took {time.time() - selection_start:.3f}s")
+    except Exception as e:
+        logger.error(f"SelectionService.pick_current_or_new failed: {e}", exc_info=True)
+        # Fallback: try to get any available text
+        try:
+            text_obj = state_manager.get_unopened_text(db, account.id, prof.lang)
+        except Exception as e2:
+            logger.error(f"Fallback get_unopened_text also failed: {e2}", exc_info=True)
+            # Return error page
+            return HTMLResponse(
+                content='''
+                <div id="current-reading" class="text-center py-8">
+                  <p class="text-red-500">Error loading text. Please refresh the page.</p>
+                </div>
+                ''', status=500
+            )
+    
+    # Ensure something is queued (prefetch next text)
+    ensure_start = time.time()
     try:
         orchestrator.ensure_text_available(db, account.id, prof.lang)
+        logger.info(f"[READING] ensure_text_available took {time.time() - ensure_start:.3f}s")
     except Exception:
         logger.debug("ensure_text_available failed in current_reading_block", exc_info=True)
-
-    # Get the best available text
-    text_obj = state_manager.get_unopened_text(db, account.id, prof.lang)
 
     if text_obj is None:
         # Check if something is generating
         generating = state_manager.get_generating_text(db, account.id, prof.lang)
-        if generating:
-            # Show generating loader
-            return HTMLResponse(
-                content='''
-                <div id="current-reading" 
-                     data-sse-endpoint="/reading/events/sse"
-                     class="text-center py-8">
-                  <div class="animate-pulse space-y-3">
-                    <div class="h-4 bg-gray-200 rounded w-3/4"></div>
-                    <div class="h-4 bg-gray-200 rounded w-5/6"></div>
-                    <div class="h-4 bg-gray-200 rounded w-2/3"></div>
-                    <div class="h-4 bg-gray-200 rounded w-4/5"></div>
-                  </div>
-                  <div class="mt-2 text-sm text-gray-500">Generating text…</div>
-                </div>
-                '''
-            )
-        else:
-            # Show general loading
-            return HTMLResponse(
-                content='''
-                <div id="current-reading"
-                     data-sse-endpoint="/reading/events/sse"
-                     class="text-center py-8">
-                  <div class="animate-pulse space-y-3">
-                    <div class="h-4 bg-gray-200 rounded w-3/4"></div>
-                    <div class="h-4 bg-gray-200 rounded w-5/6"></div>
-                    <div class="h-4 bg-gray-200 rounded w-2/3"></div>
-                    <div class="h-4 bg-gray-200 rounded w-4/5"></div>
-                  </div>
-                  <div class="mt-2 text-sm text-gray-500">Loading text…</div>
-                </div>
-                '''
-            )
+        kind = "generating" if generating else "loading"
+        return HTMLResponse(content=render_loading_block(kind))
 
-    # Mark as opened on first render and pre-queue the next
+    # SelectionService already set current_text_id if needed
+    # Ensure next text is available 
     try:
-        state_manager.mark_opened(db, account.id, text_obj.id)
-        # Pre-queue next text
-        orchestrator.ensure_text_available(db, account.id, prof.lang, prefetch=True)
+        orchestrator.ensure_text_available(db, account.id, prof.lang)
     except Exception:
         try:
             db.rollback()
@@ -236,95 +152,11 @@ async def current_reading_block(
 
     # Render the text content
     text_id = text_obj.id
-    text_html = _safe_html(text_obj.content)
     
-    # Extract title and title words (existing logic)
-    title_html: Optional[str] = None
-    title_words_list: list = []
-    title_translation = None
-    try:
-        row = (
-            db.query(LLMRequestLog)
-            .filter(
-                LLMRequestLog.account_id == account.id,
-                LLMRequestLog.text_id == text_id,
-                LLMRequestLog.kind == "reading",
-                LLMRequestLog.status == "ok",
-            )
-            .order_by(LLMRequestLog.created_at.desc())
-            .first()
-        )
-        if row and getattr(row, "response", None):
-            raw = row.response
-            content_str: Optional[str] = None
-            try:
-                obj = json.loads(raw)
-                if isinstance(obj, dict):
-                    try:
-                        ch = obj.get("choices")
-                        if isinstance(ch, list) and ch:
-                            msg = ch[0].get("message") if isinstance(ch[0], dict) else None
-                            if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-                                content_str = msg.get("content")
-                    except Exception:
-                        content_str = None
-                    if content_str is None and isinstance(obj.get("content"), str):
-                        content_str = obj.get("content")
-                if content_str is None:
-                    content_str = raw if isinstance(raw, str) else None
-            except Exception:
-                content_str = raw if isinstance(raw, str) else None
-            if content_str:
-                t = extract_json_from_text(content_str, "title")
-                if t is not None:
-                    title_html = _safe_html(str(t))
-                title_translation = extract_json_from_text(content_str, "title_translation")
-    except Exception:
-        title_html = None
-
-    # Extract title words
-    try:
-        row2 = (
-            db.query(LLMRequestLog)
-            .filter(
-                LLMRequestLog.account_id == account.id,
-                LLMRequestLog.text_id == text_id,
-                LLMRequestLog.kind == "title_word_translation",
-                LLMRequestLog.status == "ok",
-            )
-            .order_by(LLMRequestLog.created_at.desc())
-            .first()
-        )
-        if row2 and getattr(row2, "response", None):
-            try:
-                obj = json.loads(row2.response)
-            except Exception:
-                obj = row2.response
-            content2 = None
-            try:
-                if isinstance(obj, dict):
-                    choices = obj.get("choices")
-                    if isinstance(choices, list) and choices:
-                        msg = choices[0].get("message") if isinstance(choices[0], dict) else None
-                        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-                            content2 = msg.get("content")
-                if content2 is None and isinstance(obj, str):
-                    content2 = obj
-            except Exception:
-                content2 = None
-            if content2:
-                parsed = extract_word_translations(content2)
-                if parsed and isinstance(parsed.get("words"), list):
-                    ws = [w for w in parsed.get("words", []) if isinstance(w, dict)]
-                    for w in ws:
-                        try:
-                            w.pop("span_start", None)
-                            w.pop("span_end", None)
-                        except Exception:
-                            pass
-                    title_words_list = ws
-    except Exception:
-        pass
+    # Extract title and title words via service
+    title_service = TitleExtractionService()
+    raw_title, title_translation = title_service.get_title(db, account.id, text_id)
+    title_words_list = title_service.get_title_words(db, account.id, text_id)
 
     # Include words immediately if available
     rows = (
@@ -334,14 +166,25 @@ async def current_reading_block(
         .all()
     )
     
-    # Check if translations are ready
-    is_fully_ready = len(rows) > 0 or state_manager.is_ready(db, account.id, text_id)
+    # Check if translations are ready via readiness service (single oracle)
+    try:
+        _ready = ReadinessService()
+        is_fully_ready, _reason = _ready.evaluate(db, text_obj, account.id)
+    except Exception:
+        is_fully_ready = (len(rows) > 0)
     
     # Add SSE endpoint and state to help client
     sse_endpoint = f"/reading/events/sse?text_id={text_id}"
     
     # Render with SSE connection info
-    inner = _render_reading_block(text_id, text_html, rows, title_html, title_words_list, title_translation)
+    inner = render_reading_block(
+        text_id,
+        text_obj.content or "",
+        rows,
+        title=raw_title,
+        title_words=title_words_list,
+        title_translation=title_translation if isinstance(title_translation, str) else None,
+    )
     
     # Wrap with SSE metadata for the client
     content_with_sse = f'''
@@ -361,6 +204,8 @@ async def current_reading_block(
         </div>
     '''
     
+    total_time = time.time() - start_time if 'start_time' in locals() else 0
+    logger.info(f"[READING] current_reading_block completed in {total_time:.3f}s")
     return HTMLResponse(content=content_with_sse)
 
 ## Models moved to server.schemas.reading
@@ -405,25 +250,25 @@ async def next_text(
         session_service = SessionProcessingService()
         session_service.process_session_data(db, account.id, prof.current_text_id or 0, session_data)
 
-    # Use the orchestrator for state management
-    orchestrator = GenerationOrchestrator()
-    state_manager = orchestrator.state_manager
+    # Use SelectionService for proper text management
+    from ..services.selection_service import SelectionService
+    selection_service = SelectionService()
     
-    # Mark current text as read
+    # Mark current text as read before moving to next
     if prof.current_text_id:
+        from ..services.state_manager import GenerationStateManager
+        state_manager = GenerationStateManager()
         try:
             state_manager.mark_read(db, account.id, prof.current_text_id)
         except Exception:
             logger.debug("Failed to mark text as read", exc_info=True)
     
-    # Clear pointer and schedule next
-    try:
-        state_manager.clear_current_pointer(db, account.id)
-    except Exception:
-        logger.debug("Failed to clear current pointer", exc_info=True)
+    # Pick next text and set it as current (this updates current_text_id and marks opened)
+    next_text = selection_service.pick_current_or_new(db, account.id, prof.lang)
     
-    # Ensure next text is available
+    # Ensure next text is available after picking
     try:
+        orchestrator = GenerationOrchestrator()
         orchestrator.ensure_text_available(db, account.id, prof.lang)
     except Exception:
         logger.debug("ensure_text_available failed in next_text", exc_info=True)
@@ -552,10 +397,18 @@ async def get_translations(
                 logger.debug("load translations rows failed in poll", exc_info=True)
                 return None
         rows = await wait_until(_pred, timeout, db) or []
-    # Best-effort span reconstruction for legacy rows without spans (do not write back; return only)
+    # Best-effort span reconstruction for legacy rows without spans (first try to persist spans)
     sent_spans: list[tuple[int, int, str]] = []
     if unit == "sentence" and any(getattr(r, "span_start", None) is None or getattr(r, "span_end", None) is None for r in rows):
-        sent_spans = split_sentences(rt.content or "", rt.lang)
+        # Try to backfill spans once using the translation service
+        try:
+            TranslationService().backfill_sentence_spans(db, account.id, text_id)
+            rows = _load_rows()
+        except Exception:
+            logger.debug("backfill_sentence_spans failed; falling back to in-memory spans", exc_info=True)
+        # If still missing, compute in-memory spans for response only
+        if any(getattr(r, "span_start", None) is None or getattr(r, "span_end", None) is None for r in rows):
+            sent_spans = split_sentences(rt.content or "", rt.lang)
 
     def _row_item(r):
         s0 = r.span_start

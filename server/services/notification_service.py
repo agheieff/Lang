@@ -1,13 +1,16 @@
-"""
-Server-Sent Events (SSE) notification service.
-Manages real-time updates to clients about text generation progress.
+"""Server-Sent Events (SSE) notification service.
+
+This module is used by both the home page and the reading view to
+stream generation progress events. It needs to coordinate events
+coming from background threads with async FastAPI request handlers
+without ever blocking the event loop.
 """
 
 import asyncio
 import json
 import logging
-from datetime import datetime
-from queue import Queue, Empty
+from datetime import datetime, timezone
+from queue import Empty, Full, Queue
 from typing import Any, Dict, List, Optional, Set
 from weakref import WeakSet
 
@@ -22,7 +25,7 @@ class SSEEvent:
     def __init__(self, event_type: str, data: Dict[str, Any], event_id: Optional[str] = None):
         self.type = event_type
         self.data = data
-        self.id = event_id or str(int(datetime.utcnow().timestamp() * 1000))
+        self.id = event_id or str(int(datetime.now(timezone.utc).timestamp() * 1000))
     
     def format(self) -> str:
         """Format the event for SSE protocol."""
@@ -42,10 +45,15 @@ class ClientConnection:
         self.account_id = account_id
         self.lang = lang
         self.queue = queue
-        self.last_ping = datetime.utcnow()
+        self.last_ping = datetime.now(timezone.utc)
     
     def put_event(self, event: SSEEvent) -> bool:
-        """Try to put an event in the queue. Returns False if queue is full."""
+        """Try to put an event in the queue.
+
+        Uses a standard :class:`queue.Queue` so producers in background
+        threads never block the asyncio event loop. The async SSE
+        consumer thread pulls from this queue via ``run_in_executor``.
+        """
         try:
             self.queue.put_nowait(event)
             return True
@@ -74,6 +82,8 @@ class NotificationService:
         # Use WeakSet to avoid memory leaks if clients disconnect without unsubscribing
         self._connections: Dict[str, WeakSet[ClientConnection]] = {}
         self._connection_count = 0  # For generating unique connection IDs
+        # Strong references to queues per account/lang to ensure broadcasts work without fragile weakrefs
+        self._queues_by_key: Dict[str, set[Queue]] = {}
     
     def subscribe(self, account_id: int, lang: str) -> Queue:
         """
@@ -83,20 +93,24 @@ class NotificationService:
             Queue that will receive SSEEvent objects
         """
         key = f"{account_id}:{lang}"
-        queue = Queue(maxsize=50)  # Limit queue size to prevent memory bloat
+        queue: Queue = Queue(maxsize=50)  # thread-safe; consumed asynchronously
         connection = ClientConnection(account_id, lang, queue)
         
         if key not in self._connections:
             self._connections[key] = WeakSet()
         
         self._connections[key].add(connection)
+        # Keep a strong ref to the queue so broadcasts always have a live target
+        if key not in self._queues_by_key:
+            self._queues_by_key[key] = set()
+        self._queues_by_key[key].add(queue)
         logger.info(f"[SSE] Client subscribed: account={account_id} lang={lang}")
         
         # Send initial connection event
         connection.put_event(SSEEvent("connected", {
             "account_id": account_id,
             "lang": lang,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }))
         
         return queue
@@ -121,6 +135,14 @@ class NotificationService:
                 # Clean up empty sets
                 if not self._connections[key]:
                     del self._connections[key]
+        # Also remove from strong queue registry
+        if key in self._queues_by_key:
+            try:
+                self._queues_by_key[key].discard(queue)
+                if not self._queues_by_key[key]:
+                    del self._queues_by_key[key]
+            except Exception:
+                pass
     
     def broadcast_to_account(self, account_id: int, lang: str, event: SSEEvent) -> int:
         """
@@ -130,33 +152,38 @@ class NotificationService:
             Number of clients that received the event
         """
         key = f"{account_id}:{lang}"
-        if key not in self._connections:
-            return 0
-        
         sent_count = 0
-        dead_connections = []
-        
-        for connection in list(self._connections[key]):
-            if connection.put_event(event):
-                sent_count += 1
-            else:
-                # Queue is full, connection is probably dead
-                dead_connections.append(connection)
-        
-        # Clean up dead connections
-        for dead_conn in dead_connections:
-            self._connections[key].discard(dead_conn)
-            
-        if dead_connections:
-            logger.info(f"[SSE] Cleaned up {len(dead_connections)} dead connections for account={account_id}")
-        
+        # Broadcast via live ClientConnection objects (best effort)
+        if key in self._connections:
+            dead_connections = []
+            for connection in list(self._connections[key]):
+                if connection.put_event(event):
+                    sent_count += 1
+                else:
+                    dead_connections.append(connection)
+            for dead_conn in dead_connections:
+                self._connections[key].discard(dead_conn)
+            if dead_connections:
+                logger.info(f"[SSE] Cleaned up {len(dead_connections)} dead connections for account={account_id}")
+        # Also broadcast to all registered queues (strong refs) to ensure delivery
+        if key in self._queues_by_key:
+            for q in list(self._queues_by_key[key]):
+                try:
+                    q.put_nowait(event)
+                    sent_count += 1
+                except Exception:
+                    # Drop problematic queues
+                    try:
+                        self._queues_by_key[key].discard(q)
+                    except Exception:
+                        pass
         return sent_count
     
     def send_generation_started(self, account_id: int, lang: str, text_id: int) -> None:
         """Notify that text generation has started."""
         event = SSEEvent("generation_started", {
             "text_id": text_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         self.broadcast_to_account(account_id, lang, event)
         logger.info(f"[SSE] generation_started: account={account_id} text_id={text_id}")
@@ -165,7 +192,7 @@ class NotificationService:
         """Notify that text content is ready."""
         event = SSEEvent("content_ready", {
             "text_id": text_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         self.broadcast_to_account(account_id, lang, event)
         logger.info(f"[SSE] content_ready: account={account_id} text_id={text_id}")
@@ -174,7 +201,7 @@ class NotificationService:
         """Notify that translations are complete."""
         event = SSEEvent("translations_ready", {
             "text_id": text_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         self.broadcast_to_account(account_id, lang, event)
         logger.info(f"[SSE] translations_ready: account={account_id} text_id={text_id}")
@@ -184,7 +211,7 @@ class NotificationService:
         event = SSEEvent("generation_failed", {
             "text_id": text_id,
             "error": error,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         self.broadcast_to_account(account_id, lang, event)
         logger.info(f"[SSE] generation_failed: account={account_id} text_id={text_id}")
@@ -194,26 +221,74 @@ class NotificationService:
         Create a FastAPI SSE streaming response for a client.
         """
         queue = self.subscribe(account_id, lang)
-        
+
         async def event_stream():
             try:
-                # Send initial event
-                yield "data: {\"type\": \"connected\", \"timestamp\": \"" + datetime.utcnow().isoformat() + "\"}\n\n"
+                # Check current text readiness immediately on connection
+                from ..utils.session_manager import db_manager
+                from ..services.readiness_service import ReadinessService
+                from ..services.selection_service import SelectionService
                 
+                try:
+                    with db_manager.transaction(account_id) as db:
+                        selection_service = SelectionService()
+                        current_text = selection_service.pick_current_or_new(db, account_id, lang)
+                        
+                        if current_text:
+                            readiness_service = ReadinessService()
+                            is_ready, reason = readiness_service.evaluate(db, current_text, account_id)
+                            
+                            # Check if content is ready (text exists but translations might not be)
+                            if current_text.content and current_text.generated_at:
+                                content_event = SSEEvent("content_ready", {
+                                    "text_id": current_text.id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                                yield content_event.format()
+                            
+                            # Check if translations are fully ready
+                            if is_ready and reason == "both":
+                                ready_event = SSEEvent("translations_ready", {
+                                    "text_id": current_text.id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                                yield ready_event.format()
+                            # Also send a general "text_ready" event for home page listeners
+                            text_ready_event = SSEEvent("text_ready", {
+                                "text_id": current_text.id,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                            yield text_ready_event.format()
+                except Exception as e:
+                    logger.warning(f"[SSE] Failed to check initial readiness: {e}")
+                
+                # Send initial connected event
+                yield (
+                    "data: {\"type\": \"connected\", \"timestamp\": \""
+                    + datetime.now(timezone.utc).isoformat()
+                    + "\"}\n\n"
+                )
+
+                loop = asyncio.get_running_loop()
+
                 while True:
                     try:
-                        # Get event from queue with timeout
-                        event = queue.get(timeout=30)  # 30 second timeout
+                        # Offload blocking Queue.get() to a worker thread so we
+                        # never block the asyncio event loop. Timeout ensures
+                        # we emit heartbeats even when there are no events.
+                        event = await loop.run_in_executor(
+                            None, queue.get, True, 30.0
+                        )
                         yield event.format()
-                        
-                        # If client has disconnected, queue operations will fail
-                        # and we should break out of the loop
-                        if event.type == "heartbeat" and not hasattr(event, 'keep_alive'):
-                            break
-                            
+
                     except Empty:
-                        # Send heartbeat to keep connection alive
-                        yield "data: {\"type\": \"heartbeat\", \"timestamp\": \"" + datetime.utcnow().isoformat() + "\"}\n\n"
+                        # No events within the timeout window – send heartbeat
+                        # so clients know the connection is still alive.
+                        yield (
+                            "data: {\"type\": \"heartbeat\", \"timestamp\": \""
+                            + datetime.now(timezone.utc).isoformat()
+                            + "\"}\n\n"
+                        )
                         
             except Exception as e:
                 logger.error(f"[SSE] Stream error for account={account_id}: {e}")

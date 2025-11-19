@@ -19,7 +19,7 @@ from ..utils.json_parser import extract_structured_translation, extract_word_tra
 from ..utils.gloss import compute_spans
 from ..llm.client import _pick_openrouter_model, chat_complete_with_raw
 from ..utils.text_segmentation import split_sentences
-    return out
+
 
 
 def retry_missing_words(account_id: int, text_id: int, log_dir: Path) -> bool:

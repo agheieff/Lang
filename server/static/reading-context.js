@@ -164,48 +164,7 @@
     }catch(_e){ return null; }
   }
 
-  function buildSentenceOffsets(plainText, items){
-    // Greedy forward search to assign char spans to each sentence in order
-    let pos = 0;
-    const out = [];
-    for(const it of items){
-      const src = normalize(it.source);
-      if(!src) { out.push({ start: null, end: null, item: it }); continue; }
-      // search in the remaining text
-      // naive: find src in plainText starting from pos (ignore spaces diffs by condensing both)
-      // simple approach: try exact substring first
-      let foundAt = plainText.indexOf(it.source, pos);
-      if(foundAt < 0){
-        // fallback: try normalized space-insensitive search
-        // build a window around pos of ~2000 chars to limit cost
-        const windowEnd = Math.min(plainText.length, pos + 4000);
-        const windowStr = normalize(plainText.slice(pos, windowEnd));
-        const idxInWin = windowStr.indexOf(src);
-        if(idxInWin >= 0){
-          // re-expand approximate index to original by scanning
-          // Walk from pos to reach idxInWin counting non-collapsed whitespace
-          let i = pos, seen = 0;
-          while(i < windowEnd && seen < idxInWin){
-            const ch = plainText[i];
-            if(/\s/.test(ch)){
-              // collapse consecutive
-              while(i < windowEnd && /\s/.test(plainText[i])) i++;
-              seen++;
-            } else { i++; seen++; }
-          }
-          foundAt = i;
-        }
-      }
-      if(foundAt >= 0){
-        const endAt = foundAt + (it.source || '').length;
-        out.push({ start: foundAt, end: endAt, item: it });
-        pos = endAt;
-      } else {
-        out.push({ start: null, end: null, item: it });
-      }
-    }
-    return out;
-  }
+  // Heuristic mapping removed: we rely on server-provided spans
 
   function showPopupAt(x, y, html, opts){
     const tip = ensureTooltip();
@@ -251,39 +210,18 @@
     if(unit === 'sentence'){
       let data = await loadTranslations(textId, 'sentence', 0);
       let items = (data && Array.isArray(data.items)) ? data.items : [];
-      // If nothing yet, wait briefly for server to populate
       if(!items.length){ data = await loadTranslations(textId, 'sentence', 10); items = (data && Array.isArray(data.items)) ? data.items : []; }
-      // Prefer direct span mapping when server provides start/end
-      let match = null;
-      const hasSpans = items.some(it => Number.isInteger(it.start) && Number.isInteger(it.end));
-      if(hasSpans){
-        const ci = (bounds.end > bounds.start) ? Math.max(bounds.start, Math.min(bounds.end - 1, charIdx)) : charIdx;
-        // Choose by max overlap with the computed sentence bounds; tie-breaker by distance to click index
-        let bestIt = null; let bestOverlap = -1; let bestDist = Infinity;
-        for(const it of items){
-          if(!Number.isInteger(it.start) || !Number.isInteger(it.end) || it.end <= it.start) continue;
-          const a = Math.max(bounds.start, it.start);
-          const b = Math.min(bounds.end, it.end);
-          const overlap = Math.max(0, b - a);
-          const mid = (it.start + it.end) / 2;
-          const dist = Math.abs(ci - mid);
-          if(overlap > bestOverlap || (overlap === bestOverlap && dist < bestDist)){
-            bestOverlap = overlap; bestDist = dist; bestIt = it;
-          }
-        }
-        if(bestIt && (bestOverlap > 0 || (ci >= bestIt.start && ci < bestIt.end))){ match = bestIt; }
+      const withSpans = items.filter(it => Number.isInteger(it.start) && Number.isInteger(it.end) && it.end > it.start);
+      if(!withSpans.length){
+        showPopupAt(ev.clientX, ev.clientY, '<div class="text-gray-500">No translation available yet.</div>', { maxWidth: '640px' });
+        return;
       }
-      // match by normalized source (if we have one and nothing matched yet)
-      if(src){
-        if(!match){
-        for(const it of items){ if(normalize(it.source) === src) { match = it; break; } }
-        if(!match){ for(const it of items){ const s2 = normalize(it.source); if(s2.includes(src) || src.includes(s2)) { match = it; break; } } }
-      }
-      }
-      // Fallback: choose the sentence whose mapped span covers the click position
-      if(!match && items.length){
-        const mapping = buildSentenceOffsets(plain, items);
-        for(const m of mapping){ if(m.start != null && m.end != null && charIdx >= m.start && charIdx < m.end){ match = m.item; break; } }
+      const ci = (bounds.end > bounds.start) ? Math.max(bounds.start, Math.min(bounds.end - 1, charIdx)) : charIdx;
+      let match = null; let bestDist = Infinity;
+      for(const it of withSpans){
+        if(ci >= it.start && ci < it.end){ match = it; break; }
+        const mid = (it.start + it.end) / 2; const d = Math.abs(ci - mid);
+        if(d < bestDist){ bestDist = d; match = it; }
       }
       if(!match){
         showPopupAt(ev.clientX, ev.clientY, '<div class="text-gray-500">No translation available yet.</div>', { maxWidth: '640px' });
@@ -310,13 +248,12 @@
     // Fallback: stitch sentence translations for sentences inside this paragraph span
     const sdata = await loadTranslations(textId, 'sentence');
     const sits = (sdata && Array.isArray(sdata.items)) ? sdata.items : [];
-    const mapping = buildSentenceOffsets(plain, sits);
     const parts = [];
-    for(const m of mapping){
-      if(m.start == null || m.end == null) continue;
-      if(m.start >= bounds.end) break;
-      if(m.end <= bounds.start) continue;
-      if(m.item && m.item.translation) parts.push(String(m.item.translation));
+    for(const it of sits){
+      if(!Number.isInteger(it.start) || !Number.isInteger(it.end)) continue;
+      if(it.start >= bounds.end) break;
+      if(it.end <= bounds.start) continue;
+      if(it.translation) parts.push(String(it.translation));
     }
     if(!parts.length){
       showPopupAt(ev.clientX, ev.clientY, '<div class="text-gray-500">No translation available yet.</div>', { maxWidth: '740px' });

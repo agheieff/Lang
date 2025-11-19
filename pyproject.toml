@@ -65,3 +65,8 @@ dev = [
 
 ## UI is now self-contained - no external libs needed
 ## local auth is vendored under server/auth
+
+[tool.pytest.ini_options]
+filterwarnings = [
+  "ignore:Accessing argon2.__version__ is deprecated:DeprecationWarning:passlib.handlers.argon2",
+]

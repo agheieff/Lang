@@ -122,9 +122,10 @@
                 });
                 
                 this.eventSource.addEventListener('content_ready', (event) => {
-                    console.log('[SSE] Content ready:', JSON.parse(event.data));
+                    const payload = JSON.parse(event.data);
+                    console.log('[SSE] Content ready:', payload);
                     if (this.handlers.onContentReady) {
-                        this.handlers.onContentReady(JSON.parse(event.data));
+                        this.handlers.onContentReady(payload);
                     }
                 });
                 
@@ -228,13 +229,20 @@
                         statusEl.className = 'ml-3 text-sm text-yellow-500';
                     }
                     
-                    // Refresh the page to show the content
-                    // Using HTMX if available, otherwise just reload
-                    if (window.htmx) {
-                        window.htmx.trigger('#current-reading', 'refreshContent');
-                    } else {
-                        // Gentle refresh that preserves state
-                        window.location.reload();
+                    // Only refresh if this event refers to the current text
+                    const textEl = document.getElementById('reading-text');
+                    const curId = textEl && textEl.dataset ? Number(textEl.dataset.textId) : null;
+                    if (curId && data && Number(data.text_id) === curId) {
+                        if (window.ReadingController && window.ReadingController.requestRefresh) {
+                            window.ReadingController.requestRefresh('content_ready_sse');
+                        } else if (window.htmx && window.htmx.ajax) {
+                            window.htmx.ajax('GET', '/reading/current', {
+                                target: '#current-reading',
+                                swap: 'innerHTML',
+                            });
+                        } else {
+                            window.location.reload();
+                        }
                     }
                 },
                 
@@ -310,12 +318,11 @@
             const textId = textEl ? textEl.dataset.textId : null;
             
             if (textId) {
-                fetch(`/reading/${textId}/words?wait=5`)
+                fetch(`/reading/${textId}/words`)
                     .then(response => response.json())
                     .then(data => {
                         if (data.words && data.words.length > 0) {
-                            // Update the page with words
-                            window.updateWordsData && window.updateWordsData(data.words);
+                            if (window.arcApplyWords) window.arcApplyWords(data.words);
                         }
                     })
                     .catch(error => {

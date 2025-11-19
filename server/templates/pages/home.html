@@ -40,95 +40,6 @@
     </div>
     <script>
     (function(){
-      // Enable the "Next text" button when the next text is fully ready (words + sentences)
-      function initNextReadyPolling(){
-        const container = document.getElementById('current-reading');
-        if (!container) return;
-        const textEl = container.querySelector('#reading-text');
-        const btn = container.querySelector('#next-btn');
-        const st = container.querySelector('#next-status');
-        // Only start after a reading block is rendered (button exists)
-        if (!textEl || !btn) return;
-        const curId = String(textEl.dataset && textEl.dataset.textId || '');
-        // Avoid duplicate timers for the same rendered text
-        if (container.dataset.nextPollFor === curId) return;
-        container.dataset.nextPollFor = curId;
-        if (container.__nextPollTimer) { try { clearTimeout(container.__nextPollTimer); } catch(_) {} }
-
-        // Use SSE instead of polling with fallback
-        const pollFallback = async () => {
-          try {
-            const res = await fetch('/reading/next/ready?wait=25', { headers: { 'Accept': 'application/json' } });
-            if (res.ok) {
-              const data = await res.json();
-              if (data && data.ready) {
-                if (data.ready_reason === 'both') {
-                  try { btn.disabled = false; } catch(_) {}
-                  try { if (st) { if (st.parentNode) st.parentNode.removeChild(st); else st.textContent = ''; } } catch(_) {}
-                  container.__nextPollTimer = null;
-                  return; // stop polling when fully ready
-                } else {
-                  try { btn.disabled = true; } catch(_) {}
-                  try { if (st) st.textContent = 'Preparing next...'; } catch(_) {}
-                }
-              }
-            }
-          } catch(_) {}
-          container.__nextPollTimer = setTimeout(pollFallback, 1500);
-        };
-        
-        const eventSource = new EventSource('/reading/next/ready/sse');
-        
-        eventSource.onmessage = function(event) {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.error) {
-              console.error('SSE error:', data);
-              return;
-            }
-            
-            if (data.ready) {
-              if (data.ready_reason === 'both' || data.status === 'complete') {
-                try { btn.disabled = false; } catch(_) {}
-                try { if (st) { if (st.parentNode) st.parentNode.removeChild(st); else st.textContent = ''; } } catch(_) {}
-                eventSource.close(); // close SSE when ready
-                return;
-              } else {
-                try { btn.disabled = true; } catch(_) {}
-                try { if (st) st.textContent = 'Preparing next...'; } catch(_) {}
-              }
-            }
-            
-            if (data.retry_info && data.retry_info.can_retry) {
-              try { if (st) st.textContent = data.retry_info.reason || 'Retrying...'; } catch(_) {}
-            }
-          } catch(e) {
-            console.error('Error parsing SSE data:', e);
-          }
-        };
-        
-        eventSource.onerror = function(event) {
-          console.error('SSE connection error:', event);
-          try { if (st) st.textContent = 'Connection error...'; } catch(_) {}
-          try { 
-            if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
-              eventSource.close(); 
-            }
-          } catch(_) {}
-          // Fallback to polling if SSE fails
-          container.__nextPollTimer = setTimeout(() => {
-            try { if (st) st.textContent = 'Fallback polling...'; } catch(_) {}
-            pollFallback(); // fallback to old polling method
-          }, 5000);
-        };
-        
-        // Clean up on page unload
-        window.addEventListener('beforeunload', () => {
-          if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
-            eventSource.close();
-          }
-        });
-      }
       async function initWordClicks(){
         const container = document.getElementById('current-reading');
         const textEl = container && container.querySelector('#reading-text');
@@ -272,37 +183,25 @@
             const textContent = textEl.textContent || '';
             initUnifiedSession(textId, titleWords, words, textContent, titleText, 'en');
           } catch(err) {}
-          try { await fetchAndMergeWords(textEl, Number(textId)); } catch {}
-        } else {
-          try {
-            if (textEl.dataset.wordsFetching === '1') return;
-            textEl.dataset.wordsFetching = '1';
-            const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
-            if (res.ok) {
-              const data = await res.json();
-              const ws = (data && Array.isArray(data.words)) ? data.words : [];
-              if (ws.length) {
-                makeClickable(textEl, ws);
-                attachTooltip(textEl, ws);
-                // Initialize unified session storage
-                try {
-                  const titleEl = container && container.querySelector('#reading-title');
-                  const titleText = titleEl ? titleEl.textContent.trim() : '';
-                  const titleWords = getEmbeddedTitleWords() || [];
-                  const textContent = textEl.textContent || '';
-                  initUnifiedSession(textId, titleWords, ws, textContent, titleText, 'en');
-                } catch(err) {}
-              } else {
-                if (!textEl.dataset.wordsPolling) {
-                  textEl.dataset.wordsPolling = '1';
-                  pollWords(textEl, Number(textId));
-                }
-              }
-            }
-          } catch {}
-          finally { textEl.dataset.wordsFetching = '0'; }
         }
       }
+
+      // Expose entry points for (re)initializing and updating a freshly
+      // rendered reading block so other scripts can call them.
+      window.arcInitReadingBlock = function(){
+        try { initWordClicks(); } catch (_e) {}
+        try { initSentenceTranslations(); } catch (_e) {}
+      };
+
+      window.arcApplyWords = function(words){
+        try {
+          const container = document.getElementById('current-reading');
+          const textEl = container && container.querySelector('#reading-text');
+          if (!textEl || !Array.isArray(words) || !words.length) return;
+          makeClickable(textEl, words);
+          attachTooltip(textEl, words);
+        } catch (_e) {}
+      };
 
       async function initSentenceTranslations(){
         const textEl = document.getElementById('reading-text');
@@ -401,34 +300,7 @@
           deriveAndStoreCaches(data);
         }catch{}
       }
-      async function fetchAndMergeWords(textEl, textId){
-        try{
-          const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
-          if (!res.ok) return;
-          const data = await res.json();
-          const ws = (data && Array.isArray(data.words)) ? data.words : [];
-          if (!ws.length) return;
-          // Wrap only missing spans
-          wrapBySpans(textEl, ws);
-        }catch{}
-      }
-      async function pollWords(textEl, textId){
-        if (!textEl || !textId) return;
-        if (textEl.querySelector('[data-word-index]')) return; // already clickable
-        try {
-          const res = await fetch(`/reading/${Number(textId)}/words?wait=25`, { headers: { 'Accept': 'application/json' } });
-          if (res.ok) {
-            const data = await res.json();
-            const ws = (data && Array.isArray(data.words)) ? data.words : [];
-            if (ws.length) {
-              makeClickable(textEl, ws);
-              attachTooltip(textEl, ws);
-              return;
-            }
-          }
-        } catch {}
-        setTimeout(() => pollWords(textEl, textId), 2000);
-      }
+      // SSE path will fetch and apply words when ready; no local polling.
       function getEmbeddedWords(){
         const el = document.getElementById('reading-words-json');
         if (!el) return null;
@@ -729,9 +601,7 @@
       }
       function maybeInit(ev){
         if (ev && ev.detail && ev.detail.elt && ev.detail.elt.id === 'current-reading') {
-          initWordClicks();
-          initSentenceTranslations();
-          initNextReadyPolling();
+          if (window.arcInitReadingBlock) window.arcInitReadingBlock();
         }
       }
       document.addEventListener('htmx:afterSwap', maybeInit);
@@ -783,4 +653,21 @@
   </div>
   {% endif %}
 </div>
+
+{% if is_authenticated and has_profile %}
+<script>
+(function() {
+    'use strict';
+
+    document.addEventListener('DOMContentLoaded', function() {
+        setTimeout(function() {
+            if (window.ReadingController && window.ReadingController.initHomeSSE) {
+                window.ReadingController.initHomeSSE();
+            }
+        }, 500);
+    });
+})();
+</script>
+{% endif %}
+
 {% endblock %}

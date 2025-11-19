@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import String, Integer, DateTime, ForeignKey, UniqueConstraint, JSON, Float, Boolean, Index
@@ -20,7 +20,7 @@ class Language(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(16), unique=True, index=True)  # e.g., 'es', 'zh', 'en'
     name: Mapped[str] = mapped_column(String(64))  # e.g., 'Spanish', 'Chinese', 'English'
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class Profile(Base):
@@ -35,7 +35,7 @@ class Profile(Base):
     # Store language codes directly (not modifiable by user after creation)
     lang: Mapped[str] = mapped_column(String(16), index=True)  # language being learned (e.g., 'es', 'zh')
     target_lang: Mapped[str] = mapped_column(String(16), index=True)  # user's native/reference language (e.g., 'en')
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # User's level in this language
     level_value: Mapped[float] = mapped_column(Float, default=0.0)  # continuous estimate (e.g., 0..10)
     level_var: Mapped[float] = mapped_column(Float, default=1.0)    # uncertainty / learning-rate proxy
@@ -62,16 +62,16 @@ class ReadingText(Base):
     account_id: Mapped[int] = mapped_column(Integer, index=True)
     lang: Mapped[str] = mapped_column(String(16), index=True)
     content: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual
     # Generation lifecycle timestamps
-    request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
-    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     # Read tracking
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
-    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     # First time the text was opened by the user
-    opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 
 
 # Placeholder for future SRS tables (not implemented yet)
@@ -83,7 +83,7 @@ class Card(Base):
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     head: Mapped[str] = mapped_column(String(256))
     lang: Mapped[str] = mapped_column(String(16), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class SubscriptionTier(Base):
@@ -140,17 +140,17 @@ class Lexeme(Base):
     exposures: Mapped[int] = mapped_column(Integer, default=0)
     clicks: Mapped[int] = mapped_column(Integer, default=0)
     distinct_texts: Mapped[int] = mapped_column(Integer, default=0)
-    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
-    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
-    last_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
-    next_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
-    last_decay_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    last_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    next_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    last_decay_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     # Familiarity tracking for word selection
     familiarity: Mapped[Optional[float]] = mapped_column(Float, default=None)
-    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class LexemeVariant(Base):
@@ -163,7 +163,7 @@ class LexemeVariant(Base):
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
     script: Mapped[str] = mapped_column(String(8), index=True)  # Hans | Hant
     form: Mapped[str] = mapped_column(String(256), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 # UserLexeme removed - merged into Lexeme model
@@ -173,7 +173,7 @@ class WordEvent(Base):
     __tablename__ = "word_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     account_id: Mapped[int] = mapped_column(Integer, index=True)
     profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
     # Note: lexeme_id removed since lexemes are now user-specific and contain account/profile info
@@ -195,7 +195,7 @@ class UserLexemeContext(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     lexeme_id: Mapped[int] = mapped_column(ForeignKey("lexemes.id", ondelete="CASCADE"), index=True)
     context_hash: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 # LexemeInfo removed - frequency and level data moved directly to Lexeme model
@@ -215,7 +215,7 @@ class GenerationLog(Base):
     level_hint: Mapped[Optional[str]] = mapped_column(String(128), default=None)
     approx_len: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     unit: Mapped[Optional[str]] = mapped_column(String(16), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class ReadingTextTranslation(Base):
@@ -245,7 +245,7 @@ class ReadingTextTranslation(Base):
     translated_text: Mapped[str] = mapped_column(String)
     provider: Mapped[Optional[str]] = mapped_column(String(64), default=None)
     model: Mapped[Optional[str]] = mapped_column(String(128), default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class ReadingWordGloss(Base):
@@ -275,7 +275,7 @@ class ReadingWordGloss(Base):
     grammar: Mapped[dict] = mapped_column(JSON, default=dict)
     span_start: Mapped[int] = mapped_column(Integer)
     span_end: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class TranslationLog(Base):
@@ -291,7 +291,7 @@ class TranslationLog(Base):
     prompt: Mapped[dict] = mapped_column(JSON, default=dict)
     segments: Mapped[dict] = mapped_column(JSON, default=dict)
     response: Mapped[Optional[str]] = mapped_column(String, default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class ReadingLookup(Base):
@@ -349,7 +349,7 @@ class NextReadyOverride(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int] = mapped_column(Integer, index=True)
     lang: Mapped[str] = mapped_column(String(16), index=True)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 
 
 # LanguageWordList removed - word lists are generated dynamically from user lexemes
@@ -372,7 +372,7 @@ class LLMRequestLog(Base):
     request: Mapped[dict] = mapped_column(JSON, default=dict)  # typically {messages: [...]} and params
     response: Mapped[Optional[str]] = mapped_column(String, default=None)
     error: Mapped[Optional[str]] = mapped_column(String, default=None)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class GenerationRetryAttempt(Base):
@@ -397,6 +397,6 @@ class GenerationRetryAttempt(Base):
     # Error details if failed
     error_details: Mapped[Optional[str]] = mapped_column(String, default=None)
     # When this retry was attempted
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    # When this retry completed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)

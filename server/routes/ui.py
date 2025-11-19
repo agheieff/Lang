@@ -55,26 +55,28 @@ def words_page(
         except Exception:
             eff_lang = None
     return t.TemplateResponse(
-        "pages/words.html", {"request": request, "title": "My Words", "lang": eff_lang or "es"}
+        request,
+        "pages/words.html",
+        {"title": "My Words", "lang": eff_lang or "es"},
     )
 
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     t = _templates()
-    return t.TemplateResponse("pages/login.html", {"request": request, "title": "Log in"})
+    return t.TemplateResponse(request, "pages/login.html", {"title": "Log in"})
 
 
 @router.get("/signup", response_class=HTMLResponse)
 def signup_page(request: Request):
     t = _templates()
-    return t.TemplateResponse("pages/signup.html", {"request": request, "title": "Sign up"})
+    return t.TemplateResponse(request, "pages/signup.html", {"title": "Sign up"})
 
 
 @router.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, account: Account = Depends(_get_current_account)):
     t = _templates()
-    return t.TemplateResponse("pages/profile.html", {"request": request, "title": "Profile"})
+    return t.TemplateResponse(request, "pages/profile.html", {"title": "Profile"})
 
 
 @router.get("/settings", response_class=HTMLResponse)
@@ -88,18 +90,17 @@ def settings_page(
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
 
     context = {
-        "request": request,
         "title": "Settings",
-        "current_profile": profile or {}
+        "current_profile": profile or {},
     }
 
-    return t.TemplateResponse("pages/settings.html", context)
+    return t.TemplateResponse(request, "pages/settings.html", context)
 
 
 @router.get("/stats", response_class=HTMLResponse)
 def stats_page(request: Request, account: Account = Depends(_get_current_account)):
     t = _templates()
-    return t.TemplateResponse("pages/stats.html", {"request": request, "title": "Statistics"})
+    return t.TemplateResponse(request, "pages/stats.html", {"title": "Statistics"})
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -128,7 +129,6 @@ def home_page(
         profile = db.query(Profile).filter(Profile.account_id == account_id).first()
 
     context = {
-        "request": request,
         "title": "Arcadia Lang",
         "has_profile": profile is not None,
         "profile_lang": (profile.lang if profile is not None else None),
@@ -137,7 +137,7 @@ def home_page(
 
     # Do not generate or fetch reading synchronously here; HTMX will fetch it after load.
 
-    return t.TemplateResponse("pages/home.html", context)
+    return t.TemplateResponse(request, "pages/home.html", context)
 
 
 ## Logout handled by /auth/logout in the auth router
