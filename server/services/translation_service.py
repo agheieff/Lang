@@ -26,6 +26,7 @@ from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGl
 from ..utils.json_parser import (
     extract_structured_translation,
     extract_word_translations,
+    extract_json_from_text,
 )
 from ..utils.gloss import compute_spans
 
@@ -147,9 +148,17 @@ class TranslationService:
             text_content, job_dir, provider, model_id, base_url,
             tr_messages
         )
+        
+        # Generate title translation if a title is provided
+        title_success = False
+        if text_title:
+            title_success = self._generate_title_translation(
+                account_db, account_id, text_id, lang, target_lang,
+                text_title, job_dir, provider, model_id, base_url
+            )
             
-            # Create result
-        success = words_success or sentences_success  # Partial success is ok
+        # Create result
+        success = words_success or sentences_success or title_success  # Partial success is ok
         return TranslationResult(
             success=success,
             words=words_success,
@@ -235,6 +244,13 @@ class TranslationService:
                     account_db, account_id, text_id, lang, s, seg, tup, msgs_used, existing, seen
                 )
         
+            # Flush the session to ensure word translations are written
+            try:
+                account_db.flush()
+            except Exception as e:
+                print(f"[TRANSLATION] Failed to flush word translations: {e}")
+                return False
+        
             return True
             
         except Exception as e:
@@ -313,10 +329,117 @@ class TranslationService:
                         ))
                         idx += 1
             
+            # Flush the session to ensure data is written
+            try:
+                account_db.flush()
+            except Exception as e:
+                print(f"[TRANSLATION] Failed to flush sentence translations: {e}")
+                return False
+            
             return True
             
         except Exception as e:
             print(f"[TRANSLATION] Sentence translation failed: {e}")
+            return False
+    
+    def _generate_title_translation(self,
+                                account_db: Session,
+                                account_id: int,
+                                text_id: int,
+                                lang: str,
+                                target_lang: str,
+                                text_title: str,
+                                job_dir: Path,
+                                provider: str,
+                                model_id: Optional[str],
+                                base_url: Optional[str]) -> bool:
+        """Generate and persist title translation."""
+        try:
+            # Build title translation prompt
+            from ..llm.prompts import build_title_translation_prompt
+            title_messages = build_title_translation_prompt(lang, target_lang, text_title)
+            
+            # Call LLM for title translation
+            title_buf, title_resp, used_provider, used_model = llm_call_and_log_to_file(
+                title_messages, provider, model_id, base_url, job_dir / "title_translation.json"
+            )
+            
+            if not title_buf:
+                return False
+            
+            # Log to DB (main thread) for title translation
+            try:
+                log_llm_request(
+                    account_db,
+                    account_id=account_id,
+                    text_id=text_id,
+                    kind="title_translation",
+                    provider=used_provider,
+                    model=used_model,
+                    base_url=base_url,
+                    request={"messages": title_messages},
+                    response=title_resp,
+                    status="ok",
+                )
+            except Exception:
+                pass
+            
+            # Extract title translation
+            try:
+                # Try to parse as structured response
+                title_parsed = extract_structured_translation(title_buf)
+                title_translation = None
+                
+                if title_parsed and isinstance(title_parsed, dict):
+                    # Try to get translation from structured response
+                    paragraphs = title_parsed.get("paragraphs", [])
+                    if paragraphs and len(paragraphs) > 0:
+                        sentences = paragraphs[0].get("sentences", [])
+                        if sentences and len(sentences) > 0:
+                            title_translation = sentences[0].get("translation")
+                
+                # If structured parsing failed, try direct extraction
+                if not title_translation:
+                    title_translation = extract_json_from_text(title_buf, "translation")
+                
+                # Still no result, use the response content directly if it's simple
+                if not title_translation and isinstance(title_buf, str) and len(title_buf) < 200:
+                    title_translation = title_buf.strip()
+                
+                if not title_translation:
+                    print(f"[TRANSLATION] Could not extract title translation from: {title_buf}")
+                    return False
+                
+                # Save title translation to database
+                account_db.add(ReadingTextTranslation(
+                    account_id=account_id,
+                    text_id=text_id,
+                    unit="text",
+                    target_lang=target_lang,
+                    segment_index=0,
+                    span_start=0,
+                    span_end=len(text_title),
+                    source_text=text_title,
+                    translated_text=title_translation,
+                    provider=used_provider,
+                    model=used_model,
+                ))
+                
+                # Flush the session to ensure title translation is written
+                try:
+                    account_db.flush()
+                except Exception as e:
+                    print(f"[TRANSLATION] Failed to flush title translation: {e}")
+                    return False
+                
+                return True
+                
+            except Exception as e:
+                print(f"[TRANSLATION] Failed to parse title translation: {e}")
+                return False
+            
+        except Exception as e:
+            print(f"[TRANSLATION] Title translation failed: {e}")
             return False
     
     def _split_sentences(self, text: str, lang: str) -> List[Tuple[int, int, str]]:

@@ -16,6 +16,7 @@ from .readiness_service import ReadinessService
 from .state_manager import GenerationStateManager
 from .text_generation_service import TextGenerationService, TextGenerationResult
 from .translation_service import TranslationService
+from .translation_validation_service import TranslationValidationService
 from .notification_service import get_notification_service
 from .llm_common import build_reading_prompt_spec
 
@@ -100,6 +101,7 @@ class GenerationOrchestrator:
         self.state_manager = GenerationStateManager()
         self.text_gen_service = TextGenerationService()
         self.translation_service = TranslationService()
+        self.validation_service = TranslationValidationService()
         self.notification_service = get_notification_service()
         self.file_lock = FileLock(ttl_seconds=float(os.getenv("ARC_GEN_LOCK_TTL_SEC", "300")))
     
@@ -344,6 +346,13 @@ class GenerationOrchestrator:
                     global_db.close()
             
             if translation_result.success:
+                # Validate and potentially backfill missing translations
+                completeness = self.validation_service.validate_and_backfill(account_id, text_id)
+                
+                # Log validation results
+                print(f"[ORCHESTRATOR] Translation validation for text_id={text_id}: "
+                      f"words={completeness['words']}, sentences={completeness['sentences']}, title={completeness['title']}")
+                
                 # Notify translations are ready
                 self.notification_service.send_translations_ready(account_id, lang, text_id)
                 print(f"[ORCHESTRATOR] Translations completed for text_id={text_id}")
@@ -351,6 +360,8 @@ class GenerationOrchestrator:
                 print(f"[ORCHESTRATOR] Translation job failed for text_id={text_id}: {translation_result.error}")
                 # For partial failures, still notify that something is ready
                 if translation_result.words or translation_result.sentences:
+                    # Try validation even for partial failures
+                    completeness = self.validation_service.validate_and_backfill(account_id, text_id)
                     self.notification_service.send_translations_ready(account_id, lang, text_id)
             
         except Exception as e:

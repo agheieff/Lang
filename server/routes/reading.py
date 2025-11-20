@@ -782,3 +782,21 @@ async def next_ready_sse(
         }
     )
 
+
+@router.post("/reading/backfill/{text_id}")
+async def backfill_translations(
+    text_id: int,
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    """Backfill missing translations for a text."""
+    from ..services.translation_backfill_service import TranslationBackfillService
+    
+    try:
+        backfill_service = TranslationBackfillService()
+        results = backfill_service.backfill_missing_translations(account.id, text_id)
+        return {"success": True, "results": results}
+    except Exception as e:
+        logger.error(f"Backfill failed for text_id={text_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

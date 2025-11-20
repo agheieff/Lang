@@ -14,7 +14,7 @@ import json
 
 from sqlalchemy.orm import Session
 
-from ..models import LLMRequestLog
+from ..models import LLMRequestLog, ReadingTextTranslation
 from ..utils.json_parser import extract_json_from_text, extract_word_translations
 
 
@@ -146,3 +146,27 @@ class TitleExtractionService:
                 w.pop("span_end", None)
 
         return ws
+
+    def persist_title_translation(self, db: Session, account_id: int, text_id: int, title: str, title_translation: str, target_lang: str) -> bool:
+        """Persist title translation to reading_text_translations table."""
+        try:
+            db.add(ReadingTextTranslation(
+                account_id=account_id,
+                text_id=text_id,
+                unit="text",
+                target_lang=target_lang,
+                segment_index=0,
+                span_start=0,
+                span_end=len(title),
+                source_text=title,
+                translated_text=title_translation,
+                provider=None,  # We don't have provider info here
+                model=None,
+            ))
+            
+            # Flush to ensure data is written
+            db.flush()
+            return True
+        except Exception as e:
+            print(f"[TITLE] Failed to persist title translation: {e}")
+            return False

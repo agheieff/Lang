@@ -246,3 +246,22 @@ def build_translation_contexts(
     ]
 
     return {"structured": structured, "words": words}
+
+def build_title_translation_prompt(source_lang: str, target_lang: str, title: str) -> List[Dict[str, str]]:
+    """Build prompt for title translation."""
+    def _lang_display(code: str) -> str:
+        if code.startswith("zh"):
+            return "Chinese"
+        if code.startswith("es"):
+            return "Spanish"
+        if code.startswith("fr"):
+            return "French"
+        return code
+    
+    # Simple prompt for title translation
+    system_content = f"You are a professional translator. Translate the following {_lang_display(source_lang)} title to {_lang_display(target_lang)}. Provide only the translated title without any additional text or explanations."
+    
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": title},
+    ]
