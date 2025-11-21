@@ -45,6 +45,7 @@ class PromptSpec:
     script: Optional[str] = None  # for zh source formatting
     ci_target: Optional[float] = None
     preferences: Optional[str] = None
+    recent_titles: Optional[List[str]] = None
 
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
@@ -78,6 +79,11 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     if isinstance(spec.ci_target, (int, float)) and spec.ci_target:
         pct = int(round(float(spec.ci_target) * 100))
         ci_line = f"Aim for about {pct}% of tokens to be familiar for the learner; limit new vocabulary.\n"
+    
+    recent_titles_line = ""
+    if spec.recent_titles:
+        titles_str = ", ".join(f'"{t}"' for t in spec.recent_titles)
+        recent_titles_line = f"Here are the titles of the last {len(spec.recent_titles)} texts the user read: {titles_str}. Please generate something different/new.\n"
 
     # Build mapping for both legacy "*_line" placeholders and simplified {level}/{length}/{include_words}/{script}
     # Prefer a concise level code (e.g., HSK2, A2) before any description
@@ -101,12 +107,14 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         "length_line": length_line,
         "include_words_line": include_words_line,
         "ci_line": ci_line,
+        "recent_titles_line": recent_titles_line,
         # simplified single-value placeholders
         "level": simple_level,
         "length": simple_length,
         "include_words": simple_include,
         "script": script_label,
         "preferences": (spec.preferences or ""),
+        "recent_titles": (", ".join(spec.recent_titles) if spec.recent_titles else ""),
     }
 
     sys_content = _safe_format(sys_tpl, mapping)

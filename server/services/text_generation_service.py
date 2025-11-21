@@ -161,116 +161,86 @@ class TextGenerationService:
         for model_config in models_to_try:
             # Determine number of attempts based on provider
             provider = "openrouter" if "openrouter" in model_config.base_url else "local"
-            attempts = int(os.getenv("ARC_OR_READING_ATTEMPTS", "3")) if provider == "openrouter" else 1
             
-            for attempt in range(attempts):
-                try:
-                    print(f"[TEXT_GEN] Attempt {attempt + 1}/{attempts} for text_id={text_id} with model={model_config.display_name}")
+            # We now rely on the client's internal retry logic for transient errors.
+            # We only loop here to try different models if one fails completely.
+            try:
+                print(f"[TEXT_GEN] Generating text_id={text_id} with model={model_config.display_name}")
+                
+                # Call LLM using new configuration
+                text_buf, resp_dict, used_provider, used_model = self._complete_and_log(
+                    account_db,
+                    account_id,
+                    text_id,
+                    messages,
+                    model_config=model_config,
+                    out_path=job_dir / "text.json"
+                )
+                
+                if text_buf and text_buf.strip():
+                    # Success! Parse and store the result
+                    final_text_raw = extract_text_from_llm_response(text_buf) or text_buf
+                    final_text = str(final_text_raw).replace("\r\n", "\n").replace("\r", "\n")
                     
-                    # Call LLM using new configuration
-                    text_buf, resp_dict, used_provider, used_model = self._complete_and_log(
-                        account_db,
-                        account_id,
-                        text_id,
-                        messages,
-                        model_config=model_config,
-                        out_path=job_dir / "text.json"
-                    )
-                    
-                    if text_buf and text_buf.strip():
-                        # Success! Parse and store the result
-                        final_text_raw = extract_text_from_llm_response(text_buf) or text_buf
-                        final_text = str(final_text_raw).replace("\r\n", "\n").replace("\r", "\n")
-                        
-                        # Extract optional title
-                        try:
-                            title_val = extract_json_from_text(text_buf, "title")
-                            title = str(title_val) if title_val is not None else None
-                        except Exception:
-                            title = None
-                        
-                        if not final_text or not final_text.strip():
-                            raise ValueError("Empty or invalid text content")
-                        
-                        # Update the database record
-                        rt = account_db.query(ReadingText).filter(ReadingText.id == text_id).first()
-                        if rt:
-                            rt.content = final_text
-                            rt.generated_at = datetime.datetime.utcnow()
-                            account_db.commit()
-                            
-                            result = TextGenerationResult(
-                                success=True,
-                                text=final_text,
-                                title=title,
-                                provider=used_provider,
-                                model=used_model,
-                                response_dict=resp_dict,
-                                log_dir=job_dir
-                            )
-                            
-                            print(f"[TEXT_GEN] Successfully generated text_id={text_id} with provider={used_provider}")
-                            return result
-                        
-                except Exception as e:
-                    # Print the actual error for debugging
-                    error_msg = str(e)
-                    error_type = type(e).__name__
-                    print(f"[TEXT_GEN] ❌ ERROR with {provider} (attempt {attempt + 1}/{attempts}): {error_type}: {error_msg}")
-                    
-                    # Additional details for HTTP errors
-                    if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
-                        print(f"[TEXT_GEN] ❌ HTTP Status: {e.response.status_code}")
-                        if hasattr(e.response, 'text'):
-                            resp_text = e.response.text
-                            print(f"[TEXT_GEN] ❌ HTTP Response: {resp_text[:200]}...")
-                    
-                    # Log the error attempt
+                    # Extract optional title
                     try:
-                        log_llm_request(
-                            account_db,
-                            account_id=account_id,
-                            text_id=text_id,
-                            kind="reading",
-                            provider=provider,
-                            model=getattr(model_config, 'model', None),
-                            base_url=getattr(model_config, 'base_url', None),
-                            request={"messages": messages},
-                            response=None,
-                            status="error",
-                            error=error_msg,
+                        title_val = extract_json_from_text(text_buf, "title")
+                        title = str(title_val) if title_val is not None else None
+                    except Exception:
+                        title = None
+                    
+                    if not final_text or not final_text.strip():
+                        raise ValueError("Empty or invalid text content")
+                    
+                    # Update the database record
+                    rt = account_db.query(ReadingText).filter(ReadingText.id == text_id).first()
+                    if rt:
+                        rt.content = final_text
+                        rt.generated_at = datetime.datetime.utcnow()
+                        account_db.commit()
+                        
+                        result = TextGenerationResult(
+                            success=True,
+                            text=final_text,
+                            title=title,
+                            provider=used_provider,
+                            model=used_model,
+                            response_dict=resp_dict,
+                            log_dir=job_dir
                         )
-                    except Exception:
-                        pass
-                    
-                    # Backoff for retriable errors
-                    try:
-                        status = None
-                        retry_after = None
-                        try:
-                            status = getattr(e, "response", None).status_code  # type: ignore[attr-defined]
-                            retry_after = getattr(e, "response", None).headers.get("Retry-After")  # type: ignore[attr-defined]
-                        except Exception:
-                            status = None
                         
-                        retriable = provider == "openrouter" and (status in {429, 500, 502, 503, 504})
-                        if not retriable or attempt >= attempts - 1:
-                            break
-                        
-                        try:
-                            delay_base = float(retry_after) if retry_after and str(retry_after).isdigit() else float(2 ** (attempt + 1))
-                        except Exception:
-                            delay_base = float(2 ** (attempt + 1))
-                        jitter = random.uniform(0, delay_base * 0.5)
-                        time.sleep(delay_base + jitter)
-                    except Exception:
-                        break
+                        print(f"[TEXT_GEN] Successfully generated text_id={text_id} with provider={used_provider}")
+                        return result
                     
-                    best_result = TextGenerationResult(
-                        success=False,
-                        text="",
-                        error=f"Provider {provider} failed: {str(e)}"
+            except Exception as e:
+                # Print the actual error for debugging
+                error_msg = str(e)
+                error_type = type(e).__name__
+                print(f"[TEXT_GEN] ❌ ERROR with {provider}: {error_type}: {error_msg}")
+                
+                # Log the error attempt
+                try:
+                    log_llm_request(
+                        account_db,
+                        account_id=account_id,
+                        text_id=text_id,
+                        kind="reading",
+                        provider=provider,
+                        model=getattr(model_config, 'model', None),
+                        base_url=getattr(model_config, 'base_url', None),
+                        request={"messages": messages},
+                        response=None,
+                        status="error",
+                        error=error_msg,
                     )
+                except Exception:
+                    pass
+                
+                best_result = TextGenerationResult(
+                    success=False,
+                    text="",
+                    error=f"Provider {provider} failed: {str(e)}"
+                )
         
         # All providers failed
         print(f"[TEXT_GEN] ❌ ALL PROVIDERS FAILED for text_id={text_id}")

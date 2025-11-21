@@ -55,13 +55,37 @@ _SRS_PARAMS = SRSParams(
 )
 
 
+class SrsService:
+    """
+    Service to handle Spaced Repetition System (SRS) logic.
+    Wraps the functional logic to provide stateful optimizations if needed,
+    but largely stateless.
+    """
+    
+    def update_word_data(self,
+                        db: Session, 
+                        account_id: int, 
+                        user_lexeme_id: int, 
+                        event_type: str,
+                        timestamp: datetime) -> None:
+        """
+        Update SRS data for a word based on an event.
+        Currently a compatibility wrapper for the legacy srs_* functions,
+        but allows for future optimization.
+        """
+        # This is a placeholder - the actual logic is still in the functional methods below
+        # for now to minimize disruption, but we'll direct calls there.
+        # In a full refactor, we'd move the logic here.
+        pass
+
 def _ensure_profile(db: Session, account_id: int, lang: str) -> Profile:
+    """Get or create profile without implicit flush."""
     prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
     if prof:
         return prof
     prof = Profile(account_id=account_id, lang=lang)
     db.add(prof)
-    db.flush()
+    # Removed db.flush() - let caller handle transaction
     return prof
 
 
@@ -79,9 +103,12 @@ def srs_click(
     surface: Optional[str],
     context_hash: Optional[str],
     text_id: Optional[int] = None,
+    profile: Optional[Profile] = None,  # Optimization: pass profile if known
+    lexeme: Optional[Lexeme] = None,    # Optimization: pass lexeme if known
 ) -> None:
-    prof = _ensure_profile(db, account_id, lang)
-    lex = _resolve_lexeme(db, lang, lemma, pos)
+    prof = profile or _ensure_profile(db, account_id, lang)
+    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos)
+    
     # Since lexemes are now user-specific, we can use them directly
     lex.a_click = (lex.a_click or 0) + 1
     lex.clicks = (lex.clicks or 0) + 1
@@ -90,6 +117,7 @@ def srs_click(
     _decay_posterior(lex, now, _HL_CLICK_D)
     lex.alpha = float((lex.alpha or 1.0) + _W_CLICK)
     _schedule_next(lex, 0, now)
+    
     db.add(WordEvent(
         ts=now,
         account_id=account_id,
@@ -114,30 +142,45 @@ def srs_exposure(
     surface: Optional[str],
     context_hash: Optional[str],
     text_id: Optional[int] = None,
+    profile: Optional[Profile] = None,  # Optimization: pass profile if known
+    lexeme: Optional[Lexeme] = None,    # Optimization: pass lexeme if known
+    session_start_time: Optional[datetime] = None, # Optimization: pass session start to skip query
 ) -> None:
-    prof = _ensure_profile(db, account_id, lang)
-    lex = _resolve_lexeme(db, lang, lemma, pos)
+    prof = profile or _ensure_profile(db, account_id, lang)
+    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos)
+    
     # Since lexemes are now user-specific, we can use them directly
     now = datetime.utcnow()
+    
     # 1) session collapse
-    recent_ev = (
-        db.query(WordEvent)
-        .filter(
-            WordEvent.account_id == account_id,
-            WordEvent.profile_id == prof.id,
-            WordEvent.event_type == "exposure",
-        )
-        .order_by(WordEvent.ts.desc())
-        .first()
-    )
     session_skip = False
-    if recent_ev and recent_ev.ts:
+    if session_start_time:
+        # If provided, check against session duration logic directly
         try:
-            mins = (now - recent_ev.ts).total_seconds() / 60.0
+            mins = (now - session_start_time).total_seconds() / 60.0
             if mins < _SESSION_MIN:
                 session_skip = True
         except Exception:
-            session_skip = False
+            pass
+    else:
+        # Fallback to query if not provided (legacy behavior)
+        recent_ev = (
+            db.query(WordEvent)
+            .filter(
+                WordEvent.account_id == account_id,
+                WordEvent.profile_id == prof.id,
+                WordEvent.event_type == "exposure",
+            )
+            .order_by(WordEvent.ts.desc())
+            .first()
+        )
+        if recent_ev and recent_ev.ts:
+            try:
+                mins = (now - recent_ev.ts).total_seconds() / 60.0
+                if mins < _SESSION_MIN:
+                    session_skip = True
+            except Exception:
+                session_skip = False
 
     # 2) distinct gating
     w_exp = _W_EXPOSURE
@@ -163,7 +206,10 @@ def srs_exposure(
     if not session_skip and w_exp > 0:
         lex.beta = float((lex.beta or 9.0) + w_exp)
     _schedule_next(lex, quality, now)
+    
     if context_hash:
+        # Optimistic check: usually we can just insert, but here we check existence.
+        # For optimization, we could cache recent context hashes in memory if this is hot.
         exists = (
             db.query(UserLexemeContext)
             .filter(
@@ -175,6 +221,7 @@ def srs_exposure(
         if not exists:
             db.add(UserLexemeContext(lexeme_id=lex.id, context_hash=context_hash))
             lex.distinct_texts = (lex.distinct_texts or 0) + 1
+            
     db.add(WordEvent(
         ts=now,
         account_id=account_id,
@@ -189,10 +236,12 @@ def srs_exposure(
     ))
 
     # Synthetic nonlookup
+    # OPTIMIZATION: Check cheap conditions first before any date math or queries
     if _SYN_NL_ENABLE and (lex.clicks or 0) == 0 and int(lex.distinct_texts or 0) >= _SYN_NL_MIN_DISTINCT and lex.first_seen_at:
         try:
             days_seen = (now - lex.first_seen_at).total_seconds() / 86400.0
             if days_seen >= _SYN_NL_MIN_DAYS:
+                # Only check recent nonlookup if we passed the days threshold
                 recent_nl = (
                     db.query(WordEvent)
                     .filter(
@@ -213,6 +262,8 @@ def srs_exposure(
                         surface=surface,
                         context_hash=context_hash,
                         text_id=text_id,
+                        profile=prof,  # Pass resolved profile
+                        lexeme=lex     # Pass resolved lexeme
                     )
         except Exception:
             pass
@@ -228,9 +279,12 @@ def srs_nonlookup(
     surface: Optional[str],
     context_hash: Optional[str],
     text_id: Optional[int] = None,
+    profile: Optional[Profile] = None,
+    lexeme: Optional[Lexeme] = None,
 ) -> None:
-    prof = _ensure_profile(db, account_id, lang)
-    lex = _resolve_lexeme(db, lang, lemma, pos)
+    prof = profile or _ensure_profile(db, account_id, lang)
+    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos)
+    
     # Since lexemes are now user-specific, we can use them directly
     now = datetime.utcnow()
     _decay_posterior(lex, now, _HL_NONLOOK_D)
@@ -238,6 +292,7 @@ def srs_nonlookup(
     lex.beta = float((lex.beta or 9.0) + _W_NONLOOK)
     lex.last_seen_at = now
     _schedule_next(lex, 3, now)
+    
     db.add(WordEvent(
         ts=now,
         account_id=account_id,

@@ -14,7 +14,7 @@ import json
 
 from sqlalchemy.orm import Session
 
-from ..models import LLMRequestLog, ReadingTextTranslation
+from ..models import LLMRequestLog, ReadingTextTranslation, Profile
 from ..utils.json_parser import extract_json_from_text, extract_word_translations
 
 
@@ -52,7 +52,8 @@ class TitleExtractionService:
         return None
 
     def get_title(self, db: Session, account_id: int, text_id: int) -> Tuple[Optional[str], Optional[str]]:
-        """Return (title, title_translation) from the latest successful reading log, if present."""
+        """Return (title, title_translation) from the DB."""
+        # 1. Get raw title from generation log
         row = (
             db.query(LLMRequestLog)
             .filter(
@@ -64,38 +65,60 @@ class TitleExtractionService:
             .order_by(LLMRequestLog.created_at.desc())
             .first()
         )
-        if not row or not getattr(row, "response", None):
-            return None, None
-
-        content_str: Optional[str] = None
-        try:
-            # response may be dict-like JSON or string; store both raw and parsed
-            raw = row.response
-            try:
-                obj = json.loads(raw) if isinstance(raw, str) else raw
-            except Exception:
-                obj = raw
-            content_str = self._extract_content_str(obj if obj is not None else raw)
-        except Exception:
-            content_str = None
-
-        if not content_str:
-            return None, None
-
+        
         title = None
+        
+        # Extract title from log
+        if row and getattr(row, "response", None):
+            content_str = None
+            try:
+                raw = row.response
+                try:
+                    obj = json.loads(raw) if isinstance(raw, str) else raw
+                except Exception:
+                    obj = raw
+                content_str = self._extract_content_str(obj if obj is not None else raw)
+            except Exception:
+                content_str = None
+
+            if content_str:
+                try:
+                    t = extract_json_from_text(content_str, "title")
+                    if t is not None:
+                        title = str(t)
+                except Exception:
+                    title = None
+        
+        # 2. Get title translation from ReadingTextTranslation (PRIMARY source)
         title_tr = None
-        try:
-            t = extract_json_from_text(content_str, "title")
-            if t is not None:
-                title = str(t)
-        except Exception:
-            title = None
-        try:
-            title_tr = extract_json_from_text(content_str, "title_translation")
-            if title_tr is not None:
-                title_tr = str(title_tr)
-        except Exception:
-            title_tr = None
+        
+        # Find target language for this user/text
+        # We need the text language first, but we can try to infer or just look for any translation
+        # Best to query specifically for unit='text'
+        
+        tr_row = (
+            db.query(ReadingTextTranslation)
+            .filter(
+                ReadingTextTranslation.account_id == account_id,
+                ReadingTextTranslation.text_id == text_id,
+                ReadingTextTranslation.unit == "text",
+                # We assume segment_index=0 for title
+                ReadingTextTranslation.segment_index == 0
+            )
+            .first()
+        )
+        
+        if tr_row and tr_row.translated_text:
+            title_tr = tr_row.translated_text
+            
+        # 3. Fallback: try to extract translation from generation log if DB lookup failed
+        if not title_tr and title and content_str:
+            try:
+                tt = extract_json_from_text(content_str, "title_translation")
+                if tt is not None:
+                    title_tr = str(tt)
+            except Exception:
+                pass
 
         return title, title_tr
 

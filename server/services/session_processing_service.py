@@ -14,7 +14,7 @@ from ..models import (
     ReadingWordGloss,
     Profile,
     Lexeme,
-    UserLexeme,
+    # UserLexeme removed
 )
 from ..services.srs_service import SrsService
 
@@ -131,55 +131,78 @@ class SessionProcessingService:
     
     def _update_srs_data(self, db: Session, account_id: int, session_data: Dict) -> bool:
         """Update SRS data based on session interactions."""
+        from ..models import Profile, Lexeme
+        from .srs_service import srs_click, srs_exposure, _ensure_profile, _resolve_lexeme
+        
         try:
             interactions = session_data.get("interactions", [])
+            lang = session_data.get("lang", "zh")
             
+            # Pre-fetch profile once
+            profile = _ensure_profile(db, account_id, lang)
+            
+            # Optimization: Bulk resolve lexemes for this batch if possible
+            # For now, we'll use a local cache to avoid resolving the same lexeme multiple times in one session
+            lexeme_cache = {} 
+            
+            # Track session start for collapse logic
+            # Assuming the first interaction timestamp or now roughly
+            session_start_time = datetime.utcnow()
+            if interactions:
+                 first_ts = interactions[0].get("timestamp")
+                 if first_ts:
+                     try:
+                         session_start_time = datetime.fromisoformat(first_ts)
+                     except Exception:
+                         pass
+
             for interaction in interactions:
                 word_surface = interaction.get("word")
                 event_type = interaction.get("event_type")  # "lookup", "click", "exposure"
                 timestamp = interaction.get("timestamp")
                 
+                # These fields are needed for SRS
+                lemma = interaction.get("lemma") or word_surface # Fallback
+                pos = interaction.get("pos")
+                context_hash = interaction.get("context_hash") # If available
+                
                 if not word_surface or not event_type:
                     continue
                 
-                # Get or create lexeme
-                lexeme = db.query(Lexeme).filter(
-                    Lexeme.surface == word_surface
-                ).first()
+                # Resolve lexeme (cached)
+                cache_key = (lang, lemma, pos)
+                if cache_key not in lexeme_cache:
+                    lexeme_cache[cache_key] = _resolve_lexeme(db, lang, lemma, pos)
+                lexeme = lexeme_cache[cache_key]
                 
-                if not lexeme:
-                    # Create new lexeme
-                    lexeme = Lexeme(
+                if event_type in ("lookup", "click"):
+                    srs_click(
+                        db, 
+                        account_id=account_id, 
+                        lang=lang,
+                        lemma=lemma,
+                        pos=pos,
                         surface=word_surface,
-                        lang=session_data.get("lang", "zh")
+                        context_hash=context_hash,
+                        profile=profile,
+                        lexeme=lexeme
                     )
-                    db.add(lexeme)
-                    db.flush()
-                
-                # Get or create user lexeme
-                user_lexeme = db.query(UserLexeme).filter(
-                    UserLexeme.account_id == account_id,
-                    UserLexeme.lexeme_id == lexeme.id
-                ).first()
-                
-                if not user_lexeme:
-                    user_lexeme = UserLexeme(
+                elif event_type == "exposure":
+                    srs_exposure(
+                        db,
                         account_id=account_id,
-                        lexeme_id=lexeme.id,
-                        lang=session_data.get("lang", "zh")
+                        lang=lang,
+                        lemma=lemma,
+                        pos=pos,
+                        surface=word_surface,
+                        context_hash=context_hash,
+                        profile=profile,
+                        lexeme=lexeme,
+                        session_start_time=session_start_time
                     )
-                    db.add(user_lexeme)
-                    db.flush()
-                
-                # Update SRS data
-                self.srs_service.update_word_data(
-                    db, 
-                    account_id, 
-                    user_lexeme.id, 
-                    event_type,
-                    datetime.fromisoformat(timestamp) if timestamp else datetime.utcnow()
-                )
             
+            # Explicit flush at end of batch
+            db.flush()
             return True
             
         except Exception as e:

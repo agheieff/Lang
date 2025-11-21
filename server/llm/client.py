@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Union
+import time
+import random
+import logging
+from typing import Any, Dict, List, Optional, Union, Callable
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import os
 
 from server.llm_config.llm_models import ModelConfig
 from server.services.model_registry_service import get_model_registry
+
+logger = logging.getLogger(__name__)
 
 try:
     # Local OpenRouter client from server/llm/openrouter/
@@ -29,6 +34,67 @@ def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = N
     req = Request(url, data=body, headers=hdrs, method=method)
     with urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -> Any:
+    """
+    Execute a function with exponential backoff for rate limits and transient errors.
+    
+    Handles:
+    - HTTP 429 (Too Many Requests)
+    - HTTP 5xx (Server Errors)
+    - Network errors (URLError)
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except (HTTPError, URLError, RuntimeError) as e:
+            last_exception = e
+            
+            # Check if we should retry
+            should_retry = False
+            status_code = None
+            retry_after = None
+            
+            if isinstance(e, HTTPError):
+                status_code = e.code
+                retry_after = e.headers.get("Retry-After")
+            elif hasattr(e, "status_code"):  # Some libs attach this
+                status_code = getattr(e, "status_code")
+            
+            # Retry on 429 or 5xx
+            if status_code and (status_code == 429 or 500 <= status_code < 600):
+                should_retry = True
+            # Retry on network errors
+            elif isinstance(e, URLError):
+                should_retry = True
+            # Retry on generic RuntimeErrors that might be OpenRouter issues
+            elif isinstance(e, RuntimeError) and "openrouter" in str(e).lower():
+                should_retry = True
+                
+            if not should_retry or attempt >= max_retries:
+                raise e
+            
+            # Calculate delay
+            delay = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8...
+            
+            # Respect Retry-After header if present
+            if retry_after:
+                try:
+                    delay = float(retry_after)
+                except (ValueError, TypeError):
+                    pass
+            
+            # Add jitter
+            jitter = random.uniform(0, 0.5 * delay)
+            sleep_time = delay + jitter
+            
+            logger.warning(f"LLM request failed (attempt {attempt+1}/{max_retries+1}): {e}. Retrying in {sleep_time:.2f}s...")
+            time.sleep(sleep_time)
+            
+    raise last_exception
 
 
 def resolve_model(base_url: str, prefer: Optional[str] = None) -> str:
@@ -180,55 +246,63 @@ def chat_complete_with_raw(
         except Exception:
             temperature = 0.7
 
-    if resolved_provider == "openrouter":
-        if _or_complete is None:
-            raise RuntimeError("openrouter client not available")
-        model_id = _pick_openrouter_model(resolved_model)
-        request_id = _llm_request_counter
-        _llm_request_counter += 1
-        
-        resp = _or_complete(
-            messages,
-            model=model_id,
-            temperature=temperature,
-            max_tokens=resolved_max_tokens,
-        )
-        if isinstance(resp, dict):
-            try:
-                choices = resp.get("choices")
-                if choices and isinstance(choices, list) and len(choices) > 0:
-                    msg = choices[0].get("message")
-                    if isinstance(msg, dict):
-                        content = msg.get("content")
-                        if isinstance(content, str):
-                            return _strip_thinking_blocks(content), resp
-            except Exception:
-                pass
+    def _execute_call():
+        if resolved_provider == "openrouter":
+            if _or_complete is None:
+                raise RuntimeError("openrouter client not available")
+            model_id = _pick_openrouter_model(resolved_model)
+            
+            # Note: _or_complete needs to handle its own retries or raise exceptions we catch
+            resp = _or_complete(
+                messages,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=resolved_max_tokens,
+            )
+            if isinstance(resp, dict):
+                try:
+                    choices = resp.get("choices")
+                    if choices and isinstance(choices, list) and len(choices) > 0:
+                        msg = choices[0].get("message")
+                        if isinstance(msg, dict):
+                            content = msg.get("content")
+                            if isinstance(content, str):
+                                return _strip_thinking_blocks(content), resp
+                except Exception:
+                    pass
+                # Check for error response from provider
+                if "error" in resp:
+                    raise RuntimeError(f"OpenRouter error: {resp['error']}")
+                raise RuntimeError("invalid openrouter response")
             raise RuntimeError("invalid openrouter response")
-        raise RuntimeError("invalid openrouter response")
 
-    # Local OpenAI-compatible API
-    model_id = resolve_model(resolved_base_url, resolved_model)
-    request_id = _llm_request_counter
+        # Local OpenAI-compatible API
+        model_id = resolve_model(resolved_base_url, resolved_model)
+        
+        data = {
+            "model": model_id,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": resolved_max_tokens,
+        }
+        try:
+            resp = _http_json(resolved_base_url.rstrip("/") + "/chat/completions", "POST", data)
+        except (URLError, HTTPError) as e:
+            raise e  # Let retry wrapper handle it
+            
+        choices = resp.get("choices")
+        if not isinstance(choices, list) or len(choices) == 0:
+            raise RuntimeError("no choices in response")
+        msg = choices[0].get("message")
+        if not isinstance(msg, dict):
+            raise RuntimeError("no message in choice")
+        content = msg.get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("no content in message")
+        return _strip_thinking_blocks(content), resp
+
+    # Execute with retry
+    global _llm_request_counter
     _llm_request_counter += 1
     
-    data = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": resolved_max_tokens,
-    }
-    try:
-        resp = _http_json(resolved_base_url.rstrip("/") + "/chat/completions", "POST", data)
-    except (URLError, HTTPError) as e:
-        raise RuntimeError(f"LLM backend error: {e}")
-    choices = resp.get("choices")
-    if not isinstance(choices, list) or len(choices) == 0:
-        raise RuntimeError("no choices in response")
-    msg = choices[0].get("message")
-    if not isinstance(msg, dict):
-        raise RuntimeError("no message in choice")
-    content = msg.get("content")
-    if not isinstance(content, str):
-        raise RuntimeError("no content in message")
-    return _strip_thinking_blocks(content), resp
+    return _retry_with_backoff(_execute_call, max_retries=3)

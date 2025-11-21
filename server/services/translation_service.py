@@ -9,12 +9,16 @@ import os
 import random
 import re
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
 
 from ..llm.client import _pick_openrouter_model, chat_complete_with_raw
 from ..services.model_registry_service import get_model_registry
@@ -200,8 +204,16 @@ class TranslationService:
             # Process sentences in parallel
             wd_seg_results: List[Tuple[int, str, Optional[tuple], List[Dict]]] = []
             
-            max_workers = max(1, min(self.max_workers, len(per_msgs)))
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            # Adjust concurrency based on tier
+            # Free tier gets minimal concurrency to avoid rate limits
+            if user_tier == "Free" or provider == "openrouter":
+                concurrency = 2
+            else:
+                concurrency = self.max_workers
+                
+            logger.info(f"[TRANSLATION] Starting word translation with concurrency={concurrency}")
+            
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
                 futures = []
                 for i, (s, seg, m) in enumerate(per_msgs):
                     # Shift by +1 so words_1 is the first sentence
@@ -248,13 +260,13 @@ class TranslationService:
             try:
                 account_db.flush()
             except Exception as e:
-                print(f"[TRANSLATION] Failed to flush word translations: {e}")
+                logger.error(f"[TRANSLATION] Failed to flush word translations: {e}", exc_info=True)
                 return False
         
             return True
             
         except Exception as e:
-            print(f"[TRANSLATION] Word translation failed: {e}")
+            logger.error(f"[TRANSLATION] Word translation failed: {e}", exc_info=True)
             return False
     
     def _generate_sentence_translations(self,
@@ -333,13 +345,13 @@ class TranslationService:
             try:
                 account_db.flush()
             except Exception as e:
-                print(f"[TRANSLATION] Failed to flush sentence translations: {e}")
+                logger.error(f"[TRANSLATION] Failed to flush sentence translations: {e}", exc_info=True)
                 return False
             
             return True
             
         except Exception as e:
-            print(f"[TRANSLATION] Sentence translation failed: {e}")
+            logger.error(f"[TRANSLATION] Sentence translation failed: {e}", exc_info=True)
             return False
     
     def _generate_title_translation(self,
@@ -407,7 +419,7 @@ class TranslationService:
                     title_translation = title_buf.strip()
                 
                 if not title_translation:
-                    print(f"[TRANSLATION] Could not extract title translation from: {title_buf}")
+                    logger.warning(f"[TRANSLATION] Could not extract title translation from: {title_buf}")
                     return False
                 
                 # Save title translation to database
@@ -429,17 +441,17 @@ class TranslationService:
                 try:
                     account_db.flush()
                 except Exception as e:
-                    print(f"[TRANSLATION] Failed to flush title translation: {e}")
+                    logger.error(f"[TRANSLATION] Failed to flush title translation: {e}", exc_info=True)
                     return False
                 
                 return True
                 
             except Exception as e:
-                print(f"[TRANSLATION] Failed to parse title translation: {e}")
+                logger.error(f"[TRANSLATION] Failed to parse title translation: {e}", exc_info=True)
                 return False
             
         except Exception as e:
-            print(f"[TRANSLATION] Title translation failed: {e}")
+            logger.error(f"[TRANSLATION] Title translation failed: {e}", exc_info=True)
             return False
     
     def _split_sentences(self, text: str, lang: str) -> List[Tuple[int, int, str]]:

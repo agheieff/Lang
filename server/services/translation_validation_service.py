@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from ..models import ReadingText, ReadingTextTranslation, ReadingWordGloss, Profile
-from ..translation_backfill_service import TranslationBackfillService
+from .translation_backfill_service import TranslationBackfillService
 from ..utils.session_manager import db_manager
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 from datetime import datetime
@@ -20,6 +21,7 @@ from .translation_validation_service import TranslationValidationService
 from .notification_service import get_notification_service
 from .llm_common import build_reading_prompt_spec
 
+logger = logging.getLogger(__name__)
 
 # Cross-process locking utilities
 from ..utils.file_lock import FileLock
@@ -75,7 +77,7 @@ def retry_failed_components(account_id: int, text_id: int) -> dict:
 
     except Exception as e:
         try:
-            print(f"[RETRY] General error in retry_failed_components for text_id={text_id}: {e}")
+            logger.error(f"[RETRY] General error in retry_failed_components for text_id={text_id}: {e}", exc_info=True)
         except Exception:
             pass
         results["error"] = str(e)
@@ -141,7 +143,7 @@ class GenerationOrchestrator:
             self._start_generation_job(db, account_id, lang)
             
         except Exception as e:
-            print(f"[ORCHESTRATOR] Error in ensure_text_available: {e}")
+            logger.error(f"[ORCHESTRATOR] Error in ensure_text_available: {e}", exc_info=True)
             try:
                 db.rollback()
             except Exception:
@@ -157,7 +159,7 @@ class GenerationOrchestrator:
             try:
                 asyncio.run(self._run_generation_job(db, account_id, lang))
             except Exception as e:
-                print(f"[ORCHESTRATOR] Worker exception: {e}")
+                logger.error(f"[ORCHESTRATOR] Worker exception: {e}", exc_info=True)
             finally:
                 # Mark generation as completed (even on error)
                 self.text_gen_service.mark_generation_completed(account_id, lang)
@@ -176,7 +178,7 @@ class GenerationOrchestrator:
         text_id = None
         
         try:
-            print(f"[ORCHESTRATOR] Starting generation job for account_id={account_id} lang={lang}")
+            logger.info(f"[ORCHESTRATOR] Starting generation job for account_id={account_id} lang={lang}")
             
             # Step 1: Acquire cross-process lock
             lock_path = await self._acquire_generation_lock(account_id, lang)
@@ -206,10 +208,10 @@ class GenerationOrchestrator:
                 result.text, result.title, job_dir, result.messages
             )
             
-            print(f"[ORCHESTRATOR] Generation job completed successfully for text_id={text_id}")
+            logger.info(f"[ORCHESTRATOR] Generation job completed successfully for text_id={text_id}")
             
         except Exception as e:
-            print(f"[ORCHESTRATOR] Generation job failed: {e}")
+            logger.error(f"[ORCHESTRATOR] Generation job failed: {e}", exc_info=True)
             if text_id:
                 await self._handle_generation_failure(account_id, lang, text_id, str(e))
         finally:
@@ -221,10 +223,10 @@ class GenerationOrchestrator:
         try:
             lock_path = self.file_lock.acquire(account_id, lang)
             if lock_path is None:
-                print(f"[ORCHESTRATOR] Could not acquire lock for account_id={account_id} lang={lang}")
+                logger.info(f"[ORCHESTRATOR] Could not acquire lock for account_id={account_id} lang={lang}")
             return lock_path
         except Exception as e:
-            print(f"[ORCHESTRATOR] Error acquiring lock: {e}")
+            logger.error(f"[ORCHESTRATOR] Error acquiring lock: {e}", exc_info=True)
             return None
     
     async def _release_generation_lock(self, lock_path: Optional[Path]) -> None:
@@ -232,7 +234,7 @@ class GenerationOrchestrator:
         try:
             self.file_lock.release(lock_path)
         except Exception as e:
-            print(f"[ORCHESTRATOR] Error releasing lock: {e}")
+            logger.error(f"[ORCHESTRATOR] Error releasing lock: {e}", exc_info=True)
     
     async def _create_placeholder_and_setup_job(self, account_id: int, lang: str) -> Tuple[int, Path]:
         """Create placeholder text and set up job directory."""
@@ -350,14 +352,14 @@ class GenerationOrchestrator:
                 completeness = self.validation_service.validate_and_backfill(account_id, text_id)
                 
                 # Log validation results
-                print(f"[ORCHESTRATOR] Translation validation for text_id={text_id}: "
+                logger.info(f"[ORCHESTRATOR] Translation validation for text_id={text_id}: "
                       f"words={completeness['words']}, sentences={completeness['sentences']}, title={completeness['title']}")
                 
                 # Notify translations are ready
                 self.notification_service.send_translations_ready(account_id, lang, text_id)
-                print(f"[ORCHESTRATOR] Translations completed for text_id={text_id}")
+                logger.info(f"[ORCHESTRATOR] Translations completed for text_id={text_id}")
             else:
-                print(f"[ORCHESTRATOR] Translation job failed for text_id={text_id}: {translation_result.error}")
+                logger.error(f"[ORCHESTRATOR] Translation job failed for text_id={text_id}: {translation_result.error}")
                 # For partial failures, still notify that something is ready
                 if translation_result.words or translation_result.sentences:
                     # Try validation even for partial failures
@@ -365,7 +367,7 @@ class GenerationOrchestrator:
                     self.notification_service.send_translations_ready(account_id, lang, text_id)
             
         except Exception as e:
-            print(f"[ORCHESTRATOR] Translation job failed: {e}")
+            logger.error(f"[ORCHESTRATOR] Translation job failed: {e}", exc_info=True)
     
     def _get_job_dir(self, account_id: int, lang: str) -> Path:
         """Get/create directory for job logs."""
@@ -378,7 +380,7 @@ class GenerationOrchestrator:
     def check_and_retry_failed_texts(self, db: Session, account_id: int, lang: str) -> list:
         """Check for failed texts and attempt retries if allowed."""
         try:
-            print(f"[RETRY] Checking for failed texts to retry for account_id={account_id} lang={lang}")
+            logger.info(f"[RETRY] Checking for failed texts to retry for account_id={account_id} lang={lang}")
         except Exception:
             pass
         
@@ -386,9 +388,9 @@ class GenerationOrchestrator:
         
         try:
             if not failed_texts:
-                print("[RETRY] No failed texts found - everything looks good!")
+                logger.info("[RETRY] No failed texts found - everything looks good!")
             else:
-                print(f"[RETRY] Found {len(failed_texts)} failed texts, retrying: {[t.id for t in failed_texts]}")
+                logger.info(f"[RETRY] Found {len(failed_texts)} failed texts, retrying: {[t.id for t in failed_texts]}")
         except Exception:
             pass
         
@@ -399,18 +401,18 @@ class GenerationOrchestrator:
                     result = retry_failed_components(account_id, text.id)
                     if result.get("error"):
                         try:
-                            print(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")
+                            logger.error(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")
                         except Exception:
                             pass
                     else:
                         try:
-                            print(f"[RETRY] Successfully initiated retry for text_id={text.id}")
+                            logger.info(f"[RETRY] Successfully initiated retry for text_id={text.id}")
                         except Exception:
                             pass
                             
                 except Exception as e:
                     try:
-                        print(f"[RETRY] Error retrying text_id={text.id}: {e}")
+                        logger.error(f"[RETRY] Error retrying text_id={text.id}: {e}", exc_info=True)
                     except Exception:
                         pass
             

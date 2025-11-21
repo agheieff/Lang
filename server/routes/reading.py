@@ -82,130 +82,51 @@ async def current_reading_block(
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
-    """Return the Current Reading block HTML.
-
-    Uses the new generation orchestrator for cleaner state management.
-    Will show content immediately available and rely on SSE for updates.
-    """
-    import time
-    start_time = time.time()
-    logger.info(f"[READING] current_reading_block called for account_id={account.id}")
+    """Return the Current Reading block HTML."""
+    from ..services.reading_view_service import ReadingViewService
     
-    prof = db.query(Profile).filter(Profile.account_id == account.id).first()
-    if not prof:
-        return HTMLResponse(
-            content=render_loading_block("loading")
+    view_service = ReadingViewService()
+    context = view_service.get_current_reading_context(db, account.id)
+    
+    if context.status == "error":
+         return HTMLResponse(
+            content='''
+            <div id="current-reading" class="text-center py-8">
+              <p class="text-red-500">Error loading text. Please refresh the page.</p>
+            </div>
+            ''', status=500
         )
 
-    orchestrator = GenerationOrchestrator()
-    state_manager = orchestrator.state_manager
-    
-    # Use SelectionService to get current text (current_text_id or pick new)
-    from ..services.selection_service import SelectionService
-    selection_service = SelectionService()
-    
-    # Get current text (either the one in profile.current_text_id or pick unopened)
-    text_obj = None
-    selection_start = time.time()
-    try:
-        text_obj = selection_service.pick_current_or_new(db, account.id, prof.lang)
-        logger.info(f"[READING] SelectionService.pick_current_or_new took {time.time() - selection_start:.3f}s")
-    except Exception as e:
-        logger.error(f"SelectionService.pick_current_or_new failed: {e}", exc_info=True)
-        # Fallback: try to get any available text
-        try:
-            text_obj = state_manager.get_unopened_text(db, account.id, prof.lang)
-        except Exception as e2:
-            logger.error(f"Fallback get_unopened_text also failed: {e2}", exc_info=True)
-            # Return error page
-            return HTMLResponse(
-                content='''
-                <div id="current-reading" class="text-center py-8">
-                  <p class="text-red-500">Error loading text. Please refresh the page.</p>
-                </div>
-                ''', status=500
-            )
-    
-    # Ensure something is queued (prefetch next text)
-    ensure_start = time.time()
-    try:
-        orchestrator.ensure_text_available(db, account.id, prof.lang)
-        logger.info(f"[READING] ensure_text_available took {time.time() - ensure_start:.3f}s")
-    except Exception:
-        logger.debug("ensure_text_available failed in current_reading_block", exc_info=True)
+    if context.status in ("loading", "generating"):
+        return HTMLResponse(content=render_loading_block(context.status))
 
-    if text_obj is None:
-        # Check if something is generating
-        generating = state_manager.get_generating_text(db, account.id, prof.lang)
-        kind = "generating" if generating else "loading"
-        return HTMLResponse(content=render_loading_block(kind))
-
-    # SelectionService already set current_text_id if needed
-    # Ensure next text is available 
-    try:
-        orchestrator.ensure_text_available(db, account.id, prof.lang)
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    # Render the text content
-    text_id = text_obj.id
-    
-    # Extract title and title words via service
-    title_service = TitleExtractionService()
-    raw_title, title_translation = title_service.get_title(db, account.id, text_id)
-    title_words_list = title_service.get_title_words(db, account.id, text_id)
-
-    # Include words immediately if available
-    rows = (
-        db.query(ReadingWordGloss)
-        .filter(ReadingWordGloss.account_id == account.id, ReadingWordGloss.text_id == text_id)
-        .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
-        .all()
-    )
-    
-    # Check if translations are ready via readiness service (single oracle)
-    try:
-        _ready = ReadinessService()
-        is_fully_ready, _reason = _ready.evaluate(db, text_obj, account.id)
-    except Exception:
-        is_fully_ready = (len(rows) > 0)
-    
-    # Add SSE endpoint and state to help client
-    sse_endpoint = f"/reading/events/sse?text_id={text_id}"
-    
-    # Render with SSE connection info
+    # Render the reading view
     inner = render_reading_block(
-        text_id,
-        text_obj.content or "",
-        rows,
-        title=raw_title,
-        title_words=title_words_list,
-        title_translation=title_translation if isinstance(title_translation, str) else None,
+        context.text_id,
+        context.content,
+        context.words,
+        title=context.title,
+        title_words=context.title_words,
+        title_translation=context.title_translation,
     )
     
     # Wrap with SSE metadata for the client
     content_with_sse = f'''
         <div id="current-reading"
-             data-sse-endpoint="{sse_endpoint}"
-             data-text-id="{text_id}"
-             data-is-ready="false">
+             data-sse-endpoint="{context.sse_endpoint}"
+             data-text-id="{context.text_id}"
+             data-is-ready="{str(context.is_fully_ready).lower()}">
             {inner}
             <script id="reading-seeds" type="application/json">
                 {{
-                    "sse_endpoint": "{sse_endpoint}",
-                    "text_id": {text_id},
-                    "ready": {str(is_fully_ready).lower()},
+                    "sse_endpoint": "{context.sse_endpoint}",
+                    "text_id": {context.text_id},
+                    "ready": {str(context.is_fully_ready).lower()},
                     "account_id": {account.id}
                 }}
             </script>
         </div>
     '''
-    
-    total_time = time.time() - start_time if 'start_time' in locals() else 0
-    logger.info(f"[READING] current_reading_block completed in {total_time:.3f}s")
     return HTMLResponse(content=content_with_sse)
 
 ## Models moved to server.schemas.reading
@@ -560,109 +481,38 @@ async def next_ready(
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
+    from ..services.reading_view_service import ReadingViewService
+    
     prof = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not prof:
         return {"ready": False, "text_id": None}
 
-    _ready = ReadinessService()
-    _recon = ReconstructionService()
-    _gen = GenerationOrchestrator()
-
-    def _next_unopened() -> Optional[ReadingText]:
-        return _ready.next_unopened(db, account.id, prof.lang)
-
-    # Ensure something is queued
-
-    # Check and retry failed texts before queuing new ones
-    try:
-        retry_results = _gen.check_and_retry_failed_texts(db, account.id, prof.lang)
-    except Exception:
-        logger.debug("retry_failed_texts failed", exc_info=True)
-    
-    # Ensure something is queued
-    try:
-        _gen.ensure_text_available(db, account.id, prof.lang)
-    except Exception:
-        logger.debug("ensure_text_available failed", exc_info=True)
-
-    rt = _next_unopened()
+    view_service = ReadingViewService()
     deadline = time.time() + min(float(wait or 0), MAX_WAIT_SEC) if wait and wait > 0 else None
 
     while True:
-        # Refresh transaction to see background thread commits
         try:
             db.rollback()
         except Exception:
-            logger.debug("rollback failed at loop head in next_ready", exc_info=True)
-        if rt:
-            # Persisted manual override: consume if valid and content exists
-            if getattr(rt, "content", None) and _ready.consume_if_valid(db, account.id, prof.lang):
-                return {"ready": True, "text_id": rt.id, "ready_reason": "manual_override"}
-            if force:
-                # Persist a one-shot override; only return ready if content exists
-                try:
-                    _ready.force_once(db, account.id, prof.lang)
-                except Exception:
-                    logger.debug("force_once failed", exc_info=True)
-                if getattr(rt, "content", None):
-                    return {"ready": True, "text_id": rt.id, "ready_reason": "manual"}
-            ready, reason = _ready.evaluate(db, rt, account.id)
+            logger.debug("rollback failed in next_ready", exc_info=True)
             
-            # Check if text needs retry
-            needs_retry = False
-            retry_status = None
-            try:
-                failed_components = _ready.get_failed_components(db, account.id, rt.id)
-                if failed_components["words"] or failed_components["sentences"]:
-                    retry_service = _gen.retry_service
-                    can_retry, retry_reason = retry_service.can_retry(db, account.id, rt.id, failed_components)
-                    needs_retry = can_retry
-                    retry_status = {
-                        "can_retry": can_retry,
-                        "reason": retry_reason,
-                        "failed_components": failed_components
-                    }
-            except Exception:
-                logger.debug("retry status check failed", exc_info=True)
-            
-            # If both signals are present, return immediately
-            if ready and reason == "both":
-                return {"ready": True, "text_id": rt.id, "ready_reason": reason}
-            # If we're in grace (content + one signal) but a wait deadline exists, keep waiting
-            # to allow the missing signal to arrive; only return grace once the deadline elapses.
-            if ready and reason == "grace":
-                if deadline is None or time.time() >= deadline:
-                    return {"ready": True, "text_id": rt.id, "ready_reason": reason}
-                # else: fall through to wait/retry below
-            
-            # Return retry information if waiting and retry is available
-            if needs_retry and not ready:
-                return {
-                    "ready": False, 
-                    "text_id": rt.id, 
-                    "ready_reason": "waiting",
-                    "retry_info": retry_status
-                }
-            
-            # Otherwise (not ready yet), continue waiting below until deadline
+        status = view_service.check_next_text_readiness(db, account.id, prof.lang, force_check=bool(force))
+        
+        if status.ready:
+             return {"ready": True, "text_id": status.text_id, "ready_reason": status.reason}
+        
+        if status.retry_info:
+             return {
+                "ready": False, 
+                "text_id": status.text_id, 
+                "ready_reason": "waiting",
+                "retry_info": status.retry_info
+            }
+
         if deadline is None or time.time() >= deadline:
-            return {"ready": False, "text_id": (rt.id if rt else None)}
-        # Try to reconstruct words/sentences from logs if content exists but data is missing
-        try:
-            if rt and getattr(rt, "content", None):
-                if not _ready._has_words(db, account.id, rt.id):
-                    _recon.ensure_words_from_logs(db, account.id, rt.id, text=rt.content, lang=rt.lang)
-                if not _ready._has_sentences(db, account.id, rt.id):
-                    _recon.ensure_sentence_translations_from_logs(db, account.id, rt.id)
-        except Exception:
-            logger.debug("reconstruction attempts failed in next_ready", exc_info=True)
+            return {"ready": False, "text_id": status.text_id}
+            
         await _tick(db, 0.5)
-        # Start a fresh view before selecting next candidate
-        try:
-            db.rollback()
-        except Exception:
-            logger.debug("rollback failed before selecting next in next_ready", exc_info=True)
-        rt = _next_unopened()
 
 
 @router.get("/reading/next/ready/sse")
@@ -679,82 +529,42 @@ async def next_ready_sse(
                                "Connection": "keep-alive",
                                "Access-Control-Allow-Origin": "*"})
 
+    from ..services.reading_view_service import ReadingViewService
+    
     async def event_stream():
         try:
             # Send initial status
             yield "data: {\"ready\": false, \"text_id\": null, \"status\": \"connecting\"}\n\n"
             
-            _ready = ReadinessService()
-            _gen = GenerationOrchestrator()
-            
-            # Check and retry failed texts before queuing new ones
-            try:
-                _gen.check_and_retry_failed_texts(db, account.id, prof.lang)
-            except Exception:
-                logger.debug("retry_failed_texts failed", exc_info=True)
-            
-            # Ensure something is queued
-            try:
-                _gen.ensure_text_available(db, account.id, prof.lang)
-            except Exception:
-                logger.debug("ensure_text_available failed", exc_info=True)
-
+            view_service = ReadingViewService()
             last_status = None
+            
             while True:
                 try:
-                    # Refresh transaction to see background thread commits
                     try:
                         db.rollback()
                     except Exception:
-                        logger.debug("rollback failed in SSE loop", exc_info=True)
+                        pass
                     
-                    rt = _ready.next_unopened(db, account.id, prof.lang)
+                    status = view_service.check_next_text_readiness(db, account.id, prof.lang)
                     
-                    if rt:
-                        ready, reason = _ready.evaluate(db, rt, account.id)
-                        
-                        # Check if text needs retry
-                        needs_retry = False
-                        retry_status = None
-                        try:
-                            failed_components = _ready.get_failed_components(db, account.id, rt.id)
-                            if failed_components["words"] or failed_components["sentences"]:
-                                retry_service = _gen.retry_service
-                                can_retry, retry_reason = retry_service.can_retry(db, account.id, rt.id, failed_components)
-                                needs_retry = can_retry
-                                retry_status = {
-                                    "can_retry": can_retry,
-                                    "reason": retry_reason,
-                                    "failed_components": failed_components
-                                }
-                        except Exception:
-                            logger.debug("retry status check failed in SSE", exc_info=True)
-                        
-                        current_status = {
-                            "ready": ready and reason == "both",
-                            "text_id": rt.id,
-                            "ready_reason": reason if ready else "waiting",
-                            "retry_info": retry_status if needs_retry and not ready else None
-                        }
-                        
-                        # Only send update if status changed
-                        if current_status != last_status:
-                            data = json.dumps(current_status)
-                            yield f"data: {data}\n\n"
-                            last_status = current_status.copy()
-                        
-                        # If fully ready, close connection
-                        if ready and reason == "both":
-                            yield f"data: {{\"ready\": true, \"text_id\": {rt.id}, \"ready_reason\": \"both\", \"status\": \"complete\"}}\n\n"
-                            break
-                    else:
-                        current_status = {"ready": False, "text_id": None, "status": "waiting"}
-                        if current_status != last_status:
-                            data = json.dumps(current_status)
-                            yield f"data: {data}\n\n"
-                            last_status = current_status.copy()
+                    current_status_dict = {
+                        "ready": status.ready,
+                        "text_id": status.text_id,
+                        "ready_reason": status.reason,
+                        "retry_info": status.retry_info,
+                        "status": status.status
+                    }
+
+                    if current_status_dict != last_status:
+                         data = json.dumps(current_status_dict)
+                         yield f"data: {data}\n\n"
+                         last_status = current_status_dict.copy()
                     
-                    # Wait before next check (heartbeat)
+                    if status.ready:
+                         yield f"data: {{\"ready\": true, \"text_id\": {status.text_id}, \"ready_reason\": \"{status.reason}\", \"status\": \"complete\"}}\n\n"
+                         break
+                    
                     await asyncio.sleep(2.0)
                     
                 except Exception as e:
@@ -778,7 +588,7 @@ async def next_ready_sse(
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "Cache-Control",
-            "X-Accel-Buffering": "no"  # Disable nginx buffering
+            "X-Accel-Buffering": "no"
         }
     )
 

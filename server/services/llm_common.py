@@ -70,5 +70,57 @@ def build_reading_prompt_spec(
         script=script,
         ci_target=ci_target,
         preferences=preferences,
+        recent_titles=_get_recent_read_titles(db, account_id, lang),
     )
     return spec, words, level_hint
+
+
+def _get_recent_read_titles(db: Session, account_id: int, lang: str, limit: int = 5) -> List[str]:
+    """Fetch titles of the last N read texts for this user/language."""
+    from ..models import ReadingText, ReadingTextTranslation
+    
+    # Find last N read texts
+    texts = (
+        db.query(ReadingText)
+        .filter(
+            ReadingText.account_id == account_id,
+            ReadingText.lang == lang,
+            ReadingText.read_at.is_not(None)
+        )
+        .order_by(ReadingText.read_at.desc())
+        .limit(limit)
+        .all()
+    )
+    
+    if not texts:
+        return []
+    
+    text_ids = [t.id for t in texts]
+    
+    # Fetch titles (unit='text', segment_index=0)
+    # Note: This relies on titles being translated/stored in ReadingTextTranslation.
+    # If titles are only in LLMRequestLog (legacy), this might miss them,
+    # but going forward this is the standard.
+    titles = []
+    
+    # Bulk fetch translations for these text IDs
+    rows = (
+        db.query(ReadingTextTranslation)
+        .filter(
+            ReadingTextTranslation.account_id == account_id,
+            ReadingTextTranslation.text_id.in_(text_ids),
+            ReadingTextTranslation.unit == "text",
+            ReadingTextTranslation.segment_index == 0
+        )
+        .all()
+    )
+    
+    # Map text_id -> source_text (which is the title)
+    title_map = {r.text_id: r.source_text for r in rows}
+    
+    # Reconstruct list in read_at order
+    for t in texts:
+        if t.id in title_map:
+            titles.append(title_map[t.id])
+            
+    return titles
