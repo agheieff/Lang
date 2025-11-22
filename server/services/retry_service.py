@@ -11,6 +11,7 @@ import json
 from sqlalchemy.orm import Session
 
 from ..models import GenerationRetryAttempt, ReadingText
+from ..enums import RetryComponent
 from .readiness_service import ReadinessService
 
 
@@ -34,12 +35,6 @@ def _log_dir_root() -> Path:
 
 class RetryService:
     """Service for managing retry attempts for failed generation components."""
-    
-    COMPONENT_BITMASKS = {
-        "words": 1,
-        "sentences": 2,
-        "structured": 4,
-    }
     
     def __init__(self):
         self.settings = self._get_settings()
@@ -109,9 +104,9 @@ class RetryService:
         try:
             failed_bitmap = 0
             if components.get("words", False):
-                failed_bitmap |= self.COMPONENT_BITMASKS["words"]
+                failed_bitmap |= RetryComponent.WORDS
             if components.get("sentences", False):
-                failed_bitmap |= self.COMPONENT_BITMASKS["sentences"]
+                failed_bitmap |= RetryComponent.SENTENCES
             
             # Get next attempt number
             last_attempt = None
@@ -173,9 +168,9 @@ class RetryService:
             
             completed_bitmap = 0
             if completed_components.get("words", False):
-                completed_bitmap |= self.COMPONENT_BITMASKS["words"]
+                completed_bitmap |= RetryComponent.WORDS
             if completed_components.get("sentences", False):
-                completed_bitmap |= self.COMPONENT_BITMASKS["sentences"]
+                completed_bitmap |= RetryComponent.SENTENCES
             
             retry.completed_components = completed_bitmap
             retry.completed_at = datetime.utcnow()
@@ -229,8 +224,6 @@ class RetryService:
         """Get texts that need retry, ordered by creation date."""
         # Get texts that are not opened but have content and are missing components
         # Also check that the text is old enough and likely finished generation
-        from datetime import datetime, timedelta
-        
         cutoff_time = datetime.utcnow() - timedelta(minutes=5)  # Only retry texts older than 5 mins
         texts = (
             db.query(ReadingText)
@@ -246,30 +239,68 @@ class RetryService:
         
         failed_texts = []
         try:
-            print(f"[RETRY] Found {len(texts)} unopened texts with content (older than 5 mins)")
             for text in texts:
-                print(f"[RETRY] Checking text_id={text.id} for retry needs")
-                
                 needs_retry = self.readiness.needs_retry(db, account_id, text.id)
-                print(f"[RETRY] Text {text.id} needs_retry={needs_retry}")
                 
                 if needs_retry:
                     failed_components = self.readiness.get_failed_components(db, account_id, text.id)
                     can_retry, reason = self.can_retry(db, account_id, text.id, failed_components)
-                    print(f"[RETRY] Text {text.id} can_retry={can_retry}, reason={reason}")
                     
                     if can_retry:
                         failed_texts.append(text)
-                        print(f"[RETRY] Adding text {text.id} to retry queue")
                         if len(failed_texts) >= limit:
                             break
-                    else:
-                        print(f"[RETRY] Text {text.id} cannot retry: {reason}")
-                else:
-                    print(f"[RETRY] Text {text.id} does not need retry")
         except Exception as e:
-            print(f"[RETRY] Error in failed text detection: {e}")
-            import traceback
-            traceback.print_exc()
+            # Log error but don't break the flow
+            pass
                 
         return failed_texts
+
+    def retry_failed_components(self, account_id: int, text_id: int) -> dict:
+        """Main retry entry point - retry all missing components for a text.
+        Uses retry_actions to regenerate only the missing parts.
+        """
+        from ..utils.session_manager import db_manager
+        from .retry_actions import retry_missing_words as _retry_words, retry_missing_sentences as _retry_sents
+
+        results = {"words": False, "sentences": False, "error": None}
+
+        try:
+            with db_manager.transaction(account_id) as db:
+                failed_components = self.readiness.get_failed_components(db, account_id, text_id)
+                if not (failed_components.get("words") or failed_components.get("sentences")):
+                    return results
+
+                can_retry, reason = self.can_retry(db, account_id, text_id, failed_components)
+                if not can_retry:
+                    results["error"] = reason or "cannot_retry"
+                    return results
+
+                retry_record = self.create_retry_attempt(db, account_id, text_id, failed_components)
+                if not retry_record:
+                    results["error"] = "failed_to_create_retry_record"
+                    return results
+
+                log_dir = self.get_existing_log_directory(account_id, text_id)
+                if not log_dir:
+                    results["error"] = "no_existing_log_directory"
+                    return results
+
+                completed = {}
+                if failed_components.get("words"):
+                    results["words"] = _retry_words(account_id, text_id, log_dir)
+                    completed["words"] = results["words"]
+                if failed_components.get("sentences"):
+                    results["sentences"] = _retry_sents(account_id, text_id, log_dir)
+                    completed["sentences"] = results["sentences"]
+
+                error_msg = None if all(
+                    [not failed_components.get("words") or results["words"],
+                     not failed_components.get("sentences") or results["sentences"]]
+                ) else "partial_failure"
+                self.mark_retry_completed(db, getattr(retry_record, "id", None), completed, error_details=error_msg)
+
+        except Exception as e:
+            results["error"] = str(e)
+
+        return results

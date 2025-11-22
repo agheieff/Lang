@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..utils.session_manager import db_manager
 
 from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
+from ..enums import TextUnit
 from ..utils.json_parser import extract_structured_translation, extract_word_translations
 from ..utils.gloss import compute_spans
 from ..llm.client import _pick_openrouter_model, chat_complete_with_raw
@@ -190,7 +191,7 @@ def retry_missing_sentences(account_id: int, text_id: int, log_dir: Path) -> boo
                     db.add(ReadingTextTranslation(
                         account_id=account_id,
                         text_id=text_id,
-                        unit="sentence",
+                        unit=TextUnit.SENTENCE,
                         target_lang=(tr_parsed.get("target_lang") or target_lang),
                         segment_index=idx,
                         span_start=None,

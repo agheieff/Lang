@@ -280,7 +280,7 @@ class GenerationOrchestrator:
                         text_title=text_title,
                         job_dir=job_dir,
                         reading_messages=reading_messages,
-                        provider="openrouter",  # TODO: Make this configurable
+                        provider=os.getenv("ARC_DEFAULT_PROVIDER", "openrouter"),
                         model_id=None,  # Let translation service pick model
                         base_url=None
                     )
@@ -410,7 +410,6 @@ class GenerationOrchestrator:
         for text in failed_texts:
             def retry_in_background():
                 try:
-                    result = self.retry_failed_components(account_id, text.id)
                     if result.get("error"):
                         try:
                             logger.error(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")

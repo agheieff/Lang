@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 
 from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss, NextReadyOverride
+from ..enums import TextUnit
 from ..settings import get_settings
 from ..utils.migrations import ensure_reading_text_lifecycle_columns
 
@@ -44,7 +45,7 @@ class ReadinessService:
                 .filter(
                     ReadingTextTranslation.account_id == account_id,
                     ReadingTextTranslation.text_id == text_id,
-                    ReadingTextTranslation.unit == "sentence",
+                    ReadingTextTranslation.unit == TextUnit.SENTENCE,
                 )
                 .first()
                 is not None
