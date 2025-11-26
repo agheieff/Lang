@@ -28,6 +28,7 @@
                 onContentReady: null,
                 onTranslationsReady: null,
                 onGenerationFailed: null,
+                onNextReady: null,
                 onConnected: null,
                 onDisconnected: null
             };
@@ -141,6 +142,13 @@
                     console.log('[SSE] Generation failed:', JSON.parse(event.data));
                     if (this.handlers.onGenerationFailed) {
                         this.handlers.onGenerationFailed(JSON.parse(event.data));
+                    }
+                });
+                
+                this.eventSource.addEventListener('next_ready', (event) => {
+                    console.log('[SSE] Next text ready:', JSON.parse(event.data));
+                    if (this.handlers.onNextReady) {
+                        this.handlers.onNextReady(JSON.parse(event.data));
                     }
                 });
                 
@@ -281,6 +289,21 @@
                     }
                     
                     // Retry button or other error handling could go here
+                },
+                
+                onNextReady: (data) => {
+                    // Next text is fully ready - enable the Next button
+                    const statusEl = document.getElementById('next-status');
+                    if (statusEl) {
+                        statusEl.textContent = 'Next text ready';
+                        statusEl.className = 'ml-3 text-sm text-green-500';
+                    }
+                    
+                    const nextBtn = document.getElementById('next-btn');
+                    if (nextBtn) {
+                        nextBtn.disabled = false;
+                        nextBtn.setAttribute('aria-disabled', 'false');
+                    }
                 },
                 
                 onDisconnected: (event) => {

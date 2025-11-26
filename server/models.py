@@ -399,4 +399,3 @@ class GenerationRetryAttempt(Base):
     # When this retry was attempted
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)

@@ -216,6 +216,15 @@ class NotificationService:
         self.broadcast_to_account(account_id, lang, event)
         logger.info(f"[SSE] generation_failed: account={account_id} text_id={text_id}")
     
+    def send_next_ready(self, account_id: int, lang: str, text_id: int) -> None:
+        """Notify that the next text is fully ready to read."""
+        event = SSEEvent("next_ready", {
+            "text_id": text_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        self.broadcast_to_account(account_id, lang, event)
+        logger.info(f"[SSE] next_ready: account={account_id} text_id={text_id}")
+    
     def create_sse_stream(self, account_id: int, lang: str) -> StreamingResponse:
         """
         Create a FastAPI SSE streaming response for a client.
@@ -232,10 +241,10 @@ class NotificationService:
                 try:
                     with db_manager.transaction(account_id) as db:
                         selection_service = SelectionService()
+                        readiness_service = ReadinessService()
                         current_text = selection_service.pick_current_or_new(db, account_id, lang)
                         
                         if current_text:
-                            readiness_service = ReadinessService()
                             is_ready, reason = readiness_service.evaluate(db, current_text, account_id)
                             
                             # Check if content is ready (text exists but translations might not be)
@@ -259,6 +268,28 @@ class NotificationService:
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             })
                             yield text_ready_event.format()
+                        
+                        # Check if there's a ready backup text (unopened with translations)
+                        from ..models import ReadingText
+                        backup_text = (
+                            db.query(ReadingText)
+                            .filter(
+                                ReadingText.account_id == account_id,
+                                ReadingText.lang == lang,
+                                ReadingText.opened_at.is_(None),
+                                ReadingText.content.is_not(None),
+                            )
+                            .order_by(ReadingText.created_at.desc())
+                            .first()
+                        )
+                        if backup_text and backup_text.id != (current_text.id if current_text else None):
+                            backup_ready, backup_reason = readiness_service.evaluate(db, backup_text, account_id)
+                            if backup_ready and backup_reason == "both":
+                                next_ready_event = SSEEvent("next_ready", {
+                                    "text_id": backup_text.id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                                yield next_ready_event.format()
                 except Exception as e:
                     logger.warning(f"[SSE] Failed to check initial readiness: {e}")
                 

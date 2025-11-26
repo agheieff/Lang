@@ -26,65 +26,6 @@ logger = logging.getLogger(__name__)
 # Cross-process locking utilities
 from ..utils.file_lock import FileLock
 
-
-def retry_failed_components(account_id: int, text_id: int) -> dict:
-    """Main retry entry point - retry all missing components for a text.
-    Uses retry_actions to regenerate only the missing parts.
-    """
-    from .retry_service import RetryService
-    from .readiness_service import ReadinessService
-    from .retry_actions import retry_missing_words as _retry_words, retry_missing_sentences as _retry_sents
-
-    retry_service = RetryService()
-    readiness = ReadinessService()
-
-    results = {"words": False, "sentences": False, "error": None}
-
-    try:
-        with db_manager.transaction(account_id) as db:
-            failed_components = readiness.get_failed_components(db, account_id, text_id)
-            if not (failed_components.get("words") or failed_components.get("sentences")):
-                return results
-
-            can_retry, reason = retry_service.can_retry(db, account_id, text_id, failed_components)
-            if not can_retry:
-                results["error"] = reason or "cannot_retry"
-                return results
-
-            retry_record = retry_service.create_retry_attempt(db, account_id, text_id, failed_components)
-            if not retry_record:
-                results["error"] = "failed_to_create_retry_record"
-                return results
-
-            log_dir = retry_service.get_existing_log_directory(account_id, text_id)
-            if not log_dir:
-                results["error"] = "no_existing_log_directory"
-                return results
-
-            completed = {}
-            if failed_components.get("words"):
-                results["words"] = _retry_words(account_id, text_id, log_dir)
-                completed["words"] = results["words"]
-            if failed_components.get("sentences"):
-                results["sentences"] = _retry_sents(account_id, text_id, log_dir)
-                completed["sentences"] = results["sentences"]
-
-            error_msg = None if all(
-                [not failed_components.get("words") or results["words"],
-                 not failed_components.get("sentences") or results["sentences"]]
-            ) else "partial_failure"
-            retry_service.mark_retry_completed(db, getattr(retry_record, "id", None), completed, error_details=error_msg)
-
-    except Exception as e:
-        try:
-            logger.error(f"[RETRY] General error in retry_failed_components for text_id={text_id}: {e}", exc_info=True)
-        except Exception:
-            pass
-        results["error"] = str(e)
-
-    return results
-
-
 class GenerationOrchestrator:
     """
     Orchestrates the text generation pipeline.
@@ -357,6 +298,10 @@ class GenerationOrchestrator:
                 
                 # Notify translations are ready
                 self.notification_service.send_translations_ready(account_id, lang, text_id)
+                
+                # Check if this is a backup text (unopened) and notify next_ready
+                self._notify_next_ready_if_backup(account_id, lang, text_id)
+                
                 logger.info(f"[ORCHESTRATOR] Translations completed for text_id={text_id}")
             else:
                 logger.error(f"[ORCHESTRATOR] Translation job failed for text_id={text_id}: {translation_result.error}")
@@ -365,9 +310,27 @@ class GenerationOrchestrator:
                     # Try validation even for partial failures
                     completeness = self.validation_service.validate_and_backfill(account_id, text_id)
                     self.notification_service.send_translations_ready(account_id, lang, text_id)
+                    # Also check for next_ready on partial success
+                    self._notify_next_ready_if_backup(account_id, lang, text_id)
             
         except Exception as e:
             logger.error(f"[ORCHESTRATOR] Translation job failed: {e}", exc_info=True)
+    
+    def _notify_next_ready_if_backup(self, account_id: int, lang: str, text_id: int) -> None:
+        """Send next_ready event if this text is a backup (unopened) text."""
+        try:
+            from ..models import ReadingText
+            with db_manager.transaction(account_id) as db:
+                text = db.query(ReadingText).filter(
+                    ReadingText.id == text_id,
+                    ReadingText.account_id == account_id
+                ).first()
+                
+                # Only send next_ready if this text hasn't been opened yet
+                if text and text.opened_at is None:
+                    self.notification_service.send_next_ready(account_id, lang, text_id)
+        except Exception as e:
+            logger.warning(f"[ORCHESTRATOR] Failed to check/send next_ready: {e}")
     
     def _get_job_dir(self, account_id: int, lang: str) -> Path:
         """Get/create directory for job logs."""
@@ -376,6 +339,55 @@ class GenerationOrchestrator:
         job_dir = base / ts
         job_dir.mkdir(parents=True, exist_ok=True)
         return job_dir
+    
+    def retry_failed_components(self, account_id: int, text_id: int) -> dict:
+        """Retry all missing components for a text.
+        Uses retry_actions to regenerate only the missing parts.
+        """
+        from .retry_actions import retry_missing_words as _retry_words, retry_missing_sentences as _retry_sents
+
+        results = {"words": False, "sentences": False, "error": None}
+
+        try:
+            with db_manager.transaction(account_id) as db:
+                failed_components = self.readiness_service.get_failed_components(db, account_id, text_id)
+                if not (failed_components.get("words") or failed_components.get("sentences")):
+                    return results
+
+                can_retry, reason = self.retry_service.can_retry(db, account_id, text_id, failed_components)
+                if not can_retry:
+                    results["error"] = reason or "cannot_retry"
+                    return results
+
+                retry_record = self.retry_service.create_retry_attempt(db, account_id, text_id, failed_components)
+                if not retry_record:
+                    results["error"] = "failed_to_create_retry_record"
+                    return results
+
+                log_dir = self.retry_service.get_existing_log_directory(account_id, text_id)
+                if not log_dir:
+                    results["error"] = "no_existing_log_directory"
+                    return results
+
+                completed = {}
+                if failed_components.get("words"):
+                    results["words"] = _retry_words(account_id, text_id, log_dir)
+                    completed["words"] = results["words"]
+                if failed_components.get("sentences"):
+                    results["sentences"] = _retry_sents(account_id, text_id, log_dir)
+                    completed["sentences"] = results["sentences"]
+
+                error_msg = None if all(
+                    [not failed_components.get("words") or results["words"],
+                     not failed_components.get("sentences") or results["sentences"]]
+                ) else "partial_failure"
+                self.retry_service.mark_retry_completed(db, getattr(retry_record, "id", None), completed, error_details=error_msg)
+
+        except Exception as e:
+            logger.error(f"[RETRY] General error in retry_failed_components for text_id={text_id}: {e}", exc_info=True)
+            results["error"] = str(e)
+
+        return results
     
     def check_and_retry_failed_texts(self, db: Session, account_id: int, lang: str) -> list:
         """Check for failed texts and attempt retries if allowed."""
@@ -398,7 +410,7 @@ class GenerationOrchestrator:
         for text in failed_texts:
             def retry_in_background():
                 try:
-                    result = retry_failed_components(account_id, text.id)
+                    result = self.retry_failed_components(account_id, text.id)
                     if result.get("error"):
                         try:
                             logger.error(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")

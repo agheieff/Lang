@@ -7,7 +7,6 @@
       this.pendingReason = null;
       this.homeSSE = null;
       this.htmxHooksInstalled = false;
-      this.pollTimerId = null;
       this._installHtmxHooks();
     }
 
@@ -59,6 +58,23 @@
           this.requestRefresh('home_translations_ready');
         });
 
+        es.addEventListener('next_ready', (event) => {
+          try {
+            void JSON.parse(event.data || 'null');
+          } catch (_e) {}
+          // Enable next button when backup text is ready
+          const nextBtn = document.getElementById('next-btn');
+          if (nextBtn) {
+            nextBtn.disabled = false;
+            nextBtn.setAttribute('aria-disabled', 'false');
+          }
+          const statusEl = document.getElementById('next-status');
+          if (statusEl) {
+            statusEl.textContent = 'Next text ready';
+            statusEl.className = 'ml-3 text-sm text-green-500';
+          }
+        });
+
         es.addEventListener('error', (event) => {
           console.error('[HOME SSE] Connection error', event);
         });
@@ -66,8 +82,6 @@
         window.addEventListener('beforeunload', () => {
           try { es.close(); } catch (_e) {}
         });
-
-        this._startEmptyPoll();
       } catch (e) {
         console.error('[HOME SSE] Failed to init SSE', e);
       }
@@ -117,16 +131,6 @@
         this._showError();
       }
 
-       // Stop polling once we have actual text
-       try {
-         const container = document.getElementById('current-reading');
-         const hasText = container && container.querySelector('#reading-text');
-         if (hasText && this.pollTimerId) {
-           clearInterval(this.pollTimerId);
-           this.pollTimerId = null;
-         }
-       } catch (_e) {}
-
       if (this.pendingReason) {
         const r = this.pendingReason;
         this.pendingReason = null;
@@ -169,23 +173,6 @@
       if (btn) {
         btn.addEventListener('click', () => this.requestRefresh('user_retry'));
       }
-    }
-
-    _startEmptyPoll() {
-      if (this.pollTimerId) return;
-      this.pollTimerId = setInterval(() => {
-        try {
-          const container = document.getElementById('current-reading');
-          if (!container) return;
-          const hasText = container.querySelector('#reading-text');
-          if (hasText) {
-            clearInterval(this.pollTimerId);
-            this.pollTimerId = null;
-            return;
-          }
-          this.requestRefresh('poll_empty');
-        } catch (_e) {}
-      }, 5000);
     }
   }
 

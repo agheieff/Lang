@@ -169,10 +169,13 @@ class SessionProcessingService:
                 if not word_surface or not event_type:
                     continue
                 
-                # Resolve lexeme (cached)
-                cache_key = (lang, lemma, pos)
+                # Resolve lexeme (cached per account/profile)
+                cache_key = (account_id, profile.id, lang, lemma, pos)
                 if cache_key not in lexeme_cache:
-                    lexeme_cache[cache_key] = _resolve_lexeme(db, lang, lemma, pos)
+                    lexeme_cache[cache_key] = _resolve_lexeme(
+                        db, lang, lemma, pos,
+                        account_id=account_id, profile_id=profile.id
+                    )
                 lexeme = lexeme_cache[cache_key]
                 
                 if event_type in ("lookup", "click"):

@@ -107,7 +107,7 @@ def srs_click(
     lexeme: Optional[Lexeme] = None,    # Optimization: pass lexeme if known
 ) -> None:
     prof = profile or _ensure_profile(db, account_id, lang)
-    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos)
+    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos, account_id=account_id, profile_id=prof.id)
     
     # Since lexemes are now user-specific, we can use them directly
     lex.a_click = (lex.a_click or 0) + 1
@@ -147,7 +147,7 @@ def srs_exposure(
     session_start_time: Optional[datetime] = None, # Optimization: pass session start to skip query
 ) -> None:
     prof = profile or _ensure_profile(db, account_id, lang)
-    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos)
+    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos, account_id=account_id, profile_id=prof.id)
     
     # Since lexemes are now user-specific, we can use them directly
     now = datetime.utcnow()
@@ -283,7 +283,7 @@ def srs_nonlookup(
     lexeme: Optional[Lexeme] = None,
 ) -> None:
     prof = profile or _ensure_profile(db, account_id, lang)
-    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos)
+    lex = lexeme or _resolve_lexeme(db, lang, lemma, pos, account_id=account_id, profile_id=prof.id)
     
     # Since lexemes are now user-specific, we can use them directly
     now = datetime.utcnow()

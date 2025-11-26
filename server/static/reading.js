@@ -18,6 +18,71 @@ window.arcToggleTranslation = function (e) {
   }
 };
 
+// Extract lookups and interactions from nested session structure
+function extractWordEvents(sessionData) {
+  const lookups = [];
+  const interactions = [];
+  const exposures = [];
+  
+  // Helper to create interaction/lookup entry
+  function addWordEvent(word, isLookup) {
+    const entry = {
+      word: word.surface,
+      lemma: word.lemma || word.surface,
+      pos: word.pos || null,
+      span_start: word.span_start,
+      span_end: word.span_end,
+      translation: word.translation || null,
+      pinyin: word.pinyin || null
+    };
+    
+    if (isLookup && word.looked_up_at) {
+      // Word was clicked/looked up
+      lookups.push({
+        ...entry,
+        timestamp: new Date(word.looked_up_at).toISOString(),
+        translations: word.translation ? [word.translation] : []
+      });
+      interactions.push({
+        ...entry,
+        event_type: 'click',
+        timestamp: new Date(word.looked_up_at).toISOString()
+      });
+    }
+    
+    // All words are exposures
+    exposures.push({
+      ...entry,
+      event_type: 'exposure',
+      timestamp: new Date(sessionData.opened_at || Date.now()).toISOString()
+    });
+  }
+  
+  // Process title words
+  if (sessionData.title && Array.isArray(sessionData.title.words)) {
+    for (const word of sessionData.title.words) {
+      addWordEvent(word, !!word.looked_up_at);
+    }
+  }
+  
+  // Process paragraph/sentence words
+  if (Array.isArray(sessionData.paragraphs)) {
+    for (const para of sessionData.paragraphs) {
+      if (Array.isArray(para.sentences)) {
+        for (const sentence of para.sentences) {
+          if (Array.isArray(sentence.words)) {
+            for (const word of sentence.words) {
+              addWordEvent(word, !!word.looked_up_at);
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return { lookups, interactions, exposures };
+}
+
 window.arcBuildNextParams = function () {
   // Get the current session data from local storage
   const textEl = document.getElementById('reading-text');
@@ -45,13 +110,19 @@ window.arcBuildNextParams = function () {
       sessionData.analytics.completion_status = 'finished';
     }
     
+    // Extract word events in server-expected format
+    const { lookups, interactions, exposures } = extractWordEvents(sessionData);
+    sessionData.lookups = lookups;
+    sessionData.interactions = [...interactions, ...exposures];
+    
     // Save updated session
     try { localStorage.setItem(sessionKey, JSON.stringify(sessionData)); } catch {}
     
-    console.log('Sending session data to server for next text:', sessionData);
-    console.log('Session data keys:', Object.keys(sessionData || {}));
-    console.log('Text ID:', sessionData?.text_id);
-    console.log('Session ID:', sessionData?.session_id);
+    console.log('Sending session data to server:', {
+      text_id: sessionData.text_id,
+      lookups_count: lookups.length,
+      interactions_count: sessionData.interactions.length
+    });
     
     // Store session data for the form to pick up
     try { sessionStorage.setItem('arc_next_params', JSON.stringify(sessionData)); } catch {}

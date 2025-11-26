@@ -145,7 +145,7 @@ class TranslationService:
         words_success = self._generate_word_translations(
             account_db, account_id, text_id, lang, target_lang,
             text_content, job_dir, provider, model_id, base_url,
-            w_messages, reading_messages, text_content
+            w_messages, reading_messages, text_content, user_tier
         )
         sentences_success = self._generate_sentence_translations(
             account_db, account_id, text_id, lang, target_lang,
@@ -183,7 +183,8 @@ class TranslationService:
                                     base_url: Optional[str],
                                     w_messages: List[Dict],
                                     reading_messages: List[Dict],
-                                    full_response: str) -> bool:
+                                    full_response: str,
+                                    user_tier: str = "Free") -> bool:
         """Generate word translations split by sentence."""
         try:
             # Split text into sentences
@@ -313,7 +314,7 @@ class TranslationService:
             if not tr_parsed:
                 return False
             # Compute sentence spans based on current text
-            sent_spans = self._split_sentences(text_content, lang)
+            sent_spans = split_sentences(text_content, lang)
             idx = 0
             for p in tr_parsed.get("paragraphs", []):
                 for s in p.get("sentences", []):
@@ -454,10 +455,6 @@ class TranslationService:
             logger.error(f"[TRANSLATION] Title translation failed: {e}", exc_info=True)
             return False
     
-    def _split_sentences(self, text: str, lang: str) -> List[Tuple[int, int, str]]:
-        """Deprecated; delegate to utils.text_segmentation.split_sentences."""
-        return split_sentences(text, lang)
-
     def backfill_sentence_spans(self, account_db: Session, account_id: int, text_id: int) -> bool:
         """Backfill span_start/span_end for existing sentence translations by index order.
 
@@ -467,7 +464,7 @@ class TranslationService:
             rt = account_db.query(ReadingText).filter(ReadingText.id == text_id, ReadingText.account_id == account_id).first()
             if not rt or not getattr(rt, "content", None):
                 return False
-            sent_spans = self._split_sentences(rt.content, rt.lang)
+            sent_spans = split_sentences(rt.content, rt.lang)
             rows = (
                 account_db.query(ReadingTextTranslation)
                 .filter(
