@@ -13,6 +13,8 @@ from ..models import Profile, ProfilePref
 from server.auth import Account
 from ..deps import get_current_account
 from ..repos.profiles import get_or_create_profile, get_pref_row, get_user_profile
+from ..services.interests_parser import parse_interests_to_weights
+from ..config import TOPICS, DEFAULT_TOPIC_WEIGHTS
 
 # Supported languages (learning): Spanish and Chinese (Simplified/Traditional variants)
 SUPPORTED_LANGUAGES = {"es", "zh", "zh-Hans", "zh-Hant", "en"}
@@ -320,3 +322,80 @@ def set_ui_prefs(
     pref.data = data
     db.commit()
     return {"ok": True}
+
+
+# --- Topic Interests ---
+
+class InterestsRequest(BaseModel):
+    interests: str  # Free-form text describing user interests
+    lang: str  # Language profile to update
+
+
+class InterestsResponse(BaseModel):
+    interests: str
+    topic_weights: Dict[str, float]
+    available_topics: List[str]
+
+
+@router.post("/me/interests", response_model=InterestsResponse)
+def update_interests(
+    req: InterestsRequest,
+    db: Session = Depends(get_db),
+    account: Account = Depends(get_current_account),
+):
+    """
+    Update user interests and parse into topic weights via LLM.
+    
+    The interests text is saved to the profile and parsed into topic weights
+    that influence which topics are selected for text generation.
+    """
+    norm_lang, _ = _normalize_lang_and_script(req.lang)
+    prof = db.query(Profile).filter(
+        Profile.account_id == account.id,
+        Profile.lang == norm_lang,
+    ).first()
+    
+    if not prof:
+        raise HTTPException(404, "Profile not found for this language")
+    
+    # Save raw interests text
+    interests_text = (req.interests or "").strip()
+    prof.text_preferences = interests_text or None
+    
+    # Parse interests to weights via LLM
+    if interests_text:
+        weights = parse_interests_to_weights(interests_text)
+    else:
+        weights = DEFAULT_TOPIC_WEIGHTS.copy()
+    
+    prof.topic_weights = weights
+    db.commit()
+    
+    return InterestsResponse(
+        interests=interests_text,
+        topic_weights=weights,
+        available_topics=TOPICS,
+    )
+
+
+@router.get("/me/interests", response_model=InterestsResponse)
+def get_interests(
+    lang: str,
+    db: Session = Depends(get_db),
+    account: Account = Depends(get_current_account),
+):
+    """Get current interests and topic weights for a language profile."""
+    norm_lang, _ = _normalize_lang_and_script(lang)
+    prof = db.query(Profile).filter(
+        Profile.account_id == account.id,
+        Profile.lang == norm_lang,
+    ).first()
+    
+    if not prof:
+        raise HTTPException(404, "Profile not found for this language")
+    
+    return InterestsResponse(
+        interests=prof.text_preferences or "",
+        topic_weights=prof.topic_weights or DEFAULT_TOPIC_WEIGHTS,
+        available_topics=TOPICS,
+    )

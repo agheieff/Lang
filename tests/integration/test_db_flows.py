@@ -183,7 +183,8 @@ class TestProfilePreferences:
         assert profile.ci_preference == 0.92
         assert profile.topic_weights is not None
         assert isinstance(profile.topic_weights, dict)
-        assert "fiction" in profile.topic_weights
+        # Default is empty dict - services use config.DEFAULT_TOPIC_WEIGHTS when empty
+        assert profile.topic_weights == {}
     
     def test_profile_ci_preference_update(self, db_session):
         """Test updating CI preference."""

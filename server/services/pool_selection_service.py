@@ -11,16 +11,10 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from ..config import POOL_SIZE, POOL_CI_VARIANCE
+from ..config import POOL_SIZE, POOL_CI_VARIANCE, TOPICS, DEFAULT_TOPIC_WEIGHTS
 from ..models import Profile, ReadingText
 
 logger = logging.getLogger(__name__)
-
-# Available topics for text generation
-TOPICS = ["fiction", "news", "science", "history", "daily_life", "culture"]
-
-# Default topic weights (all equal)
-DEFAULT_TOPIC_WEIGHTS = {t: 1.0 for t in TOPICS}
 
 
 class PoolSelectionService:

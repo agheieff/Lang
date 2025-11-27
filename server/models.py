@@ -52,7 +52,7 @@ class Profile(Base):
     current_text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
     # Pool-based selection preferences
     ci_preference: Mapped[float] = mapped_column(Float, default=0.92)  # Target comprehension (0.85-0.98)
-    topic_weights: Mapped[dict] = mapped_column(JSON, default=lambda: {"fiction": 1.0, "news": 1.0, "science": 1.0, "history": 1.0, "daily_life": 1.0, "culture": 1.0})
+    topic_weights: Mapped[dict] = mapped_column(JSON, default=dict)  # Populated from config.DEFAULT_TOPIC_WEIGHTS
 
     # Relationship to Account (global DB) is not declared to avoid cross-DB FK
     # account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])

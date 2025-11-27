@@ -108,3 +108,19 @@ PAID_TIERS: set[str] = {"Standard", "Pro", "Pro+"}
 # Text pool settings
 POOL_SIZE: int = _i("ARC_POOL_SIZE", 4)  # Number of pre-generated texts to maintain per user/lang
 POOL_CI_VARIANCE: float = _f("ARC_POOL_CI_VARIANCE", 0.05)  # How much to vary CI target in pool
+
+# Topic categories for text generation (path-based strings, hierarchy-ready)
+TOPICS: list[str] = [
+    "fiction",
+    "news", 
+    "science",
+    "technology",
+    "history",
+    "daily_life",
+    "culture",
+    "sports",
+    "business",
+]
+
+# Default topic weights (all equal)
+DEFAULT_TOPIC_WEIGHTS: dict[str, float] = {t: 1.0 for t in TOPICS}
