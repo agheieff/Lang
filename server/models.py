@@ -50,6 +50,9 @@ class Profile(Base):
     text_preferences: Mapped[Optional[str]] = mapped_column(String, default=None)
     # Current text being read (not yet fully read). One per profile.
     current_text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
+    # Pool-based selection preferences
+    ci_preference: Mapped[float] = mapped_column(Float, default=0.92)  # Target comprehension (0.85-0.98)
+    topic_weights: Mapped[dict] = mapped_column(JSON, default=dict)  # Populated from config.DEFAULT_TOPIC_WEIGHTS
 
     # Relationship to Account (global DB) is not declared to avoid cross-DB FK
     # account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
@@ -72,6 +75,11 @@ class ReadingText(Base):
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     # First time the text was opened by the user
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    # Pool-based selection fields
+    ci_target: Mapped[Optional[float]] = mapped_column(Float, default=None)  # Target comprehension (0.85-0.98)
+    topic: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # Primary topic category
+    difficulty_estimate: Mapped[Optional[float]] = mapped_column(Float, default=None)  # Estimated difficulty (0-1)
+    pooled: Mapped[bool] = mapped_column(Boolean, default=False)  # True if in pool (not yet opened)
 
 
 # Placeholder for future SRS tables (not implemented yet)

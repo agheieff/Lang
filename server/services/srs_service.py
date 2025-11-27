@@ -78,12 +78,12 @@ class SrsService:
         # In a full refactor, we'd move the logic here.
         pass
 
-def _ensure_profile(db: Session, account_id: int, lang: str) -> Profile:
+def _ensure_profile(db: Session, account_id: int, lang: str, target_lang: str = "en") -> Profile:
     """Get or create profile without implicit flush."""
     prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
     if prof:
         return prof
-    prof = Profile(account_id=account_id, lang=lang)
+    prof = Profile(account_id=account_id, lang=lang, target_lang=target_lang)
     db.add(prof)
     # Removed db.flush() - let caller handle transaction
     return prof

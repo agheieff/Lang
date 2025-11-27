@@ -25,6 +25,7 @@
    "ruff>=0.6.0",
    "requests>=2.32.5",
    "python-multipart>=0.0.20",
+   "cryptography>=46.0.3",
 ]
 
  [project.optional-dependencies]
@@ -56,6 +57,7 @@ serve = "uvicorn server.main:app --reload --port 8000"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.18.2",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",

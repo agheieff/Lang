@@ -91,10 +91,10 @@ async def async_client(db_session) -> AsyncGenerator[AsyncClient, None]:
 def sample_account(db_session) -> Account:
     """Create a sample account for testing."""
     account = Account(
-        id="test-account-id",
         email="test@example.com",
-        username="testuser",
-        tier="free"
+        password_hash="hashed_password",
+        is_active=True,
+        subscription_tier="free"
     )
     db_session.add(account)
     db_session.commit()
@@ -107,9 +107,8 @@ def sample_profile(db_session, sample_account) -> Profile:
     """Create a sample profile for testing."""
     profile = Profile(
         account_id=sample_account.id,
-        target_language="es",
-        interface_language="en",
-        level=1.0
+        lang="es",
+        target_lang="en",
     )
     db_session.add(profile)
     db_session.commit()
@@ -135,14 +134,12 @@ def sample_lexeme(db_session, sample_account, sample_profile) -> Lexeme:
 
 
 @pytest.fixture
-def sample_reading_text(db_session, sample_profile) -> ReadingText:
+def sample_reading_text(db_session, sample_account) -> ReadingText:
     """Create a sample reading text for testing."""
     reading_text = ReadingText(
-        profile_id=sample_profile.id,
-        title="Sample Text",
+        account_id=sample_account.id,
+        lang="es",
         content="Esta es una casa. La casa es grande.",
-        language="es",
-        difficulty_level=1.0
     )
     db_session.add(reading_text)
     db_session.commit()
@@ -173,13 +170,13 @@ def sample_lexeme_with_data(db_session, sample_account, sample_profile) -> Lexem
 def auth_headers(sample_account) -> dict:
     """Create authorization headers for authenticated requests."""
     from jose import jwt
-    import datetime
+    from datetime import datetime, timedelta, timezone
     
     payload = {
-        "sub": sample_account.id,
+        "sub": str(sample_account.id),
         "email": sample_account.email,
         "tier": sample_account.subscription_tier,
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1)
     }
     
     token = jwt.encode(payload, "test-secret", algorithm="HS256")

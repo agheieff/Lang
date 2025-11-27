@@ -148,6 +148,7 @@ class GenerationStateManager:
         ).first()
         
         if rt:
+            rt.is_read = True
             rt.read_at = datetime.utcnow()
             db.commit()
             return True

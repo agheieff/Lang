@@ -18,6 +18,8 @@ def build_reading_prompt_spec(
     lang: str,
     length: Optional[int] = None,
     include_words: Optional[List[str]] = None,
+    ci_target_override: Optional[float] = None,
+    topic: Optional[str] = None,
 ) -> Tuple[PromptSpec, List[str], Optional[str]]:
     """Assemble PromptSpec and supporting values (words, level_hint)."""
     script = None
@@ -44,7 +46,8 @@ def build_reading_prompt_spec(
 
     class _U: pass
     u = _U(); u.id = account_id
-    ci_target = get_ci_target(db, account_id, lang)
+    # Use override ci_target if provided (for pool generation), otherwise use profile preference
+    ci_target = ci_target_override if ci_target_override is not None else get_ci_target(db, account_id, lang)
     base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
     words = include_words or _pick_words(db, u, lang, count=12, new_ratio=base_new_ratio)
     level_hint = compose_level_hint(db, u, lang)
@@ -71,6 +74,7 @@ def build_reading_prompt_spec(
         ci_target=ci_target,
         preferences=preferences,
         recent_titles=_get_recent_read_titles(db, account_id, lang),
+        topic=topic,
     )
     return spec, words, level_hint
 

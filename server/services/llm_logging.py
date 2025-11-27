@@ -78,6 +78,7 @@ def llm_call_and_log_to_file(
     *,
     max_tokens: int = 16384,
     model_config: Optional[object] = None,
+    user_api_key: Optional[str] = None,
 ) -> tuple[str, Dict, str, Optional[str]]:
     """Call an LLM and write request/response JSON to out_path. Returns (text, resp, provider, model).
 
@@ -104,6 +105,7 @@ def llm_call_and_log_to_file(
             model=model,
             base_url=base_url_eff,
             max_tokens=max_toks,
+            user_api_key=user_api_key,
         )
     else:
         base_url_eff = base_url or "http://localhost:1234/v1"
@@ -115,6 +117,7 @@ def llm_call_and_log_to_file(
             model=model_eff,
             base_url=base_url_eff,
             max_tokens=max_tokens,
+            user_api_key=user_api_key,
         )
     resp: Dict = resp_dict or {}
     try:

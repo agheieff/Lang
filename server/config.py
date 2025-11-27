@@ -84,3 +84,43 @@ try:
         RATE_LIMITS = _DEFAULT_RATE_LIMITS
 except Exception:
     RATE_LIMITS = _DEFAULT_RATE_LIMITS
+
+
+# OpenRouter per-user key management
+OPENROUTER_PROVISIONING_KEY: str = os.getenv("OPENROUTER_PROVISIONING_KEY", "")
+OPENROUTER_KEY_ENCRYPTION_SECRET: str = os.getenv("OPENROUTER_KEY_ENCRYPTION_SECRET", "")
+
+# Per-tier monthly spending limits (USD) for OpenRouter sub-keys
+# None means no limit (BYOK users bring their own key)
+TIER_SPENDING_LIMITS: Dict[str, float | None] = {
+    "Free": None,  # Free tier uses shared pool, no individual key
+    "Standard": _f("ARC_TIER_LIMIT_STANDARD", 25.0),
+    "Pro": _f("ARC_TIER_LIMIT_PRO", 100.0),
+    "Pro+": _f("ARC_TIER_LIMIT_PRO_PLUS", 250.0),
+    "BYOK": None,  # User provides their own key
+    "admin": None,  # No limit for admins
+}
+
+# Tiers that get their own OpenRouter sub-key
+PAID_TIERS: set[str] = {"Standard", "Pro", "Pro+"}
+
+
+# Text pool settings
+POOL_SIZE: int = _i("ARC_POOL_SIZE", 4)  # Number of pre-generated texts to maintain per user/lang
+POOL_CI_VARIANCE: float = _f("ARC_POOL_CI_VARIANCE", 0.05)  # How much to vary CI target in pool
+
+# Topic categories for text generation (path-based strings, hierarchy-ready)
+TOPICS: list[str] = [
+    "fiction",
+    "news", 
+    "science",
+    "technology",
+    "history",
+    "daily_life",
+    "culture",
+    "sports",
+    "business",
+]
+
+# Default topic weights (all equal)
+DEFAULT_TOPIC_WEIGHTS: dict[str, float] = {t: 1.0 for t in TOPICS}

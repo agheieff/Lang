@@ -181,8 +181,16 @@ def srs_click(
         db.commit()
     except Exception:
         pass
-    lex = _resolve_lexeme(db, req.lang, lemma, pos)
-    # Since lexemes are now user-specific, we can use them directly
+    
+    # Get profile to query user-specific lexeme
+    prof = db.query(Profile).filter(
+        Profile.account_id == account.id,
+        Profile.lang == req.lang
+    ).first()
+    if not prof:
+        return {"ok": True}
+    
+    lex = _resolve_lexeme(db, req.lang, lemma, pos, account_id=account.id, profile_id=prof.id)
     a = lex.a_click or 0
     b = lex.b_nonclick or 0
     p_click = a / (a + b) if (a + b) > 0 else 0.0

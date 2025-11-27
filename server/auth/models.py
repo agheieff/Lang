@@ -21,6 +21,10 @@ class Account(Base):
     role = Column(String(50), nullable=True)  # user|admin|...
     subscription_tier = Column(String(50), nullable=True)  # free|pro|...
     
+    # OpenRouter per-user key management (for paid tiers)
+    openrouter_key_encrypted = Column(Text, nullable=True)  # Fernet-encrypted API key
+    openrouter_key_id = Column(String(128), nullable=True)  # OpenRouter key hash/identifier for management
+    
     # Extended fields - apps can add their own here
     # Note: Profile fields (name, timezone, avatar_url) have been removed
     # Applications should implement their own profile systems
@@ -42,6 +46,7 @@ class Account(Base):
             "role": self.role,
             "subscription_tier": self.subscription_tier,
             "extras": self.extras,
+            "has_openrouter_key": self.openrouter_key_id is not None,
         }
 
 

@@ -26,6 +26,7 @@ from ..auth import Account
 from ..llm.prompts import build_translation_contexts, build_word_translation_prompt
 from ..utils.text_segmentation import split_sentences
 from .llm_logging import log_llm_request, llm_call_and_log_to_file
+from .openrouter_key_service import get_openrouter_key_service
 from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
 from ..utils.json_parser import (
     extract_structured_translation,
@@ -79,7 +80,7 @@ class TranslationService:
                                    text_title: Optional[str],
                                    job_dir: Path,
                                    reading_messages: List[Dict],
-                                   provider: str = None,  # Will be determined by model registry
+                                   provider: Optional[str] = None,  # Will be determined by model registry
                                    model_id: Optional[str] = None,  # Will be determined by model registry
                                    base_url: Optional[str] = None) -> TranslationResult:
         """
@@ -105,6 +106,12 @@ class TranslationService:
         # Get user's subscription tier for model selection from global database
         account = global_db.query(Account).filter(Account.id == account_id).first()
         user_tier = account.subscription_tier if account else "Free"
+        
+        # Get user's per-account OpenRouter key if they have one (paid tier)
+        user_api_key = None
+        if account:
+            key_service = get_openrouter_key_service()
+            user_api_key = key_service.get_user_key(account)
         
         # Get model configuration from registry or fall back to legacy behavior
         if provider is None or model_id is None:
@@ -145,12 +152,13 @@ class TranslationService:
         words_success = self._generate_word_translations(
             account_db, account_id, text_id, lang, target_lang,
             text_content, job_dir, provider, model_id, base_url,
-            w_messages, reading_messages, text_content, user_tier
+            w_messages, reading_messages, text_content, user_tier,
+            user_api_key=user_api_key
         )
         sentences_success = self._generate_sentence_translations(
             account_db, account_id, text_id, lang, target_lang,
             text_content, job_dir, provider, model_id, base_url,
-            tr_messages
+            tr_messages, user_api_key=user_api_key
         )
         
         # Generate title translation if a title is provided
@@ -158,7 +166,8 @@ class TranslationService:
         if text_title:
             title_success = self._generate_title_translation(
                 account_db, account_id, text_id, lang, target_lang,
-                text_title, job_dir, provider, model_id, base_url
+                text_title, job_dir, provider, model_id, base_url,
+                user_api_key=user_api_key
             )
             
         # Create result
@@ -184,7 +193,8 @@ class TranslationService:
                                     w_messages: List[Dict],
                                     reading_messages: List[Dict],
                                     full_response: str,
-                                    user_tier: str = "Free") -> bool:
+                                    user_tier: str = "Free",
+                                    user_api_key: Optional[str] = None) -> bool:
         """Generate word translations split by sentence."""
         try:
             # Split text into sentences
@@ -221,7 +231,8 @@ class TranslationService:
                     out_path = job_dir / f"words_{i+1}.json"
                     futures.append((s, seg, m, ex.submit(
                         llm_call_and_log_to_file,
-                        m, provider, model_id, base_url, out_path
+                        m, provider, model_id, base_url, out_path,
+                        user_api_key=user_api_key
                     )))
                 
                 for s, seg, m, f in futures:
@@ -281,12 +292,14 @@ class TranslationService:
                                       provider: str,
                                       model_id: Optional[str],
                                       base_url: Optional[str],
-                                      tr_messages: List[Dict]) -> bool:
+                                      tr_messages: List[Dict],
+                                      user_api_key: Optional[str] = None) -> bool:
         """Generate structured sentence translations."""
         try:
             # Call LLM for structured translation
             tr_buf, tr_resp, used_provider, used_model = llm_call_and_log_to_file(
-                tr_messages, provider, model_id, base_url, job_dir / "structured.json"
+                tr_messages, provider, model_id, base_url, job_dir / "structured.json",
+                user_api_key=user_api_key
             )
             
             if not tr_buf:
@@ -365,7 +378,8 @@ class TranslationService:
                                 job_dir: Path,
                                 provider: str,
                                 model_id: Optional[str],
-                                base_url: Optional[str]) -> bool:
+                                base_url: Optional[str],
+                                user_api_key: Optional[str] = None) -> bool:
         """Generate and persist title translation."""
         try:
             # Build title translation prompt
@@ -374,7 +388,8 @@ class TranslationService:
             
             # Call LLM for title translation
             title_buf, title_resp, used_provider, used_model = llm_call_and_log_to_file(
-                title_messages, provider, model_id, base_url, job_dir / "title_translation.json"
+                title_messages, provider, model_id, base_url, job_dir / "title_translation.json",
+                user_api_key=user_api_key
             )
             
             if not title_buf:
