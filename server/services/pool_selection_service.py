@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from ..config import POOL_SIZE, POOL_CI_VARIANCE
 from ..models import Profile, ReadingText
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,6 @@ TOPICS = ["fiction", "news", "science", "history", "daily_life", "culture"]
 
 # Default topic weights (all equal)
 DEFAULT_TOPIC_WEIGHTS = {t: 1.0 for t in TOPICS}
-
-# Pool configuration
-POOL_SIZE = 4  # Number of texts to maintain in pool per user/language
-CI_VARIANCE = 0.05  # How much to vary CI target when generating pool texts
 
 
 class PoolSelectionService:
@@ -129,7 +126,7 @@ class PoolSelectionService:
         
         if vary:
             # Add variance to CI target
-            ci_target = ci_pref + random.uniform(-CI_VARIANCE, CI_VARIANCE)
+            ci_target = ci_pref + random.uniform(-POOL_CI_VARIANCE, POOL_CI_VARIANCE)
             ci_target = max(0.80, min(0.98, ci_target))  # Clamp to valid range
         else:
             ci_target = ci_pref

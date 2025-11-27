@@ -20,7 +20,7 @@ from .translation_service import TranslationService
 from .translation_validation_service import TranslationValidationService
 from .notification_service import get_notification_service
 from .llm_common import build_reading_prompt_spec
-from .pool_selection_service import get_pool_selection_service, POOL_SIZE
+from .pool_selection_service import get_pool_selection_service
 
 logger = logging.getLogger(__name__)
 
@@ -51,45 +51,23 @@ class GenerationOrchestrator:
     
     def ensure_text_available(self, db: Session, account_id: int, lang: str) -> None:
         """
-        SINGLE entry point for ensuring text availability.
+        Ensure the text pool has available texts. Triggers generation if needed.
         
-        This is THE ONLY method that should start text generation.
-        All other parts of the system call this method.
-        
-        Maintains a pool of POOL_SIZE texts with varied stats for selection.
-        
-        Args:
-            db: Database session
-            account_id: User account ID  
-            lang: Language code
+        Called from multiple places (page load, next text, after generation).
+        Starts ONE generation job if pool is low - the job will call back to
+        continue filling the pool until it's full.
         """
-        try:
-            pool_service = get_pool_selection_service()
-            
-            # Check how many texts we need to generate to fill the pool
-            texts_needed = pool_service.needs_backfill(db, account_id, lang)
-            
-            if texts_needed <= 0:
-                return  # Pool is full
-            
-            # Check if generation is already in progress
-            if self.text_gen_service.is_generation_in_progress(account_id, lang):
-                return
-            
-            # Check if there's a text being generated
-            generating_text = self.state_manager.get_generating_text(db, account_id, lang)
-            if generating_text:
-                return  # Already generating
-            
-            # Start new generation (will generate one text, then backfill triggers again)
-            self._start_generation_job(db, account_id, lang)
-            
-        except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Error in ensure_text_available: {e}", exc_info=True)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+        pool_service = get_pool_selection_service()
+        
+        # Pool full or generation already running? Nothing to do.
+        if pool_service.needs_backfill(db, account_id, lang) <= 0:
+            return
+        if self.text_gen_service.is_generation_in_progress(account_id, lang):
+            return
+        if self.state_manager.get_generating_text(db, account_id, lang):
+            return
+        
+        self._start_generation_job(db, account_id, lang)
     
     def _start_generation_job(self, db: Session, account_id: int, lang: str) -> None:
         """Start a full generation job in a background thread."""
@@ -151,6 +129,13 @@ class GenerationOrchestrator:
             )
             
             logger.info(f"[ORCHESTRATOR] Generation job completed successfully for text_id={text_id}")
+            
+            # Step 6: Check if pool needs more texts (chain backfill)
+            try:
+                with db_manager.transaction(account_id) as db:
+                    self.ensure_text_available(db, account_id, lang)
+            except Exception as e:
+                logger.debug(f"[ORCHESTRATOR] Backfill check failed: {e}")
             
         except Exception as e:
             logger.error(f"[ORCHESTRATOR] Generation job failed: {e}", exc_info=True)

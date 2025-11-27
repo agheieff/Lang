@@ -103,3 +103,8 @@ TIER_SPENDING_LIMITS: Dict[str, float | None] = {
 
 # Tiers that get their own OpenRouter sub-key
 PAID_TIERS: set[str] = {"Standard", "Pro", "Pro+"}
+
+
+# Text pool settings
+POOL_SIZE: int = _i("ARC_POOL_SIZE", 4)  # Number of pre-generated texts to maintain per user/lang
+POOL_CI_VARIANCE: float = _f("ARC_POOL_CI_VARIANCE", 0.05)  # How much to vary CI target in pool
