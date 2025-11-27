@@ -46,6 +46,7 @@ class PromptSpec:
     ci_target: Optional[float] = None
     preferences: Optional[str] = None
     recent_titles: Optional[List[str]] = None
+    topic: Optional[str] = None  # Topic category: fiction, news, science, history, daily_life, culture
 
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
@@ -84,6 +85,18 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     if spec.recent_titles:
         titles_str = ", ".join(f'"{t}"' for t in spec.recent_titles)
         recent_titles_line = f"Here are the titles of the last {len(spec.recent_titles)} texts the user read: {titles_str}. Please generate something different/new.\n"
+    
+    topic_line = ""
+    if spec.topic:
+        topic_display = {
+            "fiction": "fiction/creative writing",
+            "news": "news/current events",
+            "science": "science/technology",
+            "history": "history/culture",
+            "daily_life": "daily life/practical situations",
+            "culture": "culture/traditions",
+        }.get(spec.topic, spec.topic)
+        topic_line = f"The text should be about {topic_display}.\n"
 
     # Build mapping for both legacy "*_line" placeholders and simplified {level}/{length}/{include_words}/{script}
     # Prefer a concise level code (e.g., HSK2, A2) before any description
@@ -108,6 +121,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         "include_words_line": include_words_line,
         "ci_line": ci_line,
         "recent_titles_line": recent_titles_line,
+        "topic_line": topic_line,
         # simplified single-value placeholders
         "level": simple_level,
         "length": simple_length,
@@ -115,6 +129,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         "script": script_label,
         "preferences": (spec.preferences or ""),
         "recent_titles": (", ".join(spec.recent_titles) if spec.recent_titles else ""),
+        "topic": (spec.topic or ""),
     }
 
     sys_content = _safe_format(sys_tpl, mapping)

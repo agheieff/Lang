@@ -9,7 +9,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import threading
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from ..llm import build_reading_prompt
 from ..utils.json_parser import extract_text_from_llm_response, extract_json_from_text
 from ..llm.client import _pick_openrouter_model, chat_complete_with_raw
 from .llm_logging import log_llm_request, llm_call_and_log_to_file
+from .openrouter_key_service import get_openrouter_key_service
 
 
 class TextGenerationResult:
@@ -30,7 +31,8 @@ class TextGenerationResult:
                  model: Optional[str] = None,
                  response_dict: Optional[Dict] = None,
                  error: Optional[str] = None,
-                 log_dir: Optional[Path] = None):
+                 log_dir: Optional[Path] = None,
+                 messages: Optional[List[Dict]] = None):
         self.success = success
         self.text = text
         self.title = title
@@ -39,6 +41,7 @@ class TextGenerationResult:
         self.response_dict = response_dict or {}
         self.error = error
         self.log_dir = log_dir
+        self.messages = messages
 
 
 class TextGenerationService:
@@ -61,9 +64,25 @@ class TextGenerationService:
         self._running: set[Tuple[int, str]] = set()  # (account_id,_lang) pairs
         self._running_lock = threading.Lock()
     
-    def create_placeholder_text(self, account_db: Session, account_id: int, lang: str) -> Optional[int]:
+    def create_placeholder_text(
+        self, 
+        account_db: Session, 
+        account_id: int, 
+        lang: str,
+        ci_target: Optional[float] = None,
+        topic: Optional[str] = None,
+        pooled: bool = False,
+    ) -> Optional[int]:
         """
         Create a placeholder ReadingText record.
+        
+        Args:
+            account_db: Database session
+            account_id: User account ID
+            lang: Language code
+            ci_target: Target comprehension level (for pool generation)
+            topic: Topic category (for pool generation)
+            pooled: Whether this text is part of the pool
         
         Returns the text_id if created, None if error.
         """
@@ -74,12 +93,15 @@ class TextGenerationService:
             lang=lang,
             content=None,
             request_sent_at=datetime.datetime.utcnow(),
+            ci_target=ci_target,
+            topic=topic,
+            pooled=pooled,
         )
         
         try:
             account_db.add(rt)
             account_db.flush()
-            print(f"[TEXT_GEN] Created placeholder for text_id={rt.id} account_id={account_id} lang={lang}")
+            print(f"[TEXT_GEN] Created placeholder for text_id={rt.id} account_id={account_id} lang={lang} ci={ci_target} topic={topic}")
             return rt.id
         except Exception as e:
             try:
@@ -93,6 +115,9 @@ class TextGenerationService:
                     lang=lang,
                     content="",
                     request_sent_at=datetime.datetime.utcnow(),
+                    ci_target=ci_target,
+                    topic=topic,
+                    pooled=pooled,
                 )
                 account_db.add(rt)
                 account_db.flush()
@@ -132,6 +157,12 @@ class TextGenerationService:
         # Get user's subscription tier for model selection from global database
         account = global_db.query(Account).filter(Account.id == account_id).first()
         user_tier = account.subscription_tier if account else "Free"
+        
+        # Get user's per-account OpenRouter key if they have one (paid tier)
+        user_api_key = None
+        if account:
+            key_service = get_openrouter_key_service()
+            user_api_key = key_service.get_user_key(account)
         
         # Get available models for user's tier
         registry = get_model_registry()
@@ -174,7 +205,8 @@ class TextGenerationService:
                     text_id,
                     messages,
                     model_config=model_config,
-                    out_path=job_dir / "text.json"
+                    out_path=job_dir / "text.json",
+                    user_api_key=user_api_key,
                 )
                 
                 if text_buf and text_buf.strip():
@@ -269,10 +301,11 @@ class TextGenerationService:
                           text_id: int,
                           messages: list,
                           model_config=None,
-                          provider: str = None,
+                          provider: Optional[str] = None,
                           model: Optional[str] = None,
                           base_url: Optional[str] = None,
-                          out_path: Path = None) -> tuple[str, Dict, str, Optional[str]]:
+                          out_path: Optional[Path] = None,
+                          user_api_key: Optional[str] = None) -> tuple[str, Dict, str, Optional[str]]:
         """
         Call LLM and write request+response to a JSON file.
         
@@ -286,6 +319,7 @@ class TextGenerationService:
             model: Model name (legacy)
             base_url: Base URL (legacy)
             out_path: Path to write log file
+            user_api_key: Per-user API key (for paid users)
             
         Returns: (text_content, response_dict, provider_used, model_used)
         """
@@ -302,6 +336,7 @@ class TextGenerationService:
             base_url,
             out_path,
             model_config=model_config,
+            user_api_key=user_api_key,
         )
         resp_dict: Dict = resp or {}
         base_url_used = getattr(model_config, 'base_url', base_url)

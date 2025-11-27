@@ -20,6 +20,7 @@ from .translation_service import TranslationService
 from .translation_validation_service import TranslationValidationService
 from .notification_service import get_notification_service
 from .llm_common import build_reading_prompt_spec
+from .pool_selection_service import get_pool_selection_service, POOL_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,7 @@ class GenerationOrchestrator:
         This is THE ONLY method that should start text generation.
         All other parts of the system call this method.
         
-        Always generates a new text if and only if there are no unopened texts.
-        This maintains exactly one backup text without race conditions.
+        Maintains a pool of POOL_SIZE texts with varied stats for selection.
         
         Args:
             db: Database session
@@ -64,12 +64,13 @@ class GenerationOrchestrator:
             lang: Language code
         """
         try:
-            # Count unopened texts that have content
-            unopened_count = self.state_manager.count_unopened_ready(db, account_id, lang)
+            pool_service = get_pool_selection_service()
             
-            # Always skip generation if we have unopened texts
-            if unopened_count > 0:
-                return  # Already have texts available
+            # Check how many texts we need to generate to fill the pool
+            texts_needed = pool_service.needs_backfill(db, account_id, lang)
+            
+            if texts_needed <= 0:
+                return  # Pool is full
             
             # Check if generation is already in progress
             if self.text_gen_service.is_generation_in_progress(account_id, lang):
@@ -80,7 +81,7 @@ class GenerationOrchestrator:
             if generating_text:
                 return  # Already generating
             
-            # Start new generation
+            # Start new generation (will generate one text, then backfill triggers again)
             self._start_generation_job(db, account_id, lang)
             
         except Exception as e:
@@ -127,11 +128,11 @@ class GenerationOrchestrator:
                 return
             
             # Step 2: Create placeholder text and set up job
-            text_id, job_dir = await self._create_placeholder_and_setup_job(account_id, lang)
+            text_id, job_dir, ci_target, topic = await self._create_placeholder_and_setup_job(account_id, lang)
             
             # Step 3: Generate text content
             result = await self._generate_main_text_content(
-                account_id, lang, text_id, job_dir
+                account_id, lang, text_id, job_dir, ci_target, topic
             )
             
             if not result.success:
@@ -177,11 +178,34 @@ class GenerationOrchestrator:
         except Exception as e:
             logger.error(f"[ORCHESTRATOR] Error releasing lock: {e}", exc_info=True)
     
-    async def _create_placeholder_and_setup_job(self, account_id: int, lang: str) -> Tuple[int, Path]:
-        """Create placeholder text and set up job directory."""
+    async def _create_placeholder_and_setup_job(self, account_id: int, lang: str) -> Tuple[int, Path, float, Optional[str]]:
+        """Create placeholder text and set up job directory.
+        
+        Returns:
+            (text_id, job_dir, ci_target, topic) - params for generation
+        """
         with db_manager.transaction(account_id) as gen_db:
-            # Create placeholder text
-            text_id = self.text_gen_service.create_placeholder_text(gen_db, account_id, lang)
+            from ..models import Profile
+            
+            # Get profile for pool generation params
+            prof = gen_db.query(Profile).filter(
+                Profile.account_id == account_id, 
+                Profile.lang == lang
+            ).first()
+            
+            # Get varied generation params from pool service
+            pool_service = get_pool_selection_service()
+            if prof:
+                ci_target, topic = pool_service.get_generation_params(prof, vary=True)
+            else:
+                # Default values if no profile exists
+                ci_target, topic = 0.92, "daily_life"
+            
+            # Create placeholder text with pool metadata
+            text_id = self.text_gen_service.create_placeholder_text(
+                gen_db, account_id, lang,
+                ci_target=ci_target, topic=topic, pooled=True
+            )
             if not text_id:
                 raise Exception("Failed to create placeholder text")
             
@@ -191,16 +215,30 @@ class GenerationOrchestrator:
             # Notify client generation has started
             self.notification_service.send_generation_started(account_id, lang, text_id)
             
-            return text_id, job_dir
+            return text_id, job_dir, ci_target, topic
     
-    async def _generate_main_text_content(self, account_id: int, lang: str, text_id: int, job_dir: Path) -> 'TextGenerationResult':
+    async def _generate_main_text_content(
+        self, 
+        account_id: int, 
+        lang: str, 
+        text_id: int, 
+        job_dir: Path,
+        ci_target: Optional[float] = None,
+        topic: Optional[str] = None,
+    ) -> 'TextGenerationResult':
         """Generate the main text content."""
         with db_manager.transaction(account_id) as gen_db:
             # Get global database session for account lookups
             global_db = GlobalSessionLocal()
             try:
-                # Build prompt specification
-                spec, words, level_hint = build_reading_prompt_spec(gen_db, account_id=account_id, lang=lang)
+                # Build prompt specification with pool params
+                spec, words, level_hint = build_reading_prompt_spec(
+                    gen_db, 
+                    account_id=account_id, 
+                    lang=lang,
+                    ci_target_override=ci_target,
+                    topic=topic,
+                )
                 from ..llm import build_reading_prompt
                 messages = build_reading_prompt(spec)
                 

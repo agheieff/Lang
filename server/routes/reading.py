@@ -96,7 +96,7 @@ async def current_reading_block(
             <div id="current-reading" class="text-center py-8">
               <p class="text-red-500">Error loading text. Please refresh the page.</p>
             </div>
-            ''', status=500
+            ''', status_code=500
         )
 
     if context.status in ("loading", "generating"):
@@ -171,6 +171,18 @@ async def next_text(
     if session_data:
         session_service = SessionProcessingService()
         session_service.process_session_data(db, account.id, prof.current_text_id or 0, session_data)
+        
+        # Handle length preference adjustment
+        length_pref = session_data.get("length_preference")
+        if length_pref in ("longer", "shorter"):
+            current_length = prof.text_length or 300  # Default to 300
+            if length_pref == "longer":
+                new_length = int(current_length * 1.15)  # +15%
+            else:
+                new_length = int(current_length * 0.85)  # -15%
+            # Clamp to reasonable bounds
+            prof.text_length = max(100, min(2000, new_length))
+            db.commit()
 
     # Use SelectionService for proper text management
     selection_service = SelectionService()

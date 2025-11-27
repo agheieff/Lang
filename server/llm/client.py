@@ -4,6 +4,7 @@ import json
 import time
 import random
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Union, Callable
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -16,9 +17,10 @@ logger = logging.getLogger(__name__)
 
 try:
     # Local OpenRouter client from server/llm/openrouter/
-    from server.llm.openrouter import complete as _or_complete  # type: ignore
+    from server.llm.openrouter import complete as _or_complete, with_api_key as _or_with_api_key  # type: ignore
 except Exception:  # pragma: no cover - optional during dev
     _or_complete = None  # type: ignore
+    _or_with_api_key = None  # type: ignore
 
 # Global counter for LLM requests
 _llm_request_counter = 0
@@ -157,6 +159,7 @@ def chat_complete(
     model_config: Optional[ModelConfig] = None,
     base_url: Optional[str] = None,
     temperature: Optional[float] = None,
+    user_api_key: Optional[str] = None,
 ) -> str:
     """Call LLM API and return text response.
 
@@ -167,6 +170,7 @@ def chat_complete(
         model_config: ModelConfig object with full model configuration
         base_url: Override base URL (for legacy compatibility)
         temperature: Sampling temperature
+        user_api_key: Per-user API key (overrides default key for paid users)
 
     Returns:
         str: The model's text response
@@ -179,6 +183,7 @@ def chat_complete(
         base_url=base_url,
         temperature=temperature,
         max_tokens=16384,
+        user_api_key=user_api_key,
     )
     return text
 
@@ -192,6 +197,7 @@ def chat_complete_with_raw(
     base_url: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: int = 16384,
+    user_api_key: Optional[str] = None,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Call LLM API and return (cleaned_text, provider_response_dict_or_none).
 
@@ -203,6 +209,7 @@ def chat_complete_with_raw(
         base_url: Override base URL (for legacy compatibility)
         temperature: Sampling temperature
         max_tokens: Maximum tokens to generate
+        user_api_key: Per-user API key (overrides default key for paid users)
 
     Returns:
         tuple[str, Optional[Dict]]: (text_response, raw_provider_response)
@@ -252,13 +259,19 @@ def chat_complete_with_raw(
                 raise RuntimeError("openrouter client not available")
             model_id = _pick_openrouter_model(resolved_model)
             
-            # Note: _or_complete needs to handle its own retries or raise exceptions we catch
-            resp = _or_complete(
-                messages,
-                model=model_id,
-                temperature=temperature,
-                max_tokens=resolved_max_tokens,
-            )
+            # Use per-user API key if provided, otherwise use default
+            api_key_context = nullcontext()
+            if user_api_key and _or_with_api_key:
+                api_key_context = _or_with_api_key(user_api_key)
+            
+            with api_key_context:
+                # Note: _or_complete needs to handle its own retries or raise exceptions we catch
+                resp = _or_complete(
+                    messages,
+                    model=model_id,
+                    temperature=temperature,
+                    max_tokens=resolved_max_tokens,
+                )
             if isinstance(resp, dict):
                 try:
                     choices = resp.get("choices")

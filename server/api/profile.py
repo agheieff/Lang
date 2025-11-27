@@ -173,7 +173,7 @@ class ProfileUpdateRequest(BaseModel):
 def update_profile(
     lang: str,
     target_lang: str = "en",
-    req: ProfileUpdateRequest = None,
+    req: Optional[ProfileUpdateRequest] = None,
     db: Session = Depends(get_db),
     account: Account = Depends(get_current_account),
 ):

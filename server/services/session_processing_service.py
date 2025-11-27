@@ -74,6 +74,9 @@ class SessionProcessingService:
             # Update user level if needed
             self._update_user_level(db, account_id)
             
+            # Adapt CI preference based on lookup rate
+            self._adapt_ci_preference(db, account_id, text_id, session_data)
+            
             print(f"[SESSION_PROCESSING] Session processing completed: lookups={lookups_processed} srs={srs_updated} progress={progress_updated}")
             return True
             
@@ -91,6 +94,28 @@ class SessionProcessingService:
                             text_id: int, 
                             lookups: List[Dict]) -> int:
         """Process word lookup events from session data."""
+        # Skip if no valid text_id
+        if not text_id or text_id <= 0:
+            return 0
+        
+        # Get text to determine lang
+        from ..models import ReadingText
+        text = db.query(ReadingText).filter(
+            ReadingText.id == text_id,
+            ReadingText.account_id == account_id
+        ).first()
+        if not text:
+            return 0
+        
+        lang = text.lang
+        
+        # Get target_lang from profile
+        profile = db.query(Profile).filter(
+            Profile.account_id == account_id,
+            Profile.lang == lang
+        ).first()
+        target_lang = profile.target_lang if profile else "en"
+        
         processed_count = 0
         
         for lookup in lookups:
@@ -111,6 +136,8 @@ class SessionProcessingService:
                 lookup_record = ReadingLookup(
                     account_id=account_id,
                     text_id=text_id,
+                    lang=lang,
+                    target_lang=target_lang,
                     span_start=span_start,
                     span_end=span_end,
                     surface=word_surface,
@@ -227,6 +254,7 @@ class SessionProcessingService:
             ).first()
             
             if text:
+                text.is_read = True
                 text.read_at = datetime.utcnow()
                 
                 # Store additional metrics if available
@@ -253,9 +281,11 @@ class SessionProcessingService:
     def _update_user_level(self, db: Session, account_id: int) -> None:
         """Update user's estimated proficiency level."""
         try:
-            # Use existing level calculation logic
-            from ..level import update_level_estimate
-            update_level_estimate(db, account_id)
+            from ..level import update_level_if_stale
+            # Get all profiles for this account and update each
+            profiles = db.query(Profile).filter(Profile.account_id == account_id).all()
+            for prof in profiles:
+                update_level_if_stale(db, account_id, prof.lang)
             
         except Exception as e:
             print(f"[SESSION_PROCESSING] Error updating user level: {e}")
@@ -301,3 +331,101 @@ class SessionProcessingService:
         except Exception as e:
             print(f"[SESSION_PROCESSING] Error generating summary: {e}")
             return {"error": str(e)}
+    
+    def _adapt_ci_preference(
+        self,
+        db: Session,
+        account_id: int,
+        text_id: int,
+        session_data: Dict[str, Any],
+    ) -> None:
+        """
+        Adapt CI preference based on session performance.
+        
+        Rules:
+        - High lookup rate (>15%) → increase CI (make easier)
+        - Low lookup rate (<5%) → decrease CI (make harder)
+        - Also adapt topic weights based on engagement
+        """
+        try:
+            from ..models import ReadingText, ReadingLookup
+            
+            # Get text and profile
+            text = db.query(ReadingText).filter(
+                ReadingText.id == text_id,
+                ReadingText.account_id == account_id
+            ).first()
+            
+            if not text or not text.content:
+                return
+            
+            lang = text.lang
+            profile = db.query(Profile).filter(
+                Profile.account_id == account_id,
+                Profile.lang == lang
+            ).first()
+            
+            if not profile:
+                return
+            
+            # Calculate lookup rate
+            text_length = len(text.content)
+            lookup_count = db.query(ReadingLookup).filter(
+                ReadingLookup.account_id == account_id,
+                ReadingLookup.text_id == text_id
+            ).count()
+            
+            # Approximate word count (for non-Chinese, use space-based; for Chinese, char count / 1.5)
+            if lang.startswith("zh"):
+                approx_words = text_length / 1.5
+            else:
+                approx_words = len(text.content.split())
+            
+            lookup_rate = lookup_count / max(approx_words, 1)
+            
+            # Get current CI preference
+            ci_pref = getattr(profile, 'ci_preference', None) or 0.92
+            
+            # Adapt CI based on lookup rate
+            CI_ADJUST = 0.02
+            if lookup_rate > 0.15:
+                # Too many lookups - make easier
+                new_ci = min(0.98, ci_pref + CI_ADJUST)
+                print(f"[ADAPT] High lookup rate ({lookup_rate:.2%}), increasing CI: {ci_pref:.2f} -> {new_ci:.2f}")
+            elif lookup_rate < 0.05:
+                # Few lookups - can make harder
+                new_ci = max(0.80, ci_pref - CI_ADJUST)
+                print(f"[ADAPT] Low lookup rate ({lookup_rate:.2%}), decreasing CI: {ci_pref:.2f} -> {new_ci:.2f}")
+            else:
+                new_ci = ci_pref
+            
+            if new_ci != ci_pref:
+                profile.ci_preference = new_ci
+            
+            # Adapt topic weights based on engagement
+            text_topic = getattr(text, 'topic', None)
+            if text_topic:
+                topic_weights = getattr(profile, 'topic_weights', None) or {}
+                read_time_ms = session_data.get("read_time_ms", 0)
+                
+                # Simple heuristic: if user spent good amount of time, boost topic
+                # If they rushed through (< 30 seconds), slightly reduce
+                if read_time_ms > 60000:  # > 1 minute
+                    old_weight = topic_weights.get(text_topic, 1.0)
+                    topic_weights[text_topic] = min(2.0, old_weight * 1.05)
+                    print(f"[ADAPT] Good engagement with '{text_topic}', boosting weight")
+                elif read_time_ms > 0 and read_time_ms < 30000:  # < 30 seconds
+                    old_weight = topic_weights.get(text_topic, 1.0)
+                    topic_weights[text_topic] = max(0.2, old_weight * 0.95)
+                    print(f"[ADAPT] Quick read of '{text_topic}', reducing weight slightly")
+                
+                profile.topic_weights = topic_weights
+            
+            db.commit()
+            
+        except Exception as e:
+            print(f"[ADAPT] Error adapting CI preference: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass

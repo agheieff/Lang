@@ -48,7 +48,8 @@ class TestAccountModel:
             "is_verified": True,
             "role": "user",
             "subscription_tier": "free",
-            "extras": {"preferences": {"theme": "dark"}}
+            "extras": {"preferences": {"theme": "dark"}},
+            "has_openrouter_key": False,
         }
         
         assert result == expected
@@ -70,7 +71,8 @@ class TestAccountModel:
             "is_verified": None,  # No default set in model  
             "role": None,
             "subscription_tier": None,
-            "extras": None
+            "extras": None,
+            "has_openrouter_key": False,
         }
         
         assert result == expected

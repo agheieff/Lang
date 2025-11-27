@@ -84,3 +84,22 @@ try:
         RATE_LIMITS = _DEFAULT_RATE_LIMITS
 except Exception:
     RATE_LIMITS = _DEFAULT_RATE_LIMITS
+
+
+# OpenRouter per-user key management
+OPENROUTER_PROVISIONING_KEY: str = os.getenv("OPENROUTER_PROVISIONING_KEY", "")
+OPENROUTER_KEY_ENCRYPTION_SECRET: str = os.getenv("OPENROUTER_KEY_ENCRYPTION_SECRET", "")
+
+# Per-tier monthly spending limits (USD) for OpenRouter sub-keys
+# None means no limit (BYOK users bring their own key)
+TIER_SPENDING_LIMITS: Dict[str, float | None] = {
+    "Free": None,  # Free tier uses shared pool, no individual key
+    "Standard": _f("ARC_TIER_LIMIT_STANDARD", 25.0),
+    "Pro": _f("ARC_TIER_LIMIT_PRO", 100.0),
+    "Pro+": _f("ARC_TIER_LIMIT_PRO_PLUS", 250.0),
+    "BYOK": None,  # User provides their own key
+    "admin": None,  # No limit for admins
+}
+
+# Tiers that get their own OpenRouter sub-key
+PAID_TIERS: set[str] = {"Standard", "Pro", "Pro+"}
