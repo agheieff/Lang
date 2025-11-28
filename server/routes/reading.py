@@ -25,15 +25,13 @@ from ..models import (
 from ..models import LLMRequestLog
 from ..utils.json_parser import extract_json_from_text, extract_word_translations
 from ..schemas.reading import LookupEvent, NextPayload
+from ..schemas.session import TextSessionState
 from ..services.selection_service import SelectionService
 from ..services.readiness_service import ReadinessService
 from ..services.reconstruction_service import ReconstructionService
 from ..services.progress_service import ProgressService
 from ..services.generation_orchestrator import GenerationOrchestrator
-from ..services.reading_view_service import ReadingViewService
 from ..services.session_processing_service import SessionProcessingService
-from ..services.state_manager import GenerationStateManager
-from ..services.translation_backfill_service import TranslationBackfillService
 from ..utils.text_segmentation import split_sentences
 from ..services.notification_service import get_notification_service
 from ..settings import get_settings
@@ -87,6 +85,8 @@ async def current_reading_block(
     account: Account = Depends(_get_current_account),
 ):
     """Return the Current Reading block HTML."""
+    from ..services.reading_view_service import ReadingViewService
+    
     view_service = ReadingViewService()
     context = view_service.get_current_reading_context(db, account.id)
     
@@ -110,6 +110,8 @@ async def current_reading_block(
         title=context.title,
         title_words=context.title_words,
         title_translation=context.title_translation,
+        is_next_ready=context.is_next_ready,
+        next_ready_reason=context.next_ready_reason,
     )
     
     # Wrap with SSE metadata for the client
@@ -117,13 +119,17 @@ async def current_reading_block(
         <div id="current-reading"
              data-sse-endpoint="{context.sse_endpoint}"
              data-text-id="{context.text_id}"
-             data-is-ready="{str(context.is_fully_ready).lower()}">
+             data-is-ready="{str(context.is_fully_ready).lower()}"
+             data-is-next-ready="{str(context.is_next_ready).lower()}"
+             data-next-ready-reason="{context.next_ready_reason}">
             {inner}
             <script id="reading-seeds" type="application/json">
                 {{
                     "sse_endpoint": "{context.sse_endpoint}",
                     "text_id": {context.text_id},
                     "ready": {str(context.is_fully_ready).lower()},
+                    "is_next_ready": {str(context.is_next_ready).lower()},
+                    "next_ready_reason": "{context.next_ready_reason}",
                     "account_id": {account.id}
                 }}
             </script>
@@ -169,6 +175,7 @@ async def next_text(
     
     # Process session data whether from form or JSON
     if session_data:
+        from ..services.session_processing_service import SessionProcessingService
         session_service = SessionProcessingService()
         session_service.process_session_data(db, account.id, prof.current_text_id or 0, session_data)
         
@@ -185,10 +192,12 @@ async def next_text(
             db.commit()
 
     # Use SelectionService for proper text management
+    from ..services.selection_service import SelectionService
     selection_service = SelectionService()
     
     # Mark current text as read before moving to next
     if prof.current_text_id:
+        from ..services.state_manager import GenerationStateManager
         state_manager = GenerationStateManager()
         try:
             state_manager.mark_read(db, account.id, prof.current_text_id)
@@ -239,6 +248,17 @@ async def reading_events_sse(
     # Create SSE stream for this account
     return notification_service.create_sse_stream(account.id, prof.lang)
 
+
+@router.post("/reading/sync")
+async def sync_session_state(
+    state: TextSessionState,
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    """Sync current reading session state from client."""
+    service = SessionProcessingService()
+    success = service.persist_session_state(db, account.id, state)
+    return {"ok": success}
 
 @router.get("/reading/{text_id}/translations")
 async def get_translations(
@@ -492,6 +512,8 @@ async def next_ready(
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
+    from ..services.reading_view_service import ReadingViewService
+    
     prof = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not prof:
         return {"ready": False, "text_id": None}
@@ -524,6 +546,84 @@ async def next_ready(
         await _tick(db, 0.5)
 
 
+@router.get("/reading/next/ready/sse")
+async def next_ready_sse(
+    db: Session = Depends(get_db),
+    account: Account = Depends(_get_current_account),
+):
+    """Server-Sent Events endpoint for next text readiness notifications."""
+    prof = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not prof:
+        return Response(content="data: {\"ready\": false, \"text_id\": null}\n\n", 
+                       media_type="text/event-stream", 
+                       headers={"Cache-Control": "no-cache", 
+                               "Connection": "keep-alive",
+                               "Access-Control-Allow-Origin": "*"})
+
+    from ..services.reading_view_service import ReadingViewService
+    
+    async def event_stream():
+        try:
+            # Send initial status
+            yield "data: {\"ready\": false, \"text_id\": null, \"status\": \"connecting\"}\n\n"
+            
+            view_service = ReadingViewService()
+            last_status = None
+            
+            while True:
+                try:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    
+                    status = view_service.check_next_text_readiness(db, account.id, prof.lang)
+                    
+                    current_status_dict = {
+                        "ready": status.ready,
+                        "text_id": status.text_id,
+                        "ready_reason": status.reason,
+                        "retry_info": status.retry_info,
+                        "status": status.status
+                    }
+
+                    if current_status_dict != last_status:
+                         data = json.dumps(current_status_dict)
+                         yield f"data: {data}\n\n"
+                         last_status = current_status_dict.copy()
+                    
+                    if status.ready:
+                         yield f"data: {{\"ready\": true, \"text_id\": {status.text_id}, \"ready_reason\": \"{status.reason}\", \"status\": \"complete\"}}\n\n"
+                         break
+                    
+                    await asyncio.sleep(2.0)
+                    
+                except Exception as e:
+                    logger.error(f"Error in SSE stream: {e}")
+                    yield f"data: {{\"error\": \"stream_error\", \"message\": \"{str(e)}\"}}\n\n"
+                    break
+        
+        except asyncio.CancelledError:
+            logger.debug("SSE connection cancelled")
+        except Exception as e:
+            logger.error(f"SSE stream error: {e}")
+            yield f"data: {{\"error\": \"stream_error\", \"message\": \"{str(e)}\"}}\n\n"
+        finally:
+            logger.debug("SSE connection closed")
+
+    return StreamingResponse(
+        content=event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
 @router.post("/reading/backfill/{text_id}")
 async def backfill_translations(
     text_id: int,
@@ -531,6 +631,8 @@ async def backfill_translations(
     account: Account = Depends(_get_current_account),
 ):
     """Backfill missing translations for a text."""
+    from ..services.translation_backfill_service import TranslationBackfillService
+    
     try:
         backfill_service = TranslationBackfillService()
         results = backfill_service.backfill_missing_translations(account.id, text_id)

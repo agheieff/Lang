@@ -17,6 +17,7 @@ from ..models import (
     # UserLexeme removed
 )
 from ..services.srs_service import SrsService
+from ..schemas.session import TextSessionState
 
 
 class SessionProcessingService:
@@ -429,3 +430,64 @@ class SessionProcessingService:
                 db.rollback()
             except Exception:
                 pass
+
+    def persist_session_state(self, db: Session, account_id: int, state: TextSessionState) -> bool:
+        """Persist periodic session sync state (e.g., to ProfilePref or temp table)."""
+        from ..models import ProfilePref
+        
+        # Find profile
+        # We don't have lang in schema yet, assume it's derived or stored with text_id context
+        # Ideally schema should include lang, but we can lookup text
+        from ..models import ReadingText
+        rt = db.get(ReadingText, state.text_id)
+        if not rt or rt.account_id != account_id:
+            return False
+            
+        prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
+        if not prof:
+            return False
+            
+        # Store in ProfilePref for now (simple JSON storage per profile)
+        # We use a specific key for current text session
+        pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
+        if not pref:
+            pref = ProfilePref(profile_id=prof.id, data={})
+            db.add(pref)
+            
+        # Update the session state for this text
+        # We store it under "current_session" key
+        current_data = dict(pref.data or {})
+        current_data["current_session"] = state.model_dump(mode='json')
+        pref.data = current_data
+        
+        try:
+            # Mark as modified for SQLA to pick up JSON change
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(pref, "data")
+            db.commit()
+            return True
+        except Exception as e:
+            print(f"[SESSION_PROCESSING] Error persisting session state: {e}")
+            db.rollback()
+            return False
+
+    def get_persisted_session_state(self, db: Session, account_id: int, text_id: int) -> Optional[Dict]:
+        """Retrieve persisted session state for restoration."""
+        from ..models import ReadingText, ProfilePref
+        rt = db.get(ReadingText, text_id)
+        if not rt or rt.account_id != account_id:
+            return None
+            
+        prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
+        if not prof:
+            return None
+            
+        pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
+        if not pref or not pref.data:
+            return None
+            
+        session_data = pref.data.get("current_session")
+        if not session_data or session_data.get("text_id") != text_id:
+            return None
+            
+        return session_data

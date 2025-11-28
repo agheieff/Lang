@@ -1,5 +1,5 @@
 // Minimal client helpers
-window.arcToggleTranslation = function (e) {
+window.arcToggleTranslation = async function (e) {
   const btn = e && e.target;
   const panel = document.getElementById('translation-panel');
   if (!panel) return;
@@ -9,11 +9,52 @@ window.arcToggleTranslation = function (e) {
   panel.classList.toggle('hidden', !show);
   if (btn) btn.setAttribute('aria-expanded', String(show));
 
-  // When opening the panel, show a placeholder until translations arrive
+  // When opening the panel, fetch translation if missing
   if (show) {
     const textEl = document.getElementById('translation-text');
     if (textEl && !textEl.textContent.trim()) {
-      textEl.textContent = 'Translation is not ready yet.';
+      textEl.textContent = 'Loading translation...';
+      
+      // Fetch full text translation
+      const mainTextEl = document.getElementById('reading-text');
+      const textId = mainTextEl ? mainTextEl.dataset.textId : null;
+      
+      if (textId) {
+        try {
+          const res = await fetch(`/reading/${textId}/translations?unit=text`, { 
+            headers: { 'Accept': 'application/json' } 
+          });
+          
+          if (res.ok) {
+            const data = await res.json();
+            if (data.items && data.items.length > 0) {
+              // Find the longest translation (likely the body, not title)
+              // or sort by length descending
+              const items = data.items.sort((a, b) => (b.translation?.length || 0) - (a.translation?.length || 0));
+              const best = items[0];
+              
+              if (best && best.translation) {
+                textEl.textContent = best.translation;
+                
+                // Cache it in session data for persistence
+                const sessionKey = localStorage.getItem(`arc_current_session_${textId}`);
+                if (sessionKey) {
+                  const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
+                  sessionData.full_translation = best.translation;
+                  localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+                }
+                return;
+              }
+            }
+          }
+          textEl.textContent = 'Translation is not ready yet.';
+        } catch (err) {
+          console.error('Failed to fetch translation:', err);
+          textEl.textContent = 'Error loading translation.';
+        }
+      } else {
+        textEl.textContent = 'Translation is not ready yet.';
+      }
     }
   }
 };
@@ -134,8 +175,29 @@ window.arcBuildNextParams = function () {
   }
 };
 
+window.arcSyncSession = function() {
+  const sessionData = window.arcBuildNextParams();
+  if (!sessionData || !sessionData.text_id) return;
+  
+  // Only sync if we have actual data
+  const keys = Object.keys(sessionData);
+  if (keys.length <= 2 && !sessionData.clicks?.length) return;
+
+  fetch('/reading/sync', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(sessionData)
+  }).catch(err => console.warn('Background sync failed:', err));
+};
+
+// Set up periodic sync
+setInterval(window.arcSyncSession, 30000); // Every 30s
+
 // Add function to handle the next button click properly
 window.handleNextText = function() {
+  window.arcSyncSession(); // Final sync
   const params = window.arcBuildNextParams();
   console.log('Next button clicked, sending:', params);
   
@@ -154,6 +216,76 @@ window.handleNextText = function() {
   document.body.appendChild(form);
   form.submit();
 };
+
+window.arcRestoreSession = function() {
+  const stateEl = document.getElementById('reading-session-state');
+  if (!stateEl) return;
+  
+  try {
+    const serverState = JSON.parse(stateEl.textContent);
+    if (!serverState || !serverState.text_id) return;
+    
+    const textEl = document.getElementById('reading-text');
+    if (!textEl || textEl.dataset.textId != serverState.text_id) return;
+    
+    console.log('Restoring session from server state:', serverState);
+    
+    // Merge with local storage if needed, or just use server state
+    // Ideally we prefer server state as "truth" on reload, but local might be fresher if offline
+    // For now, let's update local storage with server state if local is empty/older
+    const sessionKey = `arc_current_session_${serverState.text_id}`;
+    const localState = JSON.parse(localStorage.getItem(sessionKey) || '{}');
+    
+    // Simple merge: server state wins if local is empty
+    if (!localState.opened_at) {
+        localStorage.setItem(sessionKey, JSON.stringify(serverState));
+    }
+    
+    // Restore visual state (e.g. clicked words)
+    if (serverState.paragraphs) {
+      // Iterate through paragraphs -> sentences -> words to find looked_up_at
+      // Since we can't easily match words by ID, we'll rely on surface + occurrence index (or just surface if unique)
+      // But wait, the spans have data-word-index.
+      // And the 'Big JSON' structure doesn't have word-index.
+      // However, the 'Big JSON' was built by iterating words linearly.
+      // So we can flatten it back to find which indices were looked up.
+      
+      let flatIndex = 0;
+      const lookedUpIndices = new Set();
+      
+      for (const para of serverState.paragraphs) {
+        if (para.sentences) {
+          for (const sent of para.sentences) {
+            if (sent.words) {
+              for (const w of sent.words) {
+                if (w.looked_up_at) {
+                  lookedUpIndices.add(flatIndex);
+                }
+                flatIndex++;
+              }
+            }
+          }
+        }
+      }
+      
+      // Apply visual class
+      const wordSpans = document.querySelectorAll('.word-span');
+      wordSpans.forEach(span => {
+        const idx = Number(span.dataset.wordIndex);
+        if (lookedUpIndices.has(idx)) {
+          span.classList.add('clicked'); // Or whatever style indicates 'clicked'
+          span.style.color = '#2563eb'; // Fallback blue if no class defined
+        }
+      });
+    }
+    
+  } catch (e) {
+    console.warn('Failed to restore session:', e);
+  }
+};
+
+// Call restoration on load
+document.addEventListener('DOMContentLoaded', window.arcRestoreSession);
 
 // NOTE: Next button readiness polling is handled per-page (e.g., in home.html template)
 // This avoids duplicate polling requests that previously occurred with the global poller

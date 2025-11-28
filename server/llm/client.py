@@ -259,19 +259,17 @@ def chat_complete_with_raw(
                 raise RuntimeError("openrouter client not available")
             model_id = _pick_openrouter_model(resolved_model)
             
-            # Use per-user API key if provided, otherwise use default
-            api_key_context = nullcontext()
-            if user_api_key and _or_with_api_key:
-                api_key_context = _or_with_api_key(user_api_key)
+            # Prefer user_api_key (paid users) over model_config api_key
+            effective_api_key = user_api_key or api_key
             
-            with api_key_context:
-                # Note: _or_complete needs to handle its own retries or raise exceptions we catch
-                resp = _or_complete(
-                    messages,
-                    model=model_id,
-                    temperature=temperature,
-                    max_tokens=resolved_max_tokens,
-                )
+            # Note: _or_complete needs to handle its own retries or raise exceptions we catch
+            resp = _or_complete(
+                messages,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=resolved_max_tokens,
+                api_key=effective_api_key,
+            )
             if isinstance(resp, dict):
                 try:
                     choices = resp.get("choices")
@@ -298,8 +296,13 @@ def chat_complete_with_raw(
             "temperature": temperature,
             "max_tokens": resolved_max_tokens,
         }
+        
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         try:
-            resp = _http_json(resolved_base_url.rstrip("/") + "/chat/completions", "POST", data)
+            resp = _http_json(resolved_base_url.rstrip("/") + "/chat/completions", "POST", data, headers=headers)
         except (URLError, HTTPError) as e:
             raise e  # Let retry wrapper handle it
             

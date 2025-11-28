@@ -42,6 +42,14 @@ PER_ACCOUNT_TABLES = {
     "llm_request_logs",
     # curated/user-specific lists
     "language_word_lists",
+    # user provider configs (legacy)
+    "user_provider_configs",
+    # user model configs (new)
+    "user_model_configs",
+    # usage tracking for Free tier
+    "usage_tracking",
+    # retry tracking
+    "generation_retry_attempts",
 }
 
 

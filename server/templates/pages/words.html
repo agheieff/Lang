@@ -29,10 +29,10 @@
             <th class="px-4 py-2 font-medium">Lemma</th>
             <th class="px-4 py-2 font-medium">Freq</th>
             <th class="px-4 py-2 font-medium">Level</th>
-            <th class="px-4 py-2 font-medium">P(click)</th>
-            <th class="px-4 py-2 font-medium">N</th>
+            <th class="px-4 py-2 font-medium">Difficulty</th>
+            <th class="px-4 py-2 font-medium">Interactions</th>
             <th class="px-4 py-2 font-medium">Stability</th>
-            <th class="px-4 py-2 font-medium">Diversity</th>
+            <th class="px-4 py-2 font-medium">Next Due</th>
             <th class="px-4 py-2 font-medium">Action</th>
           </tr>
         </thead>
@@ -91,19 +91,29 @@ function renderWordsTable(items) {
     const p = (Number(it.p_click) || 0);
     const S = (Number(it.stability) || 0);
     const n = (Number(it.n) || 0);
-    const D = (Number(it.diversity) || 0);
     const freq = (it.freq_rank != null ? `#${it.freq_rank}` : '—');
     const lvl = (it.level_code || '—');
+    let nextDue = '—';
+    if (it.next_due_at) {
+        const d = new Date(it.next_due_at);
+        const now = new Date();
+        const diff = d - now;
+        const days = Math.round(diff / (1000 * 60 * 60 * 24));
+        if (days < 0) nextDue = 'Overdue';
+        else if (days === 0) nextDue = 'Today';
+        else nextDue = `in ${days} days`;
+    }
+    
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="px-4 py-2 whitespace-nowrap">${escapeHtml(it.lemma || '')}</td>
-      <td class="px-4 py-2">${freq}</td>
-      <td class="px-4 py-2">${escapeHtml(lvl)}</td>
-      <td class="px-4 py-2">${(p*100).toFixed(0)}%</td>
-      <td class="px-4 py-2">${n}</td>
-      <td class="px-4 py-2">${S.toFixed(2)}</td>
-      <td class="px-4 py-2">${D}</td>
-      <td class="px-4 py-2 text-gray-400">—</td>
+      <td class="px-4 py-2 whitespace-nowrap font-semibold text-gray-900">${escapeHtml(it.lemma || '')}</td>
+      <td class="px-4 py-2 text-gray-500 text-xs">${freq}</td>
+      <td class="px-4 py-2 text-xs"><span class="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">${escapeHtml(lvl)}</span></td>
+      <td class="px-4 py-2 text-sm">${(p*100).toFixed(0)}%</td>
+      <td class="px-4 py-2 text-sm">${n}</td>
+      <td class="px-4 py-2 text-sm">${S.toFixed(1)}d</td>
+      <td class="px-4 py-2 text-sm ${nextDue === 'Overdue' ? 'text-red-600 font-medium' : 'text-gray-600'}">${nextDue}</td>
+      <td class="px-4 py-2 text-gray-400 text-xs">Edit</td>
     `;
     return tr;
   });

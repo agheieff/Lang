@@ -57,18 +57,32 @@ class ReadinessService:
         ensure_reading_text_lifecycle_columns(db)
         if not getattr(rt, "content", None):
             return (False, "no_content")
+        
         has_w = self._has_words(db, account_id, rt.id)
         has_s = self._has_sentences(db, account_id, rt.id)
+        
+        # Full readiness: both words and sentences present
         if has_w and has_s:
             return (True, "both")
+        
+        # Check age-based grace periods
+        gen_at = getattr(rt, "generated_at", None)
+        if not gen_at:
+            return (False, "waiting")
+        
         try:
-            gen_at = getattr(rt, "generated_at", None)
-            if gen_at:
-                age = (datetime.utcnow() - gen_at).total_seconds()
-                if age >= float(self.settings.NEXT_READY_GRACE_SEC) and (has_w or has_s):
-                    return (True, "grace")
+            age = (datetime.utcnow() - gen_at).total_seconds()
+            
+            # Grace period: partial translations after 60s
+            if age >= float(self.settings.NEXT_READY_GRACE_SEC) and (has_w or has_s):
+                return (True, "grace")
+            
+            # Content-only fallback: no translations but text exists after 120s
+            if age >= float(self.settings.CONTENT_ONLY_GRACE_SEC):
+                return (True, "content_only")
         except Exception:
             pass
+        
         return (False, "waiting")
 
     def get_failed_components(self, db: Session, account_id: int, text_id: int) -> dict:

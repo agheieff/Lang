@@ -20,6 +20,8 @@ from .routes.health import router as health_router
 from .routes.reading import router as reading_router
 from .routes.srs import router as srs_router
 from .routes.ui import router as ui_router
+from .routes.settings import router as settings_router
+from .routes.user_models import router as user_models_router, htmx_router as user_models_htmx_router
 
 
 @asynccontextmanager
@@ -76,6 +78,9 @@ app.include_router(tiers_router)
 app.include_router(reading_router)
 app.include_router(srs_router)
 app.include_router(ui_router)
+app.include_router(settings_router)
+app.include_router(user_models_router)
+app.include_router(user_models_htmx_router)
 
 # Optional module stream processing API
 if MSP_ENABLE:

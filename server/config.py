@@ -124,3 +124,8 @@ TOPICS: list[str] = [
 
 # Default topic weights (all equal)
 DEFAULT_TOPIC_WEIGHTS: dict[str, float] = {t: 1.0 for t in TOPICS}
+
+
+# Free tier usage limits (monthly)
+FREE_TIER_CHAR_LIMIT: int = _i("ARC_FREE_CHAR_LIMIT", 100_000)  # ~25-30 texts worth
+FREE_TIER_TEXT_LIMIT: int = _i("ARC_FREE_TEXT_LIMIT", 50)  # Hard cap on text count

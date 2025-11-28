@@ -20,6 +20,7 @@ from .readiness_service import ReadinessService
 from .title_extraction_service import TitleExtractionService
 from .state_manager import GenerationStateManager
 from .retry_service import RetryService
+from .session_processing_service import SessionProcessingService
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,9 @@ class ReadingContext:
     title_translation: Optional[str] = None
     is_fully_ready: bool = False
     sse_endpoint: Optional[str] = None
+    session_state: Optional[Dict] = None  # Restored session state
+    is_next_ready: bool = False  # Whether backup/next text is ready
+    next_ready_reason: str = "waiting"  # Reason: both, grace, content_only, waiting
 
 @dataclass
 class ReadinessStatus:
@@ -55,6 +59,7 @@ class ReadingViewService:
         self.state_manager = GenerationStateManager()
         self.readiness_service = ReadinessService()
         self.title_service = TitleExtractionService()
+        self.session_service = SessionProcessingService()
 
     def get_current_reading_context(self, db: Session, account_id: int) -> ReadingContext:
         """
@@ -117,6 +122,22 @@ class ReadingViewService:
 
         sse_endpoint = f"/reading/events/sse?text_id={text_id}"
 
+        # Retrieve any persisted session state to restore progress
+        session_state = self.session_service.get_persisted_session_state(db, account_id, text_id)
+
+        # Check if backup/next text is ready
+        is_next_ready = False
+        next_ready_reason = "waiting"
+        try:
+            backup_text = self.readiness_service.next_unopened(db, account_id, lang)
+            if backup_text and backup_text.id != text_id:
+                backup_ready, backup_reason = self.readiness_service.evaluate(db, backup_text, account_id)
+                if backup_ready and backup_reason in ("both", "grace", "content_only"):
+                    is_next_ready = True
+                    next_ready_reason = backup_reason
+        except Exception:
+            logger.debug("Failed to check backup text readiness", exc_info=True)
+
         logger.info(f"[READING_VIEW] Context prepared in {time.time() - start_time:.3f}s")
 
         return ReadingContext(
@@ -128,7 +149,10 @@ class ReadingViewService:
             title_words=title_words_list,
             title_translation=title_translation if isinstance(title_translation, str) else None,
             is_fully_ready=is_fully_ready,
-            sse_endpoint=sse_endpoint
+            sse_endpoint=sse_endpoint,
+            session_state=session_state,
+            is_next_ready=is_next_ready,
+            next_ready_reason=next_ready_reason
         )
 
     def check_next_text_readiness(
@@ -183,12 +207,8 @@ class ReadingViewService:
              except Exception:
                  pass
 
-        # Logic for "grace" vs "both"
-        # If "grace" (content ready, missing some trans), we usually wait in the polling loop.
-        # Here we return the raw status, caller (polling loop) decides if it waits or returns.
-        # But to simplify, let's say if it's "both", it's fully ready.
-        
-        is_ready_final = (ready and reason == "both")
+        # Accept "both" (full), "grace" (partial after timeout), or "content_only" (no translations after long timeout)
+        is_ready_final = ready and reason in ("both", "grace", "content_only")
         
         return ReadinessStatus(
             ready=is_ready_final,

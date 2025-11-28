@@ -12,13 +12,13 @@ import random
 
 _BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-def _headers() -> Dict[str, str]:
+def _headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Build request headers using the current env value.
 
     Delays API key lookup to call-time so .env can be loaded earlier
     by the application before using this client.
     """
-    key = os.getenv("OPENROUTER_API_KEY")
+    key = api_key or os.getenv("OPENROUTER_API_KEY")
     if not key:
         raise RuntimeError(
             "OPENROUTER_API_KEY not set. Export it or put it in .env before calling OpenRouter."
@@ -111,6 +111,7 @@ def complete(
     reasoning: Optional[Dict] = None,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
+    api_key: Optional[str] = None,
 ) -> dict:
     payload: Dict = {
         "model": model,
@@ -127,7 +128,7 @@ def complete(
     last_err: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            resp = _get_sync_client().post(_BASE_URL, headers=_headers(), json=payload)
+            resp = _get_sync_client().post(_BASE_URL, headers=_headers(api_key), json=payload)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as e:
@@ -158,6 +159,7 @@ async def _astream_generator(
     thinking: bool = False,
     cancellation_event: Optional[asyncio.Event] = None,
     on_event: Optional[Callable[[dict], None]] = None,
+    api_key: Optional[str] = None,
 ) -> AsyncIterator[Chunk]:
     """
     Internal generator that yields (kind, text) tuples while the model streams.
@@ -176,7 +178,7 @@ async def _astream_generator(
         try:
             client = _get_async_client()
             async with client.stream(
-                "POST", _BASE_URL, headers=_headers(), json=payload
+                "POST", _BASE_URL, headers=_headers(api_key), json=payload
             ) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
@@ -237,6 +239,7 @@ def astream(
     max_tokens: int = 32_768,
     thinking: bool = False,
     on_event: Optional[Callable[[dict], None]] = None,
+    api_key: Optional[str] = None,
 ) -> StreamController:
     """
     Return a controllable stream that allows stopping generation mid-stream.
@@ -245,7 +248,7 @@ def astream(
         StreamController: A stream object with stop() method to cancel generation.
     """
     return StreamController(lambda cancellation_event=None: _astream_generator(
-        messages, model, max_tokens=max_tokens, thinking=thinking, cancellation_event=cancellation_event, on_event=on_event
+        messages, model, max_tokens=max_tokens, thinking=thinking, cancellation_event=cancellation_event, on_event=on_event, api_key=api_key
     ))
 
 async def consume_and_drop(generator: AsyncIterator[Chunk]) -> None:

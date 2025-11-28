@@ -17,8 +17,12 @@ class ModelConfig:
     allowed_tiers: List[str]
     capabilities: List[str] = field(default_factory=list)
     cost_per_token: float = 0.0
+    # Direct API key (runtime override)
+    _api_key: Optional[str] = None
     
     def get_api_key(self) -> Optional[str]:
+        if self._api_key:
+            return self._api_key
         if not self.api_key_env:
             return None
         return os.getenv(self.api_key_env)

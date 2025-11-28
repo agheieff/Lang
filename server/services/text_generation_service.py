@@ -150,9 +150,10 @@ class TextGenerationService:
         Returns:
             TextGenerationResult with the generated content or error
         """
-        from ..models import ReadingText
+        from ..models import ReadingText, UserProviderConfig, Profile
         from ..services.model_registry_service import get_model_registry
         from ..auth import Account
+        from ..llm_config.llm_models import ModelConfig
         
         # Get user's subscription tier for model selection from global database
         account = global_db.query(Account).filter(Account.id == account_id).first()
@@ -164,30 +165,17 @@ class TextGenerationService:
             key_service = get_openrouter_key_service()
             user_api_key = key_service.get_user_key(account)
         
-        # Get available models for user's tier
-        registry = get_model_registry()
-        available_models = registry.get_available_models(user_tier)
+        # Use model resolution logic
+        from .model_resolution import resolve_models_for_task
+        models_to_try = resolve_models_for_task(
+            account_db, global_db, account_id, lang, "preferred_generation_model"
+        )
         
-        if not available_models:
-            raise ValueError(f"No models available for tier {user_tier}")
-        
+        if not models_to_try:
+             # Should not happen given defaults
+             raise ValueError(f"No models available for tier {user_tier}")
+             
         best_result = TextGenerationResult(success=False, text="", error="No providers succeeded")
-        
-        # Try models in order of preference (fallback chain or first available)
-        models_to_try = []
-        if registry.config.fallback_chain:
-            # Use fallback chain order, filter by available models
-            for model_id in registry.config.fallback_chain:
-                if any(m.id == model_id for m in available_models):
-                    models_to_try.append(registry.get_model_by_id(model_id))
-            # Add remaining available models not in fallback chain
-            existing_ids = {m.id for m in models_to_try}
-            for model in available_models:
-                if model.id not in existing_ids:
-                    models_to_try.append(model)
-        else:
-            # No fallback chain, use available models as-is
-            models_to_try = available_models
         
         for model_config in models_to_try:
             # Determine number of attempts based on provider
@@ -230,6 +218,13 @@ class TextGenerationService:
                         rt.content = final_text
                         rt.generated_at = datetime.datetime.utcnow()
                         account_db.commit()
+                        
+                        # Record usage for Free tier users
+                        if user_tier == "Free":
+                            from .usage_service import get_usage_service
+                            usage_service = get_usage_service()
+                            usage_service.record_usage(account_db, account_id, len(final_text))
+                            account_db.commit()
                         
                         result = TextGenerationResult(
                             success=True,

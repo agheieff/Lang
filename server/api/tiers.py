@@ -82,6 +82,7 @@ async def set_my_tier(
     background_tasks: BackgroundTasks,
     tiers_db: Session = Depends(get_global_db),
     auth_db: Session = Depends(get_global_db),
+    account_db: Session = Depends(get_db),
     account: Account = Depends(get_current_account),
 ):
     ensure_default_tiers(tiers_db)
@@ -131,6 +132,12 @@ async def set_my_tier(
             except OpenRouterKeyError as e:
                 logger.error(f"Failed to update key limit: {e}")
                 message = "Tier updated, key limit update pending"
+
+    # Sync system models if tier changed
+    if old_tier != new_tier:
+        from ..services.user_model_service import get_user_model_service
+        model_service = get_user_model_service()
+        model_service.sync_system_models_for_tier(account_db, account.id, new_tier)
 
     return TierChangeOut(
         name=new_tier,

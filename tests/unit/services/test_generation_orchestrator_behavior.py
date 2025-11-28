@@ -179,6 +179,20 @@ def _setup_mocks(monkeypatch):
     monkeypatch.setattr("server.services.generation_orchestrator.build_reading_prompt_spec", fake_build_spec)
     
     # Mock global session
+    class FakeAccount:
+        subscription_tier = "Free"
+    
+    class FakeAccountQuery:
+        def filter(self, *args, **kwargs): return self
+        def first(self): return FakeAccount()
+    
     class FakeGlobalSession:
+        def query(self, model): return FakeAccountQuery()
         def close(self): pass
     monkeypatch.setattr("server.services.generation_orchestrator.GlobalSessionLocal", lambda: FakeGlobalSession())
+    
+    # Mock usage service
+    class FakeUsageService:
+        def check_quota(self, db, account_id, tier): return (True, "ok")
+        def record_usage(self, db, account_id, length): pass
+    monkeypatch.setattr("server.services.generation_orchestrator.get_usage_service", lambda: FakeUsageService())

@@ -113,20 +113,49 @@ class TranslationService:
             key_service = get_openrouter_key_service()
             user_api_key = key_service.get_user_key(account)
         
-        # Get model configuration from registry or fall back to legacy behavior
-        if provider is None or model_id is None:
-                try:
-                    registry = get_model_registry()
-                    model_config = registry.get_default_model(user_tier)
-                    provider = "openrouter" if "openrouter" in model_config.base_url else "local"
-                    model_id = model_config.model
-                    base_url = model_config.base_url
-                except Exception:
-                    # Fallback to legacy defaults
-                    provider = provider or "openrouter"
-                    model_id = model_id or _pick_openrouter_model(None)
-                    base_url = base_url or "http://localhost:1234/v1"
+        # Resolve models separately for word and sentence translation
+        from .model_resolution import resolve_models_for_task
+        word_models = resolve_models_for_task(
+            account_db, global_db, account_id, lang, "preferred_word_translation_model"
+        )
+        sentence_models = resolve_models_for_task(
+            account_db, global_db, account_id, lang, "preferred_sentence_translation_model"
+        )
+
+        # Fallback to legacy arguments if no resolved models
+        def _make_fallback_model():
+            from ..llm_config.llm_models import ModelConfig
+            return ModelConfig(
+                id="legacy-temp",
+                display_name=f"Legacy {provider}/{model_id}",
+                model=model_id or "moonshotai/kimi-k2:free",
+                base_url=base_url or "https://openrouter.ai/api/v1",
+                api_key_env=None,
+                max_tokens=16384,
+                allowed_tiers=[],
+                capabilities=["text"]
+            )
         
+        if not word_models and (provider or model_id):
+            word_models = [_make_fallback_model()]
+        if not sentence_models and (provider or model_id):
+            sentence_models = [_make_fallback_model()]
+        
+        # Try to get default system model if still empty
+        if not word_models or not sentence_models:
+            try:
+                registry = get_model_registry()
+                default_model = registry.get_default_model(user_tier)
+                if not word_models:
+                    word_models = [default_model]
+                if not sentence_models:
+                    sentence_models = [default_model]
+            except Exception:
+                pass
+
+        if not word_models and not sentence_models:
+            raise ValueError(f"No translation models available for tier {user_tier}")
+
         # Get user profile for target language
         prof = account_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
         target_lang = (prof.target_lang if prof and getattr(prof, "target_lang", None) else "en")
@@ -148,36 +177,61 @@ class TranslationService:
         if isinstance(w_messages, list) and len(w_messages) > 2:
             w_messages[2]["content"] = text_content
         
-        # Execute generation steps sequentially to avoid sharing a DB session across threads
-        words_success = self._generate_word_translations(
-            account_db, account_id, text_id, lang, target_lang,
-            text_content, job_dir, provider, model_id, base_url,
-            w_messages, reading_messages, text_content, user_tier,
-            user_api_key=user_api_key
-        )
-        sentences_success = self._generate_sentence_translations(
-            account_db, account_id, text_id, lang, target_lang,
-            text_content, job_dir, provider, model_id, base_url,
-            tr_messages, user_api_key=user_api_key
-        )
+        best_result = TranslationResult(success=False)
         
-        # Generate title translation if a title is provided
-        title_success = False
-        if text_title:
-            title_success = self._generate_title_translation(
-                account_db, account_id, text_id, lang, target_lang,
-                text_title, job_dir, provider, model_id, base_url,
-                user_api_key=user_api_key
-            )
+        # Generate word translations using word_models
+        for model_config in (word_models or []):
+            if best_result.words:
+                break
+            cur_provider = "openrouter" if "openrouter" in model_config.base_url else "local"
+            cur_model = model_config.model
+            cur_base_url = model_config.base_url
             
-        # Create result
-        success = words_success or sentences_success or title_success  # Partial success is ok
-        return TranslationResult(
-            success=success,
-            words=words_success,
-            sentences=sentences_success,
-            log_dir=job_dir
-        )
+            words_success = self._generate_word_translations(
+                account_db, account_id, text_id, lang, target_lang,
+                text_content, job_dir, cur_provider, cur_model, cur_base_url,
+                w_messages, reading_messages, text_content, user_tier,
+                model_config=model_config
+            )
+            if words_success:
+                best_result.words = True
+
+        # Generate sentence translations using sentence_models
+        for model_config in (sentence_models or []):
+            if best_result.sentences:
+                break
+            cur_provider = "openrouter" if "openrouter" in model_config.base_url else "local"
+            cur_model = model_config.model
+            cur_base_url = model_config.base_url
+            
+            sentences_success = self._generate_sentence_translations(
+                account_db, account_id, text_id, lang, target_lang,
+                text_content, job_dir, cur_provider, cur_model, cur_base_url,
+                tr_messages,
+                model_config=model_config
+            )
+            if sentences_success:
+                best_result.sentences = True
+        
+        # Generate title translation using sentence model (or first available)
+        if text_title:
+            title_model = (sentence_models or word_models or [None])[0]
+            if title_model:
+                cur_provider = "openrouter" if "openrouter" in title_model.base_url else "local"
+                self._generate_title_translation(
+                    account_db, account_id, text_id, lang, target_lang,
+                    text_title, job_dir, cur_provider, title_model.model, title_model.base_url,
+                    model_config=title_model
+                )
+        
+        if best_result.words and best_result.sentences:
+            best_result.success = True
+        
+        # Final check (title is optional)
+        if best_result.words or best_result.sentences:
+             best_result.success = True
+             
+        return best_result
     
     def _generate_word_translations(self,
                                     account_db: Session,
@@ -194,7 +248,8 @@ class TranslationService:
                                     reading_messages: List[Dict],
                                     full_response: str,
                                     user_tier: str = "Free",
-                                    user_api_key: Optional[str] = None) -> bool:
+                                    user_api_key: Optional[str] = None,
+                                    model_config=None) -> bool:
         """Generate word translations split by sentence."""
         try:
             # Split text into sentences
@@ -232,7 +287,8 @@ class TranslationService:
                     futures.append((s, seg, m, ex.submit(
                         llm_call_and_log_to_file,
                         m, provider, model_id, base_url, out_path,
-                        user_api_key=user_api_key
+                        user_api_key=user_api_key,
+                        model_config=model_config
                     )))
                 
                 for s, seg, m, f in futures:
@@ -293,16 +349,19 @@ class TranslationService:
                                       model_id: Optional[str],
                                       base_url: Optional[str],
                                       tr_messages: List[Dict],
-                                      user_api_key: Optional[str] = None) -> bool:
+                                      user_api_key: Optional[str] = None,
+                                      model_config=None) -> bool:
         """Generate structured sentence translations."""
         try:
             # Call LLM for structured translation
             tr_buf, tr_resp, used_provider, used_model = llm_call_and_log_to_file(
                 tr_messages, provider, model_id, base_url, job_dir / "structured.json",
-                user_api_key=user_api_key
+                user_api_key=user_api_key,
+                model_config=model_config
             )
             
             if not tr_buf:
+                logger.error("[TRANSLATION] No response buffer from LLM for structured translation")
                 return False
             
             # Log to DB (main thread) for structured translation
@@ -325,9 +384,10 @@ class TranslationService:
             # Parse and save sentence translations
             tr_parsed = extract_structured_translation(tr_buf)
             if not tr_parsed:
+                logger.error(f"[TRANSLATION] Failed to parse structured translation: {tr_buf[:100]}...")
                 return False
             # Compute sentence spans based on current text
-            sent_spans = split_sentences(text_content, lang)
+            sent_spans = self._split_sentences(text_content, lang)
             idx = 0
             for p in tr_parsed.get("paragraphs", []):
                 for s in p.get("sentences", []):
@@ -355,6 +415,52 @@ class TranslationService:
                         ))
                         idx += 1
             
+            # Synthesize and persist full text translation
+            try:
+                full_translation_parts = []
+                # Re-iterate parsed structure or use the DB objects if flushed?
+                # Using the parsed structure is safer as DB objects might be detached or pending
+                for p in tr_parsed.get("paragraphs", []):
+                    p_sents = []
+                    for s in p.get("sentences", []):
+                        if "translation" in s:
+                            p_sents.append(s["translation"])
+                    if p_sents:
+                        full_translation_parts.append(" ".join(p_sents))
+                
+                if full_translation_parts:
+                    full_translation = "\n\n".join(full_translation_parts)
+                    
+                    # Check if already exists (idempotency)
+                    exists = account_db.query(ReadingTextTranslation).filter(
+                        ReadingTextTranslation.account_id == account_id,
+                        ReadingTextTranslation.text_id == text_id,
+                        ReadingTextTranslation.unit == "text",
+                        # Exclude title translation which usually has segment_index=0 and different source
+                        ReadingTextTranslation.segment_index == 1 
+                    ).first()
+                    
+                    if not exists:
+                        account_db.add(ReadingTextTranslation(
+                            account_id=account_id,
+                            text_id=text_id,
+                            unit="text",
+                            target_lang=target_lang,
+                            segment_index=1, # 0 is usually title
+                            span_start=0,
+                            span_end=len(text_content),
+                            source_text=text_content,
+                            translated_text=full_translation,
+                            provider=provider,
+                            model=model_id,
+                        ))
+                        # Force flush here to ensure it's visible to queries immediately
+                        account_db.flush()
+                        logger.info(f"[TRANSLATION] Synthesized full text translation for text_id={text_id}")
+            except Exception as e:
+                logger.error(f"[TRANSLATION] Failed to synthesize full text translation: {e}", exc_info=True)
+                # Non-blocking failure
+            
             # Flush the session to ensure data is written
             try:
                 account_db.flush()
@@ -379,7 +485,8 @@ class TranslationService:
                                 provider: str,
                                 model_id: Optional[str],
                                 base_url: Optional[str],
-                                user_api_key: Optional[str] = None) -> bool:
+                                user_api_key: Optional[str] = None,
+                                model_config=None) -> bool:
         """Generate and persist title translation."""
         try:
             # Build title translation prompt
@@ -389,7 +496,8 @@ class TranslationService:
             # Call LLM for title translation
             title_buf, title_resp, used_provider, used_model = llm_call_and_log_to_file(
                 title_messages, provider, model_id, base_url, job_dir / "title_translation.json",
-                user_api_key=user_api_key
+                user_api_key=user_api_key,
+                model_config=model_config
             )
             
             if not title_buf:
@@ -470,6 +578,10 @@ class TranslationService:
             logger.error(f"[TRANSLATION] Title translation failed: {e}", exc_info=True)
             return False
     
+    def _split_sentences(self, text: str, lang: str) -> List[Tuple[int, int, str]]:
+        """Deprecated; delegate to utils.text_segmentation.split_sentences."""
+        return split_sentences(text, lang)
+
     def backfill_sentence_spans(self, account_db: Session, account_id: int, text_id: int) -> bool:
         """Backfill span_start/span_end for existing sentence translations by index order.
 
@@ -479,7 +591,7 @@ class TranslationService:
             rt = account_db.query(ReadingText).filter(ReadingText.id == text_id, ReadingText.account_id == account_id).first()
             if not rt or not getattr(rt, "content", None):
                 return False
-            sent_spans = split_sentences(rt.content, rt.lang)
+            sent_spans = self._split_sentences(rt.content, rt.lang)
             rows = (
                 account_db.query(ReadingTextTranslation)
                 .filter(

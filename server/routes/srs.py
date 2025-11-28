@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -214,6 +215,8 @@ class SrsWordsOut(BaseModel):
     diversity: int
     freq_rank: Optional[int] = None
     level_code: Optional[str] = None
+    next_due_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
 
 
 @router.get("/srs/words", response_model=List[SrsWordsOut])
@@ -225,7 +228,7 @@ def get_srs_words(
     max_S: Optional[float] = None,
     min_D: Optional[int] = None,
     max_D: Optional[int] = None,
-    limit: int = 50,
+    limit: int = 500,
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -239,6 +242,9 @@ def get_srs_words(
             .scalar_subquery(),
         )
     )
+    # Sort by next due date (most urgent first)
+    q = q.order_by(Lexeme.next_due_at.asc().nullsfirst())
+    
     if min_S is not None:
         q = q.filter(Lexeme.stability >= float(min_S))
     if max_S is not None:
@@ -254,7 +260,7 @@ def get_srs_words(
             q = q.filter((Lexeme.a_click * 1.0) / (denom * 1.0) >= float(min_p))
         if max_p is not None:
             q = q.filter((Lexeme.a_click * 1.0) / (denom * 1.0) <= float(max_p))
-    rows = q.limit(1000).all()
+    rows = q.limit(2000).all()
     out: List[SrsWordsOut] = []
     for lex in rows:
         a = lex.a_click or 0
@@ -285,6 +291,8 @@ def get_srs_words(
                 diversity=D,
                 freq_rank=lex.frequency_rank,
                 level_code=lex.level_code,
+                next_due_at=lex.next_due_at,
+                last_seen_at=lex.last_seen_at,
             )
         )
         if len(out) >= limit:

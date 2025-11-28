@@ -4,6 +4,17 @@
 <div class="container mx-auto max-w-2xl p-4">
   <h1 class="text-2xl font-bold mb-6">Settings</h1>
 
+  <!-- Subscription Tier Section -->
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <h2 class="text-xl font-bold mb-4">Subscription & Usage</h2>
+    <div id="tier-section" hx-get="/settings/tier" hx-trigger="load">
+      <div class="animate-pulse space-y-3">
+        <div class="h-8 bg-gray-100 rounded w-1/3"></div>
+        <div class="h-20 bg-gray-100 rounded"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Profile Settings Section -->
   {% if current_profile %}
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
@@ -109,6 +120,22 @@
       </dl>
     </div>
   </div>
+
+  <!-- Topic Interests Section -->
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <h2 class="text-xl font-bold mb-2">Topic Interests</h2>
+    <p class="text-gray-600 mb-4">Adjust topic weights to influence what kinds of texts are generated for you.</p>
+    <div id="topics-section" hx-get="/settings/topics?lang={{ current_profile.lang }}" hx-trigger="load">
+      <div class="animate-pulse space-y-3">
+        <div class="h-8 bg-gray-100 rounded w-1/4"></div>
+        <div class="flex gap-2">
+          <div class="h-8 bg-gray-100 rounded-full w-20"></div>
+          <div class="h-8 bg-gray-100 rounded-full w-24"></div>
+          <div class="h-8 bg-gray-100 rounded-full w-16"></div>
+        </div>
+      </div>
+    </div>
+  </div>
   {% else %}
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
     <h2 class="text-xl font-bold mb-2">Language Learning Preferences</h2>
@@ -116,38 +143,141 @@
   </div>
   {% endif %}
 
-  <!-- Application Settings Section -->
-  <div class="bg-white rounded-lg shadow-md p-6">
-    <h2 class="text-xl font-bold mb-4">Application Settings</h2>
-    <p class="text-gray-600">General application configuration and preferences.</p>
+  <!-- LLM Models Section -->
+  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+    <div class="flex justify-between items-center mb-4">
+      <div>
+        <h2 class="text-xl font-bold">LLM Models</h2>
+        <p class="text-sm text-gray-600">Configure which models to use for text generation and translations.</p>
+      </div>
+      <button onclick="document.getElementById('add-model-form').classList.toggle('hidden')" 
+              class="text-sm text-blue-600 hover:text-blue-800 font-medium">
+        + Add Custom Model
+      </button>
+    </div>
 
-    <!-- Placeholder for future settings -->
-    <div class="mt-4 p-4 bg-gray-50 rounded-lg">
-      <p class="text-sm text-gray-500">Additional application settings will appear here.</p>
+    <!-- Add Model Form (Hidden by default) -->
+    <div id="add-model-form" class="hidden bg-gray-50 p-4 rounded-lg mb-6 border border-gray-200">
+      <h4 class="font-medium mb-3 text-sm text-gray-700">Add Custom Model</h4>
+      <form hx-post="/api/models" hx-target="#models-list" hx-swap="innerHTML"
+            hx-headers='{"Content-Type": "application/json"}'
+            hx-ext="json-enc"
+            onsubmit="setTimeout(() => { this.reset(); document.getElementById('add-model-form').classList.add('hidden'); htmx.ajax('GET', '/settings/models', {target: '#models-list'}); }, 100)">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Display Name</label>
+            <input type="text" name="display_name" required placeholder="e.g. My Claude Model" 
+                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Provider</label>
+            <select name="provider" required class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+              <option value="openrouter">OpenRouter</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="local">Local (LM Studio, Ollama)</option>
+            </select>
+          </div>
+          <div class="md:col-span-2">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Model ID</label>
+            <input type="text" name="model_id" required placeholder="e.g. anthropic/claude-3-sonnet" 
+                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+            <p class="text-xs text-gray-500 mt-1">For OpenRouter, use format: provider/model-name</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Base URL (Optional)</label>
+            <input type="text" name="base_url" placeholder="Leave empty for default" 
+                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">API Key</label>
+            <input type="password" name="api_key" placeholder="sk-..." 
+                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Max Tokens (Optional)</label>
+            <input type="number" name="max_tokens" placeholder="32768" 
+                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Priority (Lower = Higher)</label>
+            <input type="number" name="priority" value="100" min="1" 
+                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
+          </div>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button type="button" onclick="document.getElementById('add-model-form').classList.add('hidden')" 
+                  class="px-3 py-1.5 text-gray-600 hover:bg-gray-200 rounded text-sm">Cancel</button>
+          <button type="submit" class="px-3 py-1.5 bg-blue-600 text-white hover:bg-blue-700 rounded text-sm">Add Model</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Models List (loaded via JS due to HTMX swap issues) -->
+    <div id="models-list">
+      <div class="animate-pulse space-y-2">
+        <div class="h-20 bg-gray-100 rounded"></div>
+        <div class="h-20 bg-gray-100 rounded"></div>
+      </div>
+    </div>
+
+    <!-- Model Assignments -->
+    <div class="mt-6 pt-6 border-t border-gray-200">
+      <h3 class="text-lg font-medium text-gray-900 mb-4">Model Assignments</h3>
+      <p class="text-sm text-gray-600 mb-4">Choose which model to use for each task.</p>
+      <div id="model-assignments" hx-get="/settings/models/assignments" hx-trigger="load">
+        <div class="animate-pulse space-y-2">
+          <div class="h-12 bg-gray-100 rounded"></div>
+          <div class="h-12 bg-gray-100 rounded"></div>
+          <div class="h-12 bg-gray-100 rounded"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
-// Add visual feedback for form submissions
 function setupFormFeedback() {
-  // Success handler for text preferences
   htmx.on('htmx:afterRequest', function(evt) {
     const target = evt.detail.target;
     if (target && evt.detail.xhr.status === 200) {
-      target.innerHTML = '<span class="text-green-600">✓ Preferences saved</span>';
-      setTimeout(() => {
-        target.innerHTML = '';
-      }, 3000);
+      if (target.id === 'preferences-status' || target.id === 'length-status') {
+        target.innerHTML = '<span class="text-green-600">Saved</span>';
+        setTimeout(() => { target.innerHTML = ''; }, 3000);
+      }
     } else if (target && evt.detail.xhr.status !== 200) {
-      target.innerHTML = '<span class="text-red-600">✗ Failed to save</span>';
-      setTimeout(() => {
-        target.innerHTML = '';
-      }, 3000);
+      if (target.id === 'preferences-status' || target.id === 'length-status') {
+        target.innerHTML = '<span class="text-red-600">Failed to save</span>';
+        setTimeout(() => { target.innerHTML = ''; }, 3000);
+      }
     }
   });
 }
 
 document.addEventListener('DOMContentLoaded', setupFormFeedback);
+
+// Load models list via plain JS (HTMX swap has issues with nested hx-attributes)
+async function loadModelsList() {
+  const container = document.getElementById('models-list');
+  if (!container) return;
+  try {
+    const resp = await fetch('/settings/models');
+    const html = await resp.text();
+    container.innerHTML = html;
+    htmx.process(container);
+  } catch (e) {
+    container.innerHTML = '<div class="text-red-500">Failed to load models</div>';
+  }
+}
+document.addEventListener('DOMContentLoaded', loadModelsList);
+
+// When any request targets models-list, just reload via JS instead
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+  if (evt.detail.target && evt.detail.target.id === 'models-list') {
+    loadModelsList();
+  }
+});
+
+
 </script>
 {% endblock %}

@@ -1,3 +1,8 @@
+/**
+ * Reading page controller.
+ * Handles page refresh logic when SSE events indicate content changes.
+ * Note: Next button state is managed by reading-sse.js
+ */
 (function () {
   'use strict';
 
@@ -5,7 +10,6 @@
     constructor() {
       this.refreshInFlight = false;
       this.pendingReason = null;
-      this.homeSSE = null;
       this.htmxHooksInstalled = false;
       this._installHtmxHooks();
     }
@@ -25,66 +29,6 @@
         if (ev.detail.elt.id !== 'current-reading') return;
         this._onRefreshFinished(new Error('htmx-response-error'));
       });
-    }
-
-    initHomeSSE() {
-      if (this.homeSSE) return;
-      const container = document.getElementById('current-reading');
-      if (!container) return;
-
-      try {
-        const es = new EventSource('/reading/events/sse');
-        this.homeSSE = es;
-
-        es.addEventListener('text_ready', (event) => {
-          try {
-            // payload not currently used beyond triggering refresh
-            void JSON.parse(event.data || 'null');
-          } catch (_e) {}
-          this.requestRefresh('home_text_ready');
-        });
-
-        es.addEventListener('content_ready', (event) => {
-          try {
-            void JSON.parse(event.data || 'null');
-          } catch (_e) {}
-          this.requestRefresh('home_content_ready');
-        });
-
-        es.addEventListener('translations_ready', (event) => {
-          try {
-            void JSON.parse(event.data || 'null');
-          } catch (_e) {}
-          this.requestRefresh('home_translations_ready');
-        });
-
-        es.addEventListener('next_ready', (event) => {
-          try {
-            void JSON.parse(event.data || 'null');
-          } catch (_e) {}
-          // Enable next button when backup text is ready
-          const nextBtn = document.getElementById('next-btn');
-          if (nextBtn) {
-            nextBtn.disabled = false;
-            nextBtn.setAttribute('aria-disabled', 'false');
-          }
-          const statusEl = document.getElementById('next-status');
-          if (statusEl) {
-            statusEl.textContent = 'Next text ready';
-            statusEl.className = 'ml-3 text-sm text-green-500';
-          }
-        });
-
-        es.addEventListener('error', (event) => {
-          console.error('[HOME SSE] Connection error', event);
-        });
-
-        window.addEventListener('beforeunload', () => {
-          try { es.close(); } catch (_e) {}
-        });
-      } catch (e) {
-        console.error('[HOME SSE] Failed to init SSE', e);
-      }
     }
 
     requestRefresh(reason) {

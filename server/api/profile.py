@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,13 +10,15 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..db import get_global_db
-from ..account_db import get_db
+from ..account_db import get_db, open_account_session
 from ..models import Profile, ProfilePref
 from server.auth import Account
 from ..deps import get_current_account
 from ..repos.profiles import get_or_create_profile, get_pref_row, get_user_profile
 from ..services.interests_parser import parse_interests_to_weights
 from ..config import TOPICS, DEFAULT_TOPIC_WEIGHTS
+
+logger = logging.getLogger(__name__)
 
 # Supported languages (learning): Spanish and Chinese (Simplified/Traditional variants)
 SUPPORTED_LANGUAGES = {"es", "zh", "zh-Hans", "zh-Hant", "en"}
@@ -211,7 +215,34 @@ def update_profile(
         except Exception:
             prof.text_length = None
     if req.text_preferences is not None:
-        prof.text_preferences = (req.text_preferences or '').strip() or None
+        old_prefs = prof.text_preferences
+        new_prefs = (req.text_preferences or '').strip() or None
+        prof.text_preferences = new_prefs
+        
+        # Async parse interests to topic_weights if changed
+        if new_prefs != old_prefs:
+            profile_id = prof.id
+            account_id = account.id
+            
+            def _parse_interests_async():
+                try:
+                    async_db = open_account_session(account_id)
+                    try:
+                        async_prof = async_db.query(Profile).filter(Profile.id == profile_id).first()
+                        if async_prof:
+                            if new_prefs:
+                                weights = parse_interests_to_weights(new_prefs, TOPICS)
+                            else:
+                                weights = DEFAULT_TOPIC_WEIGHTS.copy()
+                            async_prof.topic_weights = weights
+                            async_db.commit()
+                            logger.info(f"[INTERESTS] Parsed preferences for profile {profile_id}: {weights}")
+                    finally:
+                        async_db.close()
+                except Exception as e:
+                    logger.error(f"[INTERESTS] Failed to parse preferences: {e}")
+            
+            threading.Thread(target=_parse_interests_async, daemon=True, name=f"interests-{profile_id}").start()
 
     db.commit()
     return {"ok": True}

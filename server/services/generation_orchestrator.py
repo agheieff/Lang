@@ -21,6 +21,7 @@ from .translation_validation_service import TranslationValidationService
 from .notification_service import get_notification_service
 from .llm_common import build_reading_prompt_spec
 from .pool_selection_service import get_pool_selection_service
+from .usage_service import get_usage_service, QuotaExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -119,10 +120,16 @@ class GenerationOrchestrator:
                 )
                 return
             
-            # Step 4: Notify content is ready
+            # Step 4: Record usage for Free tier tracking
+            if result.text:
+                with db_manager.transaction(account_id) as usage_db:
+                    usage_service = get_usage_service()
+                    usage_service.record_usage(usage_db, account_id, len(result.text))
+            
+            # Step 5: Notify content is ready
             await self._notify_content_ready(account_id, lang, text_id)
             
-            # Step 5: Start translation job in background
+            # Step 6: Start translation job in background
             await self._start_translation_job_async(
                 account_id, lang, text_id, 
                 result.text, result.title, job_dir, result.messages
@@ -130,7 +137,7 @@ class GenerationOrchestrator:
             
             logger.info(f"[ORCHESTRATOR] Generation job completed successfully for text_id={text_id}")
             
-            # Step 6: Check if pool needs more texts (chain backfill)
+            # Step 7: Check if pool needs more texts (chain backfill)
             try:
                 with db_manager.transaction(account_id) as db:
                     self.ensure_text_available(db, account_id, lang)
@@ -171,6 +178,20 @@ class GenerationOrchestrator:
         """
         with db_manager.transaction(account_id) as gen_db:
             from ..models import Profile
+            from ..auth import Account
+            
+            # Check Free tier quota before generating
+            global_db = GlobalSessionLocal()
+            try:
+                account = global_db.query(Account).filter(Account.id == account_id).first()
+                user_tier = account.subscription_tier if account else "Free"
+            finally:
+                global_db.close()
+            
+            usage_service = get_usage_service()
+            can_generate, reason = usage_service.check_quota(gen_db, account_id, user_tier)
+            if not can_generate:
+                raise QuotaExceededError(reason)
             
             # Get profile for pool generation params
             prof = gen_db.query(Profile).filter(
@@ -303,8 +324,8 @@ class GenerationOrchestrator:
                         text_title=text_title,
                         job_dir=job_dir,
                         reading_messages=reading_messages,
-                        provider=os.getenv("ARC_DEFAULT_PROVIDER", "openrouter"),
-                        model_id=None,  # Let translation service pick model
+                        provider=None,  # Let translation service pick model
+                        model_id=None,
                         base_url=None
                     )
                 finally:
