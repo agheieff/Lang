@@ -16,6 +16,7 @@ class ReadinessService:
         self.settings = get_settings()
 
     def next_unopened(self, db: Session, account_id: int, lang: str) -> Optional[ReadingText]:
+        """Get newest unopened text (used for generation tracking)."""
         return (
             db.query(ReadingText)
             .filter(
@@ -26,6 +27,36 @@ class ReadinessService:
             .order_by(ReadingText.created_at.desc())
             .first()
         )
+
+    def first_ready_backup(
+        self, db: Session, account_id: int, lang: str, exclude_text_id: Optional[int] = None
+    ) -> Tuple[Optional[ReadingText], str]:
+        """
+        Find any ready backup text from the pool.
+        Returns (text, reason) where reason is 'both', 'grace', etc.
+        This is for checking if Next button should be enabled.
+        """
+        # Query for fully ready texts using the completion flags
+        query = (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.account_id == account_id,
+                ReadingText.lang == lang,
+                ReadingText.opened_at.is_(None),
+                ReadingText.content.isnot(None),
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
+            )
+        )
+        
+        if exclude_text_id:
+            query = query.filter(ReadingText.id != exclude_text_id)
+        
+        text = query.first()
+        if text:
+            return text, "both"
+        
+        return None, "waiting"
 
     def _has_words(self, db: Session, account_id: int, text_id: int) -> bool:
         try:

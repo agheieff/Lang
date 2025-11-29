@@ -87,15 +87,28 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     
     topic_line = ""
     if spec.topic:
-        topic_display = {
+        topic_display_map = {
             "fiction": "fiction/creative writing",
             "news": "news/current events",
-            "science": "science/technology",
-            "history": "history/culture",
+            "science": "science",
+            "technology": "technology",
+            "history": "history",
             "daily_life": "daily life/practical situations",
             "culture": "culture/traditions",
-        }.get(spec.topic, spec.topic)
-        topic_line = f"The text should be about {topic_display}.\n"
+            "sports": "sports",
+            "business": "business/economics",
+        }
+        # Handle multiple comma-separated topics
+        topics = [t.strip() for t in spec.topic.split(',') if t.strip()]
+        if len(topics) == 1:
+            topic_display = topic_display_map.get(topics[0], topics[0])
+            topic_line = f"The text should be about {topic_display}.\n"
+        elif len(topics) == 2:
+            displays = [topic_display_map.get(t, t) for t in topics]
+            topic_line = f"The text should combine {displays[0]} and {displays[1]}.\n"
+        elif len(topics) >= 3:
+            displays = [topic_display_map.get(t, t) for t in topics]
+            topic_line = f"The text should touch on {', '.join(displays[:-1])}, and {displays[-1]}.\n"
 
     # Build mapping for both legacy "*_line" placeholders and simplified {level}/{length}/{include_words}/{script}
     # Prefer a concise level code (e.g., HSK2, A2) before any description

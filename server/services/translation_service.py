@@ -128,7 +128,7 @@ class TranslationService:
             return ModelConfig(
                 id="legacy-temp",
                 display_name=f"Legacy {provider}/{model_id}",
-                model=model_id or "moonshotai/kimi-k2:free",
+                model=model_id or "x-ai/grok-4.1-fast:free",
                 base_url=base_url or "https://openrouter.ai/api/v1",
                 api_key_env=None,
                 max_tokens=16384,
@@ -195,6 +195,14 @@ class TranslationService:
             )
             if words_success:
                 best_result.words = True
+                # Set words_complete flag on the text
+                try:
+                    rt = account_db.get(ReadingText, text_id)
+                    if rt:
+                        rt.words_complete = True
+                        account_db.flush()
+                except Exception as e:
+                    logger.warning(f"[TRANSLATION] Failed to set words_complete flag: {e}")
 
         # Generate sentence translations using sentence_models
         for model_config in (sentence_models or []):
@@ -212,6 +220,14 @@ class TranslationService:
             )
             if sentences_success:
                 best_result.sentences = True
+                # Set sentences_complete flag on the text
+                try:
+                    rt = account_db.get(ReadingText, text_id)
+                    if rt:
+                        rt.sentences_complete = True
+                        account_db.flush()
+                except Exception as e:
+                    logger.warning(f"[TRANSLATION] Failed to set sentences_complete flag: {e}")
         
         # Generate title translation using sentence model (or first available)
         if text_title:
@@ -259,12 +275,20 @@ class TranslationService:
             per_msgs: List[Tuple[int, str, List[Dict]]] = []
             for (s, e, seg) in sent_spans:
                 msgs = build_word_translation_prompt(lang, target_lang, seg)
-                words_ctx = [
-                    {"role": "system", "content": msgs[0]["content"]},
-                    {"role": "user", "content": reading_messages[1]["content"]},
-                    {"role": "assistant", "content": full_response},
-                    {"role": "user", "content": msgs[1]["content"]},
-                ]
+                # Include original reading context if available
+                if reading_messages and len(reading_messages) >= 2:
+                    words_ctx = [
+                        {"role": "system", "content": msgs[0]["content"]},
+                        {"role": "user", "content": reading_messages[1]["content"]},
+                        {"role": "assistant", "content": full_response},
+                        {"role": "user", "content": msgs[1]["content"]},
+                    ]
+                else:
+                    # Fallback without reading context
+                    words_ctx = [
+                        {"role": "system", "content": msgs[0]["content"]},
+                        {"role": "user", "content": msgs[1]["content"]},
+                    ]
                 per_msgs.append((s, seg, words_ctx))
             
             # Process sentences in parallel
@@ -296,6 +320,36 @@ class TranslationService:
                         wd_seg_results.append((s, seg, f.result(), m))
                     except Exception:
                         wd_seg_results.append((s, seg, None, m))
+            
+            # Retry failed or empty responses (up to 2 retries per sentence)
+            max_retries = 2
+            for retry_round in range(max_retries):
+                failed_indices = []
+                for i, (s, seg, tup, msgs_used) in enumerate(wd_seg_results):
+                    # Check if response is empty or None
+                    if tup is None or (isinstance(tup, tuple) and (not tup[0] or len(tup[0].strip()) == 0)):
+                        failed_indices.append(i)
+                
+                if not failed_indices:
+                    break
+                    
+                logger.info(f"[TRANSLATION] Retry round {retry_round + 1}: {len(failed_indices)} sentences need retry")
+                
+                # Retry failed sentences sequentially (more reliable for retries)
+                for idx in failed_indices:
+                    s, seg, _, msgs_used = wd_seg_results[idx]
+                    out_path = job_dir / f"words_{idx+1}_retry{retry_round+1}.json"
+                    try:
+                        result = llm_call_and_log_to_file(
+                            msgs_used, provider, model_id, base_url, out_path,
+                            user_api_key=user_api_key,
+                            model_config=model_config
+                        )
+                        if result and result[0] and len(result[0].strip()) > 0:
+                            wd_seg_results[idx] = (s, seg, result, msgs_used)
+                            logger.info(f"[TRANSLATION] Retry succeeded for sentence {idx + 1}")
+                    except Exception as e:
+                        logger.warning(f"[TRANSLATION] Retry failed for sentence {idx + 1}: {e}")
         
             # Track existing and new word spans to avoid duplicates
             existing = self._get_existing_spans(account_db, account_id, text_id)
@@ -358,15 +412,28 @@ class TranslationService:
             if model_config:
                 logger.info(f"[TRANSLATION] model_config: model={getattr(model_config, 'model', None)}, base_url={getattr(model_config, 'base_url', None)}")
             
-            # Call LLM for structured translation
-            tr_buf, tr_resp, used_provider, used_model = llm_call_and_log_to_file(
-                tr_messages, provider, model_id, base_url, job_dir / "structured.json",
-                user_api_key=user_api_key,
-                model_config=model_config
-            )
+            # Call LLM for structured translation with retry
+            tr_buf, tr_resp, used_provider, used_model = None, None, None, None
+            max_retries = 2
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    out_path = job_dir / f"structured{'_retry' + str(attempt) if attempt > 0 else ''}.json"
+                    tr_buf, tr_resp, used_provider, used_model = llm_call_and_log_to_file(
+                        tr_messages, provider, model_id, base_url, out_path,
+                        user_api_key=user_api_key,
+                        model_config=model_config
+                    )
+                    if tr_buf and len(tr_buf.strip()) > 0:
+                        break
+                    logger.warning(f"[TRANSLATION] Empty response on attempt {attempt + 1}, retrying...")
+                except Exception as e:
+                    logger.warning(f"[TRANSLATION] Attempt {attempt + 1} failed: {e}")
+                    if attempt == max_retries:
+                        raise
             
             if not tr_buf:
-                logger.error("[TRANSLATION] No response buffer from LLM for structured translation")
+                logger.error("[TRANSLATION] No response buffer from LLM for structured translation after retries")
                 return False
             
             # Log to DB (main thread) for structured translation
@@ -400,9 +467,10 @@ class TranslationService:
                         # Map by order; if we have spans, attach them
                         span_start = None
                         span_end = None
+                        actual_source_text = s["text"]  # Fallback to LLM response
                         try:
                             if 0 <= idx < len(sent_spans):
-                                span_start, span_end, _ = sent_spans[idx]
+                                span_start, span_end, actual_source_text = sent_spans[idx]
                         except Exception:
                             span_start, span_end = None, None
                         account_db.add(ReadingTextTranslation(
@@ -413,7 +481,7 @@ class TranslationService:
                             segment_index=idx,
                             span_start=span_start,
                             span_end=span_end,
-                            source_text=s["text"],
+                            source_text=actual_source_text,
                             translated_text=s["translation"],
                             provider=provider,
                             model=model_id,

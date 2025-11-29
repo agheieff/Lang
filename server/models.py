@@ -53,6 +53,8 @@ class Profile(Base):
     # Pool-based selection preferences
     ci_preference: Mapped[float] = mapped_column(Float, default=0.92)  # Target comprehension (0.85-0.98)
     topic_weights: Mapped[dict] = mapped_column(JSON, default=dict)  # Populated from config.DEFAULT_TOPIC_WEIGHTS
+    # Async preferences update tracking
+    preferences_updating: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relationship to Account (global DB) is not declared to avoid cross-DB FK
     # account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
@@ -80,6 +82,12 @@ class ReadingText(Base):
     topic: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # Primary topic category
     difficulty_estimate: Mapped[Optional[float]] = mapped_column(Float, default=None)  # Estimated difficulty (0-1)
     pooled: Mapped[bool] = mapped_column(Boolean, default=False)  # True if in pool (not yet opened)
+    # Generation completion flags - text is ready when both are True
+    words_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    sentences_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Retry tracking for failed translations
+    translation_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_translation_attempt: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 
 
 # Placeholder for future SRS tables (not implemented yet)

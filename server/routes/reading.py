@@ -30,7 +30,6 @@ from ..services.selection_service import SelectionService
 from ..services.readiness_service import ReadinessService
 from ..services.reconstruction_service import ReconstructionService
 from ..services.progress_service import ProgressService
-from ..services.generation_orchestrator import GenerationOrchestrator
 from ..services.session_processing_service import SessionProcessingService
 from ..utils.text_segmentation import split_sentences
 from ..services.notification_service import get_notification_service
@@ -166,13 +165,33 @@ async def next_text(
     except Exception as e:
         logger.warning(f"Failed to parse request data: {e}")
     
-    # Process session data whether from form or JSON
+    # Process session data in background (don't block the redirect)
     if session_data:
-        from ..services.session_processing_service import SessionProcessingService
-        session_service = SessionProcessingService()
-        session_service.process_session_data(db, account.id, prof.current_text_id or 0, session_data)
+        import threading
+        current_text_id = prof.current_text_id or 0
+        account_id = account.id
         
-        # Handle length preference adjustment
+        def _process_session():
+            from ..services.session_processing_service import SessionProcessingService
+            from ..account_db import open_account_session
+            bg_db = None
+            try:
+                bg_db = open_account_session(account_id)
+                session_service = SessionProcessingService()
+                session_service.process_session_data(bg_db, account_id, current_text_id, session_data)
+            except Exception as e:
+                logger.warning(f"Background session processing failed: {e}")
+            finally:
+                if bg_db:
+                    try:
+                        bg_db.close()
+                    except Exception:
+                        pass
+        
+        thread = threading.Thread(target=_process_session, daemon=True)
+        thread.start()
+        
+        # Handle length preference adjustment (sync, it's quick)
         length_pref = session_data.get("length_preference")
         if length_pref in ("longer", "shorter"):
             current_length = prof.text_length or 300  # Default to 300
@@ -202,13 +221,6 @@ async def next_text(
     
     # Pick next text and set it as current (this updates current_text_id and marks opened)
     next_text = selection_service.pick_current_or_new(db, account.id, prof.lang)
-    
-    # Ensure next text is available after picking
-    try:
-        orchestrator = GenerationOrchestrator()
-        orchestrator.ensure_text_available(db, account.id, prof.lang)
-    except Exception:
-        logger.debug("ensure_text_available failed in next_text", exc_info=True)
 
     # Respond JSON to programmatic clients; keep redirect for regular form posts
     # If HTMX request, send a redirect so htmx follows with GET and swaps into target

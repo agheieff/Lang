@@ -69,27 +69,26 @@ def test_reading_view_html_structure(db_session, test_user):
     service = ReadingViewService()
     
     # Mock dependencies that aren't under test here
-    with patch.object(service.orchestrator, 'ensure_text_available'):
-        with patch.object(service.title_service, 'get_title', return_value=("Hola Title", "Hello Title")):
-            with patch.object(service.title_service, 'get_title_words', return_value=[]):
-                # Mock ReadinessService to avoid "no sentences" retry logic affecting status
-                with patch.object(service.readiness_service, 'evaluate', return_value=(True, "both")):
-                     # Force selection service to pick our text
-                    with patch.object(service.selection_service, 'pick_current_or_new', return_value=rt):
-                        
-                        # 2. Action
-                        context = service.get_current_reading_context(db_session, test_user.id)
-                        
-                        # 3. Render (call the renderer logic directly or via context)
-                        from server.views.reading_renderer import render_reading_block
-                        html = render_reading_block(
-                            context.text_id,
-                            context.content,
-                            context.words,
-                            title=context.title,
-                            title_words=context.title_words,
-                            title_translation=context.title_translation
-                        )
+    with patch.object(service.title_service, 'get_title', return_value=("Hola Title", "Hello Title")):
+        with patch.object(service.title_service, 'get_title_words', return_value=[]):
+            # Mock ReadinessService to avoid "no sentences" retry logic affecting status
+            with patch.object(service.readiness_service, 'evaluate', return_value=(True, "both")):
+                # Force selection service to pick our text
+                with patch.object(service.selection_service, 'pick_current_or_new', return_value=rt):
+                    
+                    # 2. Action
+                    context = service.get_current_reading_context(db_session, test_user.id)
+                    
+                    # 3. Render (call the renderer logic directly or via context)
+                    from server.views.reading_renderer import render_reading_block
+                    html = render_reading_block(
+                        context.text_id,
+                        context.content,
+                        context.words,
+                        title=context.title,
+                        title_words=context.title_words,
+                        title_translation=context.title_translation
+                    )
 
     # 4. Assertions
     assert "Hola mundo." in html

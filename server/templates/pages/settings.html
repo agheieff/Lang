@@ -21,30 +21,6 @@
     <h2 class="text-xl font-bold mb-4">Language Learning Preferences</h2>
     <p class="text-gray-600 mb-6">Configure your preferences for reading generation and content selection.</p>
 
-    <!-- Text Preferences Field -->
-    <div class="mb-6">
-      <label for="text-preferences" class="block text-sm font-medium text-gray-700 mb-2">
-        Reading Content Preferences
-      </label>
-      <textarea
-        id="text-preferences"
-        name="text-preferences"
-        rows="4"
-        class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-        placeholder="Describe topics, themes, or content types you'd like to see in generated readings. For example: 'travel, technology, daily life, cultural topics, business conversations'"
-        hx-put="/me/profile?lang={{ current_profile.lang }}&target_lang={{ current_profile.target_lang }}"
-        hx-trigger="change delay:500ms"
-        hx-ext="json-enc"
-        hx-on--config-request="(function(){try{var el=event.detail&&event.detail.elt?event.detail.elt:null;var val=el&&('value'in el)?el.value:'';event.detail.headers=event.detail.headers||{};event.detail.headers['Content-Type']='application/json';event.detail.parameters={text_preferences: String(val||'').trim()};}catch(e){}})()"
-        hx-target="#preferences-status"
-        hx-swap="innerHTML"
-      >{{ current_profile.text_preferences or '' }}</textarea>
-      <div id="preferences-status" class="mt-2 text-sm text-gray-500"></div>
-      <p class="mt-1 text-sm text-gray-500">
-        These preferences help customize the content of generated readings to match your interests.
-      </p>
-    </div>
-
     <!-- Text Length Field -->
     <div class="mb-6">
       <label for="text-length" class="block text-sm font-medium text-gray-700 mb-2">
@@ -123,8 +99,10 @@
 
   <!-- Topic Interests Section -->
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-    <h2 class="text-xl font-bold mb-2">Topic Interests</h2>
-    <p class="text-gray-600 mb-4">Adjust topic weights to influence what kinds of texts are generated for you.</p>
+    <h2 class="text-xl font-bold mb-2">Reading Preferences</h2>
+    <p class="text-gray-600 mb-4">Current topic weights and reading length. Use the message box below to adjust.</p>
+    
+    <!-- Current topics display -->
     <div id="topics-section" hx-get="/settings/topics?lang={{ current_profile.lang }}" hx-trigger="load" hx-select="unset">
       <div class="animate-pulse space-y-3">
         <div class="h-8 bg-gray-100 rounded w-1/4"></div>
@@ -135,7 +113,160 @@
         </div>
       </div>
     </div>
+    
+    <!-- Preferences update via chat -->
+    <div class="mt-6 border-t pt-4">
+      <label class="block text-sm font-medium text-gray-700 mb-2">Update Preferences</label>
+      <p class="text-sm text-gray-500 mb-3">
+        Describe what you want to change. Examples: "I'm interested in technology and science", 
+        "Make texts shorter", "Less news, more fiction", "I want to read about Chinese history and culture"
+      </p>
+      <div class="flex gap-2">
+        <input
+          type="text"
+          id="preferences-message"
+          class="flex-1 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          placeholder="e.g., More technology topics, shorter texts..."
+        >
+        <button
+          type="button"
+          id="update-preferences-btn"
+          onclick="updatePreferencesViaChat()"
+          class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Update
+        </button>
+      </div>
+      <div id="preferences-update-status" class="mt-2 text-sm"></div>
+    </div>
   </div>
+  
+  <script>
+  let prefsPolling = null;
+  let wasPolling = false;  // Track if we were actually polling
+  
+  async function checkPrefsStatus() {
+    const btn = document.getElementById('update-preferences-btn');
+    const status = document.getElementById('preferences-update-status');
+    const input = document.getElementById('preferences-message');
+    
+    try {
+      const resp = await fetch('/settings/preferences/status');
+      const data = await resp.json();
+      
+      if (data.updating) {
+        // Still updating, keep polling
+        wasPolling = true;
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+        status.textContent = 'Processing your request...';
+        status.className = 'mt-2 text-sm text-gray-500';
+        return true;
+      } else {
+        // Done updating
+        btn.disabled = false;
+        btn.textContent = 'Update';
+        
+        // Only show success if we were actually polling
+        if (wasPolling) {
+          wasPolling = false;
+          status.textContent = 'Preferences updated!';
+          status.className = 'mt-2 text-sm text-green-600';
+          input.value = '';
+          
+          // Reload topics section
+          const topicsSection = document.getElementById('topics-section');
+          if (topicsSection) {
+            const topicsResp = await fetch('/settings/topics?lang={{ current_profile.lang }}');
+            topicsSection.innerHTML = await topicsResp.text();
+            htmx.process(topicsSection);
+          }
+          
+          // Update text length
+          if (data.text_length !== undefined) {
+            const lengthInput = document.getElementById('text-length');
+            if (lengthInput) lengthInput.value = data.text_length;
+          }
+        }
+        return false;
+      }
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'Update';
+      return false;
+    }
+  }
+  
+  function startPrefsPolling() {
+    wasPolling = true;  // We started an update
+    if (prefsPolling) clearInterval(prefsPolling);
+    prefsPolling = setInterval(async () => {
+      const stillUpdating = await checkPrefsStatus();
+      if (!stillUpdating && prefsPolling) {
+        clearInterval(prefsPolling);
+        prefsPolling = null;
+      }
+    }, 1500);
+  }
+  
+  async function updatePreferencesViaChat() {
+    const input = document.getElementById('preferences-message');
+    const btn = document.getElementById('update-preferences-btn');
+    const status = document.getElementById('preferences-update-status');
+    const message = (input.value || '').trim();
+    
+    if (!message) {
+      status.textContent = 'Please enter a message';
+      status.className = 'mt-2 text-sm text-red-500';
+      return;
+    }
+    
+    btn.disabled = true;
+    btn.textContent = 'Updating...';
+    status.textContent = 'Processing your request...';
+    status.className = 'mt-2 text-sm text-gray-500';
+    
+    try {
+      const resp = await fetch('/settings/preferences/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: message })
+      });
+      
+      const data = await resp.json();
+      
+      if (resp.ok && data.success) {
+        if (data.status === 'updating') {
+          // Start polling for completion
+          startPrefsPolling();
+        } else {
+          // Immediate completion (shouldn't happen with async)
+          status.textContent = data.message || 'Preferences updated!';
+          status.className = 'mt-2 text-sm text-green-600';
+          btn.disabled = false;
+          btn.textContent = 'Update';
+          input.value = '';
+        }
+      } else {
+        status.textContent = data.error || 'Failed to update preferences';
+        status.className = 'mt-2 text-sm text-red-500';
+        btn.disabled = false;
+        btn.textContent = 'Update';
+      }
+    } catch (e) {
+      status.textContent = 'Error: ' + e.message;
+      status.className = 'mt-2 text-sm text-red-500';
+      btn.disabled = false;
+      btn.textContent = 'Update';
+    }
+  }
+  
+  // Check on page load if an update is in progress
+  document.addEventListener('DOMContentLoaded', async () => {
+    const stillUpdating = await checkPrefsStatus();
+    if (stillUpdating) startPrefsPolling();
+  });
+  </script>
   {% else %}
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
     <h2 class="text-xl font-bold mb-2">Language Learning Preferences</h2>

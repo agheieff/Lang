@@ -403,22 +403,26 @@ class SessionProcessingService:
             if new_ci != ci_pref:
                 profile.ci_preference = new_ci
             
-            # Adapt topic weights based on engagement
-            text_topic = getattr(text, 'topic', None)
-            if text_topic:
+            # Adapt topic weights based on engagement (handles multiple comma-separated topics)
+            text_topic_str = getattr(text, 'topic', None)
+            if text_topic_str:
+                text_topics = [t.strip() for t in text_topic_str.split(',') if t.strip()]
                 topic_weights = getattr(profile, 'topic_weights', None) or {}
-                read_time_ms = session_data.get("read_time_ms", 0)
+                read_time_ms = session_data.get("read_time_ms") or 0
+                if not isinstance(read_time_ms, (int, float)):
+                    read_time_ms = 0
                 
-                # Simple heuristic: if user spent good amount of time, boost topic
+                # Simple heuristic: if user spent good amount of time, boost topics
                 # If they rushed through (< 30 seconds), slightly reduce
-                if read_time_ms > 60000:  # > 1 minute
-                    old_weight = topic_weights.get(text_topic, 1.0)
-                    topic_weights[text_topic] = min(2.0, old_weight * 1.05)
-                    print(f"[ADAPT] Good engagement with '{text_topic}', boosting weight")
-                elif read_time_ms > 0 and read_time_ms < 30000:  # < 30 seconds
-                    old_weight = topic_weights.get(text_topic, 1.0)
-                    topic_weights[text_topic] = max(0.2, old_weight * 0.95)
-                    print(f"[ADAPT] Quick read of '{text_topic}', reducing weight slightly")
+                for topic in text_topics:
+                    if read_time_ms > 60000:  # > 1 minute
+                        old_weight = topic_weights.get(topic, 1.0)
+                        topic_weights[topic] = min(2.0, old_weight * 1.05)
+                        print(f"[ADAPT] Good engagement with '{topic}', boosting weight")
+                    elif read_time_ms > 0 and read_time_ms < 30000:  # < 30 seconds
+                        old_weight = topic_weights.get(topic, 1.0)
+                        topic_weights[topic] = max(0.2, old_weight * 0.95)
+                        print(f"[ADAPT] Quick read of '{topic}', reducing weight slightly")
                 
                 profile.topic_weights = topic_weights
             

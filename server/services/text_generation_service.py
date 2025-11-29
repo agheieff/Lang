@@ -60,9 +60,23 @@ class TextGenerationService:
     - Notification sending (handled by NotificationService)
     """
     
+    _instance: Optional['TextGenerationService'] = None
+    _instance_lock = threading.Lock()
+    
+    def __new__(cls):
+        # Singleton pattern to share in-memory state across requests
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+    
     def __init__(self):
+        if getattr(self, '_initialized', False):
+            return
         self._running: set[Tuple[int, str]] = set()  # (account_id,_lang) pairs
         self._running_lock = threading.Lock()
+        self._initialized = True
     
     def create_placeholder_text(
         self, 
@@ -375,3 +389,8 @@ class TextGenerationService:
         key = (int(account_id), str(lang))
         with self._running_lock:
             self._running.discard(key)
+
+
+def get_text_generation_service() -> TextGenerationService:
+    """Get the singleton TextGenerationService instance."""
+    return TextGenerationService()

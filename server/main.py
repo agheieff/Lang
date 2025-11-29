@@ -22,12 +22,21 @@ from .routes.srs import router as srs_router
 from .routes.ui import router as ui_router
 from .routes.settings import router as settings_router
 from .routes.user_models import router as user_models_router, htmx_router as user_models_htmx_router
+from .services.background_worker import get_background_worker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    
+    # Start background worker for pool management
+    worker = get_background_worker(interval_seconds=30)
+    worker.start()
+    
     yield
+    
+    # Stop background worker on shutdown
+    worker.stop()
 
 
 app = FastAPI(lifespan=lifespan, title="Arcadia Lang", version="0.1.0")

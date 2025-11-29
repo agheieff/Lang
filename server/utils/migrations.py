@@ -25,6 +25,10 @@ def ensure_reading_text_lifecycle_columns(db: Session) -> None:
             "is_read": "ALTER TABLE reading_texts ADD COLUMN is_read BOOLEAN DEFAULT 0",
             "read_at": "ALTER TABLE reading_texts ADD COLUMN read_at TIMESTAMP",
             "opened_at": "ALTER TABLE reading_texts ADD COLUMN opened_at TIMESTAMP",
+            "words_complete": "ALTER TABLE reading_texts ADD COLUMN words_complete BOOLEAN DEFAULT 0",
+            "sentences_complete": "ALTER TABLE reading_texts ADD COLUMN sentences_complete BOOLEAN DEFAULT 0",
+            "translation_attempts": "ALTER TABLE reading_texts ADD COLUMN translation_attempts INTEGER DEFAULT 0",
+            "last_translation_attempt": "ALTER TABLE reading_texts ADD COLUMN last_translation_attempt TIMESTAMP",
         }
         for name, ddl in cols.items():
             if not _has_column(insp, "reading_texts", name):

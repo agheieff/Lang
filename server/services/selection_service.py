@@ -32,7 +32,7 @@ class SelectionService:
         pool_service = get_pool_selection_service()
         rt = pool_service.select_from_pool(db, account_id, lang, prof)
         
-        # Case 3: Fallback to any unopened text if pool selection failed
+        # Case 3: Fallback to any ready unopened text if pool selection failed
         if not rt:
             rt = (
                 db.query(ReadingText)
@@ -41,7 +41,9 @@ class SelectionService:
                     ReadingText.lang == lang, 
                     ReadingText.opened_at.is_(None),
                     ReadingText.content.is_not(None),
-                    ReadingText.content != ""
+                    ReadingText.content != "",
+                    ReadingText.words_complete == True,
+                    ReadingText.sentences_complete == True,
                 )
                 .order_by(ReadingText.created_at.asc())
                 .first()

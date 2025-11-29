@@ -12,6 +12,36 @@ from ..llm.client import chat_complete
 
 logger = logging.getLogger(__name__)
 
+# Model to use for preference parsing (server-wide setting)
+PREFERENCES_MODEL = "x-ai/grok-4.1-fast:free"
+
+UPDATE_PREFERENCES_PROMPT = """You are a preferences assistant for a language learning app.
+
+The user has current reading preferences:
+- Topic weights (0.5 = less interested, 1.0 = neutral, 2.0 = very interested):
+{current_weights}
+- Current text length: {current_length} {length_unit}
+
+Available topics: {topics}
+
+User's request: {message}
+
+Based on the user's request, output a JSON object with the updated preferences. Only include fields that should change.
+
+Rules:
+- For topic weights: adjust weights based on what user wants more/less of (range 0.5-2.0)
+- For text_length: adjust if user mentions length, shorter, longer (range 50-2000)
+- If user's request is unclear or doesn't relate to preferences, return {{"no_change": true}}
+
+Example outputs:
+- User says "more science and technology": {{"topic_weights": {{"science": 1.8, "technology": 1.8}}}}
+- User says "shorter texts": {{"text_length": 150}}
+- User says "I like history, less news": {{"topic_weights": {{"history": 1.8, "news": 0.5}}}}
+- User says "hello": {{"no_change": true}}
+
+Respond with ONLY valid JSON, no explanation."""
+
+
 PARSE_INTERESTS_PROMPT = """You are a classifier that maps user interests to topic categories.
 
 Given the user's interests and a list of available topics, output a JSON object with weights (0.5 to 2.0) for each topic based on relevance to their interests.
@@ -63,7 +93,7 @@ def parse_interests_to_weights(
         response = chat_complete(
             messages=messages,
             provider="openrouter",
-            model="openai/gpt-4o-mini",  # Fast and cheap for this task
+            model=PREFERENCES_MODEL,
             user_api_key=user_api_key,
         )
         
@@ -144,3 +174,118 @@ def get_effective_weight(topic_weights: dict[str, float], topic_path: str) -> fl
     #         return topic_weights[parent] * (decay ** levels_up)
     
     return 1.0
+
+
+def update_preferences_from_message(
+    message: str,
+    current_weights: dict[str, float],
+    current_text_length: int,
+    available_topics: Optional[list[str]] = None,
+    user_api_key: Optional[str] = None,
+) -> dict:
+    """
+    Update preferences based on a natural language message from the user.
+    
+    Args:
+        message: User's natural language request
+        current_weights: Current topic weights dict
+        current_text_length: Current text length setting
+        available_topics: List of available topics
+        user_api_key: Optional user-specific API key
+        
+    Returns:
+        Dict with 'success', and optionally 'topic_weights', 'text_length', 'error'
+    """
+    if not message or not message.strip():
+        return {"success": False, "error": "No message provided"}
+    
+    topics = available_topics or TOPICS
+    
+    # Format current weights for prompt
+    weights_str = json.dumps(current_weights, indent=2)
+    
+    # Determine length unit (Chinese uses characters, others use words)
+    length_unit = "characters"  # Default, could be made dynamic based on profile.lang
+    
+    prompt = UPDATE_PREFERENCES_PROMPT.format(
+        current_weights=weights_str,
+        current_length=current_text_length,
+        length_unit=length_unit,
+        topics=", ".join(topics),
+        message=message.strip(),
+    )
+    
+    messages = [{"role": "user", "content": prompt}]
+    
+    try:
+        response = chat_complete(
+            messages=messages,
+            provider="openrouter",
+            model=PREFERENCES_MODEL,
+            user_api_key=user_api_key,
+        )
+        
+        if not response:
+            logger.warning("Empty response from LLM for preferences update")
+            return {"success": False, "error": "No response from AI"}
+        
+        # Parse JSON from response
+        result = _parse_preferences_response(response, topics, current_weights, current_text_length)
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to update preferences: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def _parse_preferences_response(
+    content: str,
+    topics: list[str],
+    current_weights: dict[str, float],
+    current_length: int,
+) -> dict:
+    """Parse the LLM response for preference updates."""
+    # Try to extract JSON from response
+    json_str = content.strip()
+    if "```" in json_str:
+        start = json_str.find("{")
+        end = json_str.rfind("}") + 1
+        if start >= 0 and end > start:
+            json_str = json_str[start:end]
+    
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning(f"Failed to parse JSON from preferences response: {content[:200]}")
+        return {"success": False, "error": "Could not understand the response"}
+    
+    if not isinstance(data, dict):
+        return {"success": False, "error": "Invalid response format"}
+    
+    # Check for no_change
+    if data.get("no_change"):
+        return {"success": True, "message": "No changes needed"}
+    
+    result = {"success": True}
+    
+    # Process topic weights (merge with current, only update specified topics)
+    if "topic_weights" in data and isinstance(data["topic_weights"], dict):
+        new_weights = current_weights.copy()
+        for topic, weight in data["topic_weights"].items():
+            if topic in topics:
+                try:
+                    w = float(weight)
+                    new_weights[topic] = max(0.5, min(2.0, w))
+                except (ValueError, TypeError):
+                    pass
+        result["topic_weights"] = new_weights
+    
+    # Process text length
+    if "text_length" in data:
+        try:
+            length = int(data["text_length"])
+            result["text_length"] = max(50, min(2000, length))
+        except (ValueError, TypeError):
+            pass
+    
+    return result

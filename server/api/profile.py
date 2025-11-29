@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,12 +9,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..db import get_global_db
-from ..account_db import get_db, open_account_session
+from ..account_db import get_db
 from ..models import Profile, ProfilePref
 from server.auth import Account
 from ..deps import get_current_account
 from ..repos.profiles import get_or_create_profile, get_pref_row, get_user_profile
-from ..services.interests_parser import parse_interests_to_weights
+from ..services.interests_parser import parse_interests_to_weights, update_preferences_from_message
 from ..config import TOPICS, DEFAULT_TOPIC_WEIGHTS
 
 logger = logging.getLogger(__name__)
@@ -126,8 +125,11 @@ def create_profile(
             prof.text_length = n
         except Exception:
             prof.text_length = None
+    # Store raw preferences text (will be parsed below)
+    preferences_message = None
     if req.text_preferences is not None:
-        prof.text_preferences = (req.text_preferences or '').strip() or None
+        preferences_message = (req.text_preferences or '').strip() or None
+        prof.text_preferences = preferences_message
 
     # Add profile to database
     db.add(prof)
@@ -138,7 +140,59 @@ def create_profile(
         pref = ProfilePref(profile_id=prof.id, data=req.settings)
         db.add(pref)
 
-    db.commit()
+    # Parse preferences via LLM in background if provided
+    if preferences_message:
+        prof.preferences_updating = True
+        db.commit()
+        
+        # Start background thread for LLM parsing
+        import threading
+        from server.account_db import open_account_session
+        
+        def _parse_initial_preferences():
+            try:
+                result = update_preferences_from_message(
+                    message=preferences_message,
+                    current_weights=DEFAULT_TOPIC_WEIGHTS.copy(),
+                    current_text_length=prof.text_length or 300,
+                    available_topics=TOPICS,
+                )
+                
+                # Open new session for background thread
+                bg_db = open_account_session(account.id)
+                try:
+                    bg_prof = bg_db.query(Profile).filter(Profile.id == prof.id).first()
+                    if bg_prof and result.get("success"):
+                        if result.get("topic_weights"):
+                            bg_prof.topic_weights = result["topic_weights"]
+                        if result.get("text_length") is not None:
+                            bg_prof.text_length = result["text_length"]
+                        logger.info(f"[PROFILE] Parsed preferences for new profile {prof.id}")
+                    if bg_prof:
+                        bg_prof.preferences_updating = False
+                    bg_db.commit()
+                finally:
+                    bg_db.close()
+            except Exception as e:
+                logger.error(f"[PROFILE] Failed to parse preferences on create: {e}")
+                try:
+                    bg_db = open_account_session(account.id)
+                    bg_prof = bg_db.query(Profile).filter(Profile.id == prof.id).first()
+                    if bg_prof:
+                        bg_prof.preferences_updating = False
+                        bg_db.commit()
+                    bg_db.close()
+                except:
+                    pass
+        
+        thread = threading.Thread(
+            target=_parse_initial_preferences,
+            name=f"prefs-init-{account.id}",
+            daemon=True,
+        )
+        thread.start()
+    else:
+        db.commit()
 
     return {
         "ok": True,
@@ -215,34 +269,8 @@ def update_profile(
         except Exception:
             prof.text_length = None
     if req.text_preferences is not None:
-        old_prefs = prof.text_preferences
-        new_prefs = (req.text_preferences or '').strip() or None
-        prof.text_preferences = new_prefs
-        
-        # Async parse interests to topic_weights if changed
-        if new_prefs != old_prefs:
-            profile_id = prof.id
-            account_id = account.id
-            
-            def _parse_interests_async():
-                try:
-                    async_db = open_account_session(account_id)
-                    try:
-                        async_prof = async_db.query(Profile).filter(Profile.id == profile_id).first()
-                        if async_prof:
-                            if new_prefs:
-                                weights = parse_interests_to_weights(new_prefs, TOPICS)
-                            else:
-                                weights = DEFAULT_TOPIC_WEIGHTS.copy()
-                            async_prof.topic_weights = weights
-                            async_db.commit()
-                            logger.info(f"[INTERESTS] Parsed preferences for profile {profile_id}: {weights}")
-                    finally:
-                        async_db.close()
-                except Exception as e:
-                    logger.error(f"[INTERESTS] Failed to parse preferences: {e}")
-            
-            threading.Thread(target=_parse_interests_async, daemon=True, name=f"interests-{profile_id}").start()
+        # Just store the value, no longer used for auto-parsing (use /settings/preferences/update instead)
+        prof.text_preferences = (req.text_preferences or '').strip() or None
 
     db.commit()
     return {"ok": True}

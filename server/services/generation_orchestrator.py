@@ -12,7 +12,6 @@ from ..utils.session_manager import db_manager
 from ..db import GlobalSessionLocal
 from sqlalchemy.orm import Session
 
-from .retry_service import RetryService
 from .readiness_service import ReadinessService
 from .state_manager import GenerationStateManager
 from .text_generation_service import TextGenerationService, TextGenerationResult
@@ -40,8 +39,20 @@ class GenerationOrchestrator:
     - Retry logic (recovering from failures)
     """
     
+    _instance: Optional['GenerationOrchestrator'] = None
+    _instance_lock = threading.Lock()
+    
+    def __new__(cls):
+        # Singleton pattern to share state across requests
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+    
     def __init__(self):
-        self.retry_service = RetryService()
+        if getattr(self, '_initialized', False):
+            return
         self.readiness_service = ReadinessService()
         self.state_manager = GenerationStateManager()
         self.text_gen_service = TextGenerationService()
@@ -49,14 +60,12 @@ class GenerationOrchestrator:
         self.validation_service = TranslationValidationService()
         self.notification_service = get_notification_service()
         self.file_lock = FileLock(ttl_seconds=float(os.getenv("ARC_GEN_LOCK_TTL_SEC", "300")))
+        self._initialized = True
     
     def ensure_text_available(self, db: Session, account_id: int, lang: str) -> None:
         """
         Ensure the text pool has available texts. Triggers generation if needed.
-        
-        Called from multiple places (page load, next text, after generation).
-        Starts ONE generation job if pool is low - the job will call back to
-        continue filling the pool until it's full.
+        Called by background worker to maintain pool.
         """
         pool_service = get_pool_selection_service()
         
@@ -69,6 +78,71 @@ class GenerationOrchestrator:
             return
         
         self._start_generation_job(db, account_id, lang)
+    
+    def retry_incomplete_texts(self, db: Session, account_id: int, lang: str) -> int:
+        """
+        Retry translation for incomplete texts that are due for retry.
+        Returns number of texts queued for retry.
+        """
+        from ..models import ReadingText
+        
+        MAX_ATTEMPTS = 5
+        now = datetime.utcnow()
+        retried = 0
+        
+        # Find texts with content but incomplete translations
+        incomplete = (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.account_id == account_id,
+                ReadingText.lang == lang,
+                ReadingText.content.isnot(None),
+                # Not fully complete
+                ((ReadingText.words_complete == False) | (ReadingText.sentences_complete == False)),
+            )
+            .all()
+        )
+        
+        for text in incomplete:
+            attempts = text.translation_attempts or 0
+            last_attempt = text.last_translation_attempt
+            
+            # Check if max attempts reached - delete it
+            if attempts >= MAX_ATTEMPTS:
+                logger.warning(f"[ORCHESTRATOR] Deleting text {text.id} - max attempts ({MAX_ATTEMPTS}) reached")
+                from ..models import ReadingWordGloss, ReadingTextTranslation
+                db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text.id).delete()
+                db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text.id).delete()
+                db.delete(text)
+                continue
+            
+            # Check backoff - exponential: 1, 2, 4, 8, 16 minutes
+            if last_attempt:
+                backoff_seconds = 60 * (2 ** attempts)  # 60, 120, 240, 480, 960 seconds
+                seconds_since = (now - last_attempt).total_seconds()
+                if seconds_since < backoff_seconds:
+                    logger.debug(f"[ORCHESTRATOR] Text {text.id} in backoff ({seconds_since:.0f}s < {backoff_seconds}s)")
+                    continue
+            
+            # Queue for retry
+            logger.info(f"[ORCHESTRATOR] Retrying translation for text {text.id} (attempt {attempts + 1})")
+            job_dir = self._get_job_dir(account_id, lang)
+            
+            # Start translation job (will increment attempt counter)
+            self._start_translation_job(
+                account_id, lang, text.id,
+                text.content, text.title if hasattr(text, 'title') else None,
+                job_dir, []  # Empty messages - translation service will handle
+            )
+            retried += 1
+        
+        if retried > 0:
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+        
+        return retried
     
     def _start_generation_job(self, db: Session, account_id: int, lang: str) -> None:
         """Start a full generation job in a background thread."""
@@ -137,12 +211,8 @@ class GenerationOrchestrator:
             
             logger.info(f"[ORCHESTRATOR] Generation job completed successfully for text_id={text_id}")
             
-            # Step 7: Check if pool needs more texts (chain backfill)
-            try:
-                with db_manager.transaction(account_id) as db:
-                    self.ensure_text_available(db, account_id, lang)
-            except Exception as e:
-                logger.debug(f"[ORCHESTRATOR] Backfill check failed: {e}")
+            # Mark this generation as complete so background worker can start another if needed
+            self.text_gen_service.mark_generation_completed(account_id, lang)
             
         except Exception as e:
             logger.error(f"[ORCHESTRATOR] Generation job failed: {e}", exc_info=True)
@@ -291,12 +361,12 @@ class GenerationOrchestrator:
                                text_title: Optional[str],
                                job_dir: Path,
                                reading_messages: list) -> None:
-        """Start translation job in background thread."""
+        """Start translation job in background thread (non-daemon to ensure completion)."""
         thread = threading.Thread(
             target=self._run_translation_job,
             args=(account_id, lang, text_id, text_content, text_title, job_dir, reading_messages),
             name=f"translations-{account_id}-{text_id}",
-            daemon=True,
+            daemon=False,  # Non-daemon so thread completes even if main exits
         )
         thread.start()
     
@@ -309,8 +379,25 @@ class GenerationOrchestrator:
                             job_dir: Path,
                             reading_messages: list) -> None:
         """Run the translation job (words + sentences) using TranslationService."""
+        from ..models import ReadingText
+        MAX_ATTEMPTS = 5
+        
+        # Track this attempt
         try:
-            # Get database sessions
+            with db_manager.transaction(account_id) as db:
+                text = db.get(ReadingText, text_id)
+                if text:
+                    text.translation_attempts = (text.translation_attempts or 0) + 1
+                    text.last_translation_attempt = datetime.utcnow()
+                    current_attempt = text.translation_attempts
+                    logger.info(f"[ORCHESTRATOR] Translation attempt {current_attempt}/{MAX_ATTEMPTS} for text_id={text_id}")
+        except Exception as e:
+            logger.warning(f"[ORCHESTRATOR] Failed to track translation attempt: {e}")
+            current_attempt = 1
+        
+        translation_success = False
+        try:
+            # Get database sessions - use separate transaction for actual work
             with db_manager.transaction(account_id) as account_db:
                 global_db = GlobalSessionLocal()
                 try:
@@ -324,41 +411,72 @@ class GenerationOrchestrator:
                         text_title=text_title,
                         job_dir=job_dir,
                         reading_messages=reading_messages,
-                        provider=None,  # Let translation service pick model
+                        provider=None,
                         model_id=None,
                         base_url=None
                     )
+                    translation_success = translation_result.success
                 finally:
-                    # Always close global database session
                     global_db.close()
             
             if translation_result.success:
                 # Validate and potentially backfill missing translations
                 completeness = self.validation_service.validate_and_backfill(account_id, text_id)
                 
-                # Log validation results
                 logger.info(f"[ORCHESTRATOR] Translation validation for text_id={text_id}: "
                       f"words={completeness['words']}, sentences={completeness['sentences']}, title={completeness['title']}")
                 
                 # Notify translations are ready
                 self.notification_service.send_translations_ready(account_id, lang, text_id)
-                
-                # Check if this is a backup text (unopened) and notify next_ready
                 self._notify_next_ready_if_backup(account_id, lang, text_id)
                 
                 logger.info(f"[ORCHESTRATOR] Translations completed for text_id={text_id}")
             else:
                 logger.error(f"[ORCHESTRATOR] Translation job failed for text_id={text_id}: {translation_result.error}")
-                # For partial failures, still notify that something is ready
                 if translation_result.words or translation_result.sentences:
-                    # Try validation even for partial failures
                     completeness = self.validation_service.validate_and_backfill(account_id, text_id)
                     self.notification_service.send_translations_ready(account_id, lang, text_id)
-                    # Also check for next_ready on partial success
                     self._notify_next_ready_if_backup(account_id, lang, text_id)
             
         except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Translation job failed: {e}", exc_info=True)
+            logger.error(f"[ORCHESTRATOR] Translation job exception: {e}", exc_info=True)
+        
+        # Handle failure - check if we should delete or schedule retry
+        if not translation_success:
+            self._handle_translation_failure(account_id, lang, text_id, current_attempt, MAX_ATTEMPTS)
+    
+    def _handle_translation_failure(self, account_id: int, lang: str, text_id: int, 
+                                    current_attempt: int, max_attempts: int) -> None:
+        """Handle translation failure - delete text if max attempts reached."""
+        from ..models import ReadingText, ReadingWordGloss, ReadingTextTranslation
+        
+        try:
+            with db_manager.transaction(account_id) as db:
+                text = db.get(ReadingText, text_id)
+                if not text:
+                    return
+                
+                # Check if text is now complete (might have succeeded partially)
+                if text.words_complete and text.sentences_complete:
+                    logger.info(f"[ORCHESTRATOR] Text {text_id} completed despite earlier issues")
+                    return
+                
+                if current_attempt >= max_attempts:
+                    # Delete the broken text and its translations
+                    logger.warning(f"[ORCHESTRATOR] Deleting text {text_id} after {max_attempts} failed attempts")
+                    
+                    # Delete associated data
+                    db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text_id).delete()
+                    db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text_id).delete()
+                    db.delete(text)
+                    
+                    logger.info(f"[ORCHESTRATOR] Deleted broken text {text_id}")
+                else:
+                    # Schedule retry with exponential backoff
+                    backoff_minutes = 2 ** (current_attempt - 1)  # 1, 2, 4, 8, 16 minutes
+                    logger.info(f"[ORCHESTRATOR] Text {text_id} will be retried (attempt {current_attempt}/{max_attempts}, backoff {backoff_minutes}m)")
+        except Exception as e:
+            logger.error(f"[ORCHESTRATOR] Error handling translation failure: {e}")
     
     def _notify_next_ready_if_backup(self, account_id: int, lang: str, text_id: int) -> None:
         """Send next_ready event if this text is a backup (unopened) text."""
@@ -383,95 +501,8 @@ class GenerationOrchestrator:
         job_dir = base / ts
         job_dir.mkdir(parents=True, exist_ok=True)
         return job_dir
-    
-    def retry_failed_components(self, account_id: int, text_id: int) -> dict:
-        """Retry all missing components for a text.
-        Uses retry_actions to regenerate only the missing parts.
-        """
-        from .retry_actions import retry_missing_words as _retry_words, retry_missing_sentences as _retry_sents
 
-        results = {"words": False, "sentences": False, "error": None}
 
-        try:
-            with db_manager.transaction(account_id) as db:
-                failed_components = self.readiness_service.get_failed_components(db, account_id, text_id)
-                if not (failed_components.get("words") or failed_components.get("sentences")):
-                    return results
-
-                can_retry, reason = self.retry_service.can_retry(db, account_id, text_id, failed_components)
-                if not can_retry:
-                    results["error"] = reason or "cannot_retry"
-                    return results
-
-                retry_record = self.retry_service.create_retry_attempt(db, account_id, text_id, failed_components)
-                if not retry_record:
-                    results["error"] = "failed_to_create_retry_record"
-                    return results
-
-                log_dir = self.retry_service.get_existing_log_directory(account_id, text_id)
-                if not log_dir:
-                    results["error"] = "no_existing_log_directory"
-                    return results
-
-                completed = {}
-                if failed_components.get("words"):
-                    results["words"] = _retry_words(account_id, text_id, log_dir)
-                    completed["words"] = results["words"]
-                if failed_components.get("sentences"):
-                    results["sentences"] = _retry_sents(account_id, text_id, log_dir)
-                    completed["sentences"] = results["sentences"]
-
-                error_msg = None if all(
-                    [not failed_components.get("words") or results["words"],
-                     not failed_components.get("sentences") or results["sentences"]]
-                ) else "partial_failure"
-                self.retry_service.mark_retry_completed(db, getattr(retry_record, "id", None), completed, error_details=error_msg)
-
-        except Exception as e:
-            logger.error(f"[RETRY] General error in retry_failed_components for text_id={text_id}: {e}", exc_info=True)
-            results["error"] = str(e)
-
-        return results
-    
-    def check_and_retry_failed_texts(self, db: Session, account_id: int, lang: str) -> list:
-        """Check for failed texts and attempt retries if allowed."""
-        try:
-            logger.info(f"[RETRY] Checking for failed texts to retry for account_id={account_id} lang={lang}")
-        except Exception:
-            pass
-        
-        failed_texts = self.retry_service.get_failed_texts_for_retry(db, account_id, lang, limit=3)
-        
-        try:
-            if not failed_texts:
-                logger.info("[RETRY] No failed texts found - everything looks good!")
-            else:
-                logger.info(f"[RETRY] Found {len(failed_texts)} failed texts, retrying: {[t.id for t in failed_texts]}")
-        except Exception:
-            pass
-        
-        # Trigger retries in background threads to avoid blocking
-        for text in failed_texts:
-            def retry_in_background():
-                try:
-                    if result.get("error"):
-                        try:
-                            logger.error(f"[RETRY] Retry failed for text_id={text.id}: {result['error']}")
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            logger.info(f"[RETRY] Successfully initiated retry for text_id={text.id}")
-                        except Exception:
-                            pass
-                            
-                except Exception as e:
-                    try:
-                        logger.error(f"[RETRY] Error retrying text_id={text.id}: {e}", exc_info=True)
-                    except Exception:
-                        pass
-            
-            thread = threading.Thread(target=retry_in_background, daemon=True, name=f"retry-{account_id}-{text.id}")
-            thread.start()
-        
-        return [{"text_id": t.id, "status": "retry_initiated"} for t in failed_texts]
+def get_generation_orchestrator() -> GenerationOrchestrator:
+    """Get the singleton GenerationOrchestrator instance."""
+    return GenerationOrchestrator()

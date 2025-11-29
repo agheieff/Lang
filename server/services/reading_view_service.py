@@ -14,12 +14,10 @@ from ..models import (
     ReadingTextTranslation,
     ReadingLookup,
 )
-from .generation_orchestrator import GenerationOrchestrator
 from .selection_service import SelectionService
 from .readiness_service import ReadinessService
 from .title_extraction_service import TitleExtractionService
 from .state_manager import GenerationStateManager
-from .retry_service import RetryService
 from .session_processing_service import SessionProcessingService
 
 logger = logging.getLogger(__name__)
@@ -54,7 +52,6 @@ class ReadingViewService:
     """
 
     def __init__(self):
-        self.orchestrator = GenerationOrchestrator()
         self.selection_service = SelectionService()
         self.state_manager = GenerationStateManager()
         self.readiness_service = ReadinessService()
@@ -86,12 +83,6 @@ class ReadingViewService:
                 text_obj = self.state_manager.get_unopened_text(db, account_id, lang)
             except Exception:
                 pass
-
-        # Ensure generation pipeline is active
-        try:
-            self.orchestrator.ensure_text_available(db, account_id, lang)
-        except Exception:
-            logger.exception("Failed to ensure text available")
 
         # Determine status if no text
         if text_obj is None:
@@ -125,16 +116,16 @@ class ReadingViewService:
         # Retrieve any persisted session state to restore progress
         session_state = self.session_service.get_persisted_session_state(db, account_id, text_id)
 
-        # Check if backup/next text is ready
+        # Check if any backup/next text is ready in the pool
         is_next_ready = False
         next_ready_reason = "waiting"
         try:
-            backup_text = self.readiness_service.next_unopened(db, account_id, lang)
-            if backup_text and backup_text.id != text_id:
-                backup_ready, backup_reason = self.readiness_service.evaluate(db, backup_text, account_id)
-                if backup_ready and backup_reason in ("both", "grace", "content_only"):
-                    is_next_ready = True
-                    next_ready_reason = backup_reason
+            backup_text, backup_reason = self.readiness_service.first_ready_backup(
+                db, account_id, lang, exclude_text_id=text_id
+            )
+            if backup_text:
+                is_next_ready = True
+                next_ready_reason = backup_reason
         except Exception:
             logger.debug("Failed to check backup text readiness", exc_info=True)
 
@@ -166,46 +157,19 @@ class ReadingViewService:
         Check if the next text is ready for the user.
         Used by both polling endpoint and SSE stream.
         """
-        # Ensure something is queued
-        try:
-            self.orchestrator.check_and_retry_failed_texts(db, account_id, lang)
-            self.orchestrator.ensure_text_available(db, account_id, lang)
-        except Exception:
-            logger.debug("Background tasks in check_next_text_readiness failed", exc_info=True)
-
+        # Check if ANY backup text is ready (not just the newest)
+        rt, reason = self.readiness_service.first_ready_backup(db, account_id, lang)
+        
+        if rt and reason in ("both", "grace", "content_only"):
+            return ReadinessStatus(ready=True, text_id=rt.id, reason=reason, status="complete")
+        
+        # Fall back to checking newest unopened for retry info
         rt = self.readiness_service.next_unopened(db, account_id, lang)
         
         if not rt:
             return ReadinessStatus(ready=False, text_id=None)
 
-        # Check for manual overrides
-        if getattr(rt, "content", None):
-             if self.readiness_service.consume_if_valid(db, account_id, lang):
-                 return ReadinessStatus(ready=True, text_id=rt.id, reason="manual_override", status="complete")
-             if force_check:
-                 try:
-                     self.readiness_service.force_once(db, account_id, lang)
-                     return ReadinessStatus(ready=True, text_id=rt.id, reason="manual", status="complete")
-                 except Exception:
-                     pass
-
         ready, reason = self.readiness_service.evaluate(db, rt, account_id)
-        
-        # Check retry status if waiting
-        retry_info = None
-        if not ready:
-             try:
-                failed = self.readiness_service.get_failed_components(db, account_id, rt.id)
-                if failed["words"] or failed["sentences"]:
-                    can_retry, retry_reason = self.orchestrator.retry_service.can_retry(db, account_id, rt.id, failed)
-                    if can_retry:
-                        retry_info = {
-                            "can_retry": True,
-                            "reason": retry_reason,
-                            "failed_components": failed
-                        }
-             except Exception:
-                 pass
 
         # Accept "both" (full), "grace" (partial after timeout), or "content_only" (no translations after long timeout)
         is_ready_final = ready and reason in ("both", "grace", "content_only")
@@ -214,6 +178,6 @@ class ReadingViewService:
             ready=is_ready_final,
             text_id=rt.id,
             reason=reason if ready else "waiting",
-            retry_info=retry_info,
+            retry_info=None,  # Retries are automatic via background worker
             status="complete" if is_ready_final else "waiting"
         )

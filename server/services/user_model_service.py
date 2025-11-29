@@ -270,7 +270,7 @@ class UserModelService:
         
         # Ultimate fallback
         return ResolvedModel(
-            model_id="moonshotai/kimi-k2:free",
+            model_id="x-ai/grok-4.1-fast:free",
             provider="openrouter",
             base_url="https://openrouter.ai/api/v1",
             api_key=os.getenv("OPENROUTER_API_KEY"),

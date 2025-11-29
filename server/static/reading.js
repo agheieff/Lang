@@ -106,7 +106,7 @@ function extractWordEvents(sessionData) {
     }
   }
   
-  // Process paragraph/sentence words
+  // Process paragraph/sentence words (nested structure)
   if (Array.isArray(sessionData.paragraphs)) {
     for (const para of sessionData.paragraphs) {
       if (Array.isArray(para.sentences)) {
@@ -118,6 +118,13 @@ function extractWordEvents(sessionData) {
           }
         }
       }
+    }
+  }
+  
+  // Fallback: flat words list (simpler structure, works better for Chinese)
+  if (Array.isArray(sessionData.words)) {
+    for (const word of sessionData.words) {
+      addWordEvent(word, !!word.looked_up_at);
     }
   }
   

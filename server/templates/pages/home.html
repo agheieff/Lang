@@ -129,12 +129,24 @@
                 lemma: w.lemma,
                 pos: w.pos,
                 translation: w.translation,
+                span_start: w.span_start,
+                span_end: w.span_end,
                 looked_up_at: null
               }))
             },
             full_text: textContent,
             full_translation: null,
             paragraphs: paragraphs,
+            // Flat words list for simpler extraction (works better for Chinese)
+            words: (bodyWords || []).map(w => ({
+              surface: w.surface,
+              lemma: w.lemma,
+              pos: w.pos,
+              translation: w.translation,
+              span_start: w.span_start,
+              span_end: w.span_end,
+              looked_up_at: null
+            })),
             analytics: {
               total_words: bodyWords ? bodyWords.length : 0,
               words_looked_up: 0,
@@ -200,6 +212,15 @@
           if (!textEl || !Array.isArray(words) || !words.length) return;
           makeClickable(textEl, words);
           attachTooltip(textEl, words);
+          // Also initialize session storage so words are tracked for SRS
+          const textId = textEl.dataset.textId;
+          if (textId) {
+            const titleEl = container && container.querySelector('#reading-title');
+            const titleText = titleEl ? titleEl.textContent.trim() : '';
+            const titleWords = getEmbeddedTitleWords() || [];
+            const textContent = textEl.textContent || '';
+            initUnifiedSession(textId, titleWords, words, textContent, titleText, 'en');
+          }
         } catch (_e) {}
       };
 
@@ -554,26 +575,31 @@
                     if (titleWord) {
                       titleWord.looked_up_at = lookupTime;
                     }
-                  } else if (sessionData.paragraphs) {
-                    // Find word in paragraphs structure and update looked_up_at
-                    let wordFound = false;
+                  }
+                  
+                  // Update flat words array (primary path for SRS tracking)
+                  if (sessionData.words) {
+                    const flatWord = sessionData.words.find(fw => fw.surface === w.surface && !fw.looked_up_at);
+                    if (flatWord) {
+                      flatWord.looked_up_at = lookupTime;
+                      sessionData.analytics.words_looked_up = (sessionData.analytics.words_looked_up || 0) + 1;
+                      sessionData.analytics.lookup_rate = sessionData.analytics.words_looked_up / sessionData.analytics.total_words;
+                    }
+                  }
+                  
+                  // Also update paragraphs structure for backwards compatibility
+                  if (sessionData.paragraphs) {
                     for (const para of sessionData.paragraphs) {
                       if (para.sentences) {
                         for (const sentence of para.sentences) {
                           if (sentence.words) {
                             const sentenceWord = sentence.words.find(sw => sw.surface === w.surface);
-                            if (sentenceWord) {
+                            if (sentenceWord && !sentenceWord.looked_up_at) {
                               sentenceWord.looked_up_at = lookupTime;
-                              
-                              // Update analytics
-                              sessionData.analytics.words_looked_up = (sessionData.analytics.words_looked_up || 0) + 1;
-                              sessionData.analytics.lookup_rate = sessionData.analytics.words_looked_up / sessionData.analytics.total_words;
-                              wordFound = true;
                               break;
                             }
                           }
                         }
-                        if (wordFound) break;
                       }
                     }
                   }

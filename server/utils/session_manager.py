@@ -117,7 +117,8 @@ class DatabaseSessionManager:
                 logger.debug("Created read-only global database session")
             
             # Ensure we're in read-only mode
-            db.execute("BEGIN IMMEDIATE")  # SQLite read lock
+            from sqlalchemy import text
+            db.execute(text("BEGIN IMMEDIATE"))  # SQLite read lock
             
             yield db
             

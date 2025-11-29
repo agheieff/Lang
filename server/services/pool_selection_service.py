@@ -28,15 +28,17 @@ class PoolSelectionService:
     """
     
     def get_pool(self, db: Session, account_id: int, lang: str) -> List[ReadingText]:
-        """Get all pooled texts for a user/language."""
+        """Get all ready pooled texts for a user/language."""
         return (
             db.query(ReadingText)
             .filter(
                 ReadingText.account_id == account_id,
                 ReadingText.lang == lang,
                 ReadingText.pooled == True,
-                ReadingText.content.isnot(None),  # Only fully generated texts
+                ReadingText.content.isnot(None),  # Has content
                 ReadingText.opened_at.is_(None),  # Not yet opened
+                ReadingText.words_complete == True,  # Words translated
+                ReadingText.sentences_complete == True,  # Sentences translated
             )
             .all()
         )
@@ -91,11 +93,19 @@ class PoolSelectionService:
         text_ci = getattr(text, 'ci_target', None) or 0.92
         d_ci = abs(text_ci - ci_pref) * 2.0
         
-        # Topic distance
-        text_topic = getattr(text, 'topic', None) or 'general'
-        topic_weight = topic_weights.get(text_topic, 0.5)
-        # Higher weight = lower distance (preferred topic)
-        d_topic = 1.0 - min(topic_weight, 1.0) if topic_weight > 0 else 1.0
+        # Topic distance - handle multiple comma-separated topics
+        text_topic_str = getattr(text, 'topic', None) or 'general'
+        text_topics = [t.strip() for t in text_topic_str.split(',') if t.strip()]
+        
+        if text_topics:
+            # Average weight across all topics in the text
+            weights_sum = sum(topic_weights.get(t, 0.5) for t in text_topics)
+            avg_weight = weights_sum / len(text_topics)
+        else:
+            avg_weight = 0.5
+        
+        # Higher weight = lower distance (preferred topics)
+        d_topic = 1.0 - min(avg_weight, 1.0) if avg_weight > 0 else 1.0
         
         return d_ci + d_topic * 0.5
     
@@ -131,7 +141,11 @@ class PoolSelectionService:
         return ci_target, topic
     
     def _weighted_random_topic(self, weights: dict) -> str:
-        """Select a topic based on weights."""
+        """
+        Select 1-3 topics based on weights.
+        ~50% chance of 1 topic, ~35% chance of 2, ~15% chance of 3.
+        Returns comma-separated string like "technology,science".
+        """
         # Filter out zero/negative weights
         valid = {k: v for k, v in weights.items() if v > 0}
         if not valid:
@@ -142,7 +156,41 @@ class PoolSelectionService:
         total = sum(probs)
         probs = [p / total for p in probs]
         
-        return random.choices(topics, weights=probs, k=1)[0]
+        # Decide how many topics: 50% → 1, 35% → 2, 15% → 3
+        roll = random.random()
+        if roll < 0.50:
+            count = 1
+        elif roll < 0.85:
+            count = 2
+        else:
+            count = 3
+        
+        # Don't pick more topics than available
+        count = min(count, len(topics))
+        
+        # Pick topics without replacement
+        selected = []
+        remaining_topics = topics.copy()
+        remaining_probs = probs.copy()
+        
+        for _ in range(count):
+            if not remaining_topics:
+                break
+            # Normalize remaining probs
+            total_prob = sum(remaining_probs)
+            if total_prob <= 0:
+                break
+            norm_probs = [p / total_prob for p in remaining_probs]
+            
+            # Pick one
+            idx = random.choices(range(len(remaining_topics)), weights=norm_probs, k=1)[0]
+            selected.append(remaining_topics[idx])
+            
+            # Remove from pool
+            remaining_topics.pop(idx)
+            remaining_probs.pop(idx)
+        
+        return ",".join(selected)
     
     def needs_backfill(self, db: Session, account_id: int, lang: str) -> int:
         """

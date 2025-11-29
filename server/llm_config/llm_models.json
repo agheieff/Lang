@@ -1,6 +1,17 @@
 {
   "models": [
     {
+      "id": "grok-fast-free",
+      "display_name": "Grok 4.1 Fast (Free)",
+      "model": "x-ai/grok-4.1-fast:free",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "max_tokens": 32768,
+      "allowed_tiers": ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"],
+      "capabilities": ["text"],
+      "cost_per_token": 0.0
+    },
+    {
       "id": "kimi-free",
       "display_name": "Kimi Free Model",
       "model": "moonshotai/kimi-k2:free",
@@ -23,8 +34,8 @@
       "cost_per_token": 0.0
     }
   ],
-  "default_model": "kimi-free",
-  "fallback_chain": ["kimi-free", "deepseek-free"],
+  "default_model": "grok-fast-free",
+  "fallback_chain": ["grok-fast-free", "kimi-free", "deepseek-free"],
   "provider_configs": {
     "openrouter": {
       "max_retries": 2,

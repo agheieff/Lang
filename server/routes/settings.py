@@ -573,3 +573,118 @@ def decrease_topic_weight(
 ):
     """HTMX: Decrease a topic's weight."""
     return adjust_topic_weight(topic, lang, delta=-WEIGHT_STEP, account=account, db=db)
+
+
+# --- Preferences Update via Chat (Async) ---
+
+import threading
+import logging
+
+_prefs_logger = logging.getLogger(__name__)
+
+class PreferencesUpdateRequest(BaseModel):
+    message: str
+
+
+def _run_preferences_update(account_id: int, message: str, current_weights: dict, current_length: int):
+    """Background thread to update preferences via LLM."""
+    from server.account_db import open_account_session
+    from server.services.interests_parser import update_preferences_from_message
+    
+    try:
+        result = update_preferences_from_message(
+            message=message,
+            current_weights=current_weights,
+            current_text_length=current_length,
+            available_topics=TOPICS,
+        )
+        
+        # Open new session for this thread
+        db = open_account_session(account_id)
+        try:
+            profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+            if not profile:
+                _prefs_logger.error(f"[PREFS] Profile not found for account {account_id}")
+                return
+            
+            if result.get("success"):
+                if result.get("topic_weights"):
+                    profile.topic_weights = result["topic_weights"]
+                if result.get("text_length") is not None:
+                    profile.text_length = result["text_length"]
+                _prefs_logger.info(f"[PREFS] Updated preferences for account {account_id}")
+            else:
+                _prefs_logger.warning(f"[PREFS] No changes for account {account_id}: {result.get('message', 'unknown')}")
+            
+            profile.preferences_updating = False
+            db.commit()
+        finally:
+            db.close()
+            
+    except Exception as e:
+        _prefs_logger.error(f"[PREFS] Failed to update preferences: {e}")
+        # Try to clear the updating flag
+        try:
+            db = open_account_session(account_id)
+            profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+            if profile:
+                profile.preferences_updating = False
+                db.commit()
+            db.close()
+        except:
+            pass
+
+
+@router.post("/settings/preferences/update")
+async def update_preferences_via_chat(
+    request: PreferencesUpdateRequest,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """
+    Start async update of user preferences via natural language message.
+    Returns immediately, processes in background.
+    """
+    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not profile:
+        return {"success": False, "error": "Profile not found"}
+    
+    # Check if already updating
+    if profile.preferences_updating:
+        return {"success": True, "status": "updating", "message": "Update already in progress"}
+    
+    # Get current state before starting thread
+    current_weights = dict(profile.topic_weights or DEFAULT_TOPIC_WEIGHTS)
+    current_length = profile.text_length or 300
+    
+    # Set updating flag
+    profile.preferences_updating = True
+    db.commit()
+    
+    # Start background thread
+    thread = threading.Thread(
+        target=_run_preferences_update,
+        args=(account.id, request.message, current_weights, current_length),
+        name=f"prefs-update-{account.id}",
+        daemon=True,
+    )
+    thread.start()
+    
+    return {"success": True, "status": "updating", "message": "Processing your request..."}
+
+
+@router.get("/settings/preferences/status")
+async def get_preferences_status(
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Check if preferences update is in progress."""
+    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not profile:
+        return {"updating": False}
+    
+    return {
+        "updating": profile.preferences_updating,
+        "topic_weights": profile.topic_weights,
+        "text_length": profile.text_length,
+    }

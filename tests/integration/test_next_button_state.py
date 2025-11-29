@@ -68,18 +68,17 @@ def test_reading_context_is_fully_ready(db_session, test_user):
     
     service = ReadingViewService()
     
-    # Mock orchestrator/selection to return our text
-    with patch.object(service.orchestrator, 'ensure_text_available'):
-        with patch.object(service.selection_service, 'pick_current_or_new', return_value=rt):
-            with patch.object(service.title_service, 'get_title', return_value=("Title", "Trans")):
-                with patch.object(service.title_service, 'get_title_words', return_value=[]):
-                    
-                    # Action
-                    context = service.get_current_reading_context(db_session, test_user.id)
-                    
-                    # Assertion
-                    assert context.text_id == rt.id
-                    assert context.is_fully_ready is True
+    # Mock selection to return our text
+    with patch.object(service.selection_service, 'pick_current_or_new', return_value=rt):
+        with patch.object(service.title_service, 'get_title', return_value=("Title", "Trans")):
+            with patch.object(service.title_service, 'get_title_words', return_value=[]):
+                
+                # Action
+                context = service.get_current_reading_context(db_session, test_user.id)
+                
+                # Assertion
+                assert context.text_id == rt.id
+                assert context.is_fully_ready is True
 
 def test_readiness_evaluation_logic(db_session, test_user):
     """

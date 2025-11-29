@@ -119,7 +119,7 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
     1) explicit requested model
     2) env OPENROUTER_MODEL_NONREASONING (preferred override)
     3) env OPENROUTER_MODEL
-    4) fallback 'moonshotai/kimi-k2:free'
+    4) fallback 'x-ai/grok-4.1-fast:free'
     """
     if requested:
         return requested
@@ -127,7 +127,7 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
     if m:
         return m
     m2 = os.getenv("OPENROUTER_MODEL")
-    return m2 or "moonshotai/kimi-k2:free"
+    return m2 or "x-ai/grok-4.1-fast:free"
 
 
 def _strip_thinking_blocks(text: str) -> str:

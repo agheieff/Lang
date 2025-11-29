@@ -75,7 +75,7 @@ class LLMConfigLoader:
             openrouter_model = ModelConfig(
                 id="env-openrouter",
                 display_name="OpenRouter (Env)",
-                model=os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k2:free"),
+                model=os.getenv("OPENROUTER_MODEL", "x-ai/grok-4.1-fast:free"),
                 base_url="https://openrouter.ai/api/v1",
                 api_key_env="OPENROUTER_API_KEY",
                 max_tokens=4096,

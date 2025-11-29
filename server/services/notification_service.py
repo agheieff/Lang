@@ -28,15 +28,14 @@ class SSEEvent:
         self.id = event_id or str(int(datetime.now(timezone.utc).timestamp() * 1000))
     
     def format(self) -> str:
-        """Format the event for SSE protocol."""
+        """Format the event for SSE protocol. Must end with \\n\\n."""
         lines = []
         if self.id:
             lines.append(f"id: {self.id}")
         if self.type:
             lines.append(f"event: {self.type}")
         lines.append(f"data: {json.dumps(self.data)}")
-        lines.append("")  # Empty line to end the event
-        return "\n".join(lines)
+        return "\n".join(lines) + "\n\n"
 
 
 class ClientConnection:
@@ -269,27 +268,17 @@ class NotificationService:
                             })
                             yield text_ready_event.format()
                         
-                        # Check if there's a ready backup text (unopened with translations)
-                        from ..models import ReadingText
-                        backup_text = (
-                            db.query(ReadingText)
-                            .filter(
-                                ReadingText.account_id == account_id,
-                                ReadingText.lang == lang,
-                                ReadingText.opened_at.is_(None),
-                                ReadingText.content.is_not(None),
-                            )
-                            .order_by(ReadingText.created_at.desc())
-                            .first()
+                        # Check if there's any ready backup text in the pool
+                        current_id = current_text.id if current_text else None
+                        backup_text, backup_reason = readiness_service.first_ready_backup(
+                            db, account_id, lang, exclude_text_id=current_id
                         )
-                        if backup_text and backup_text.id != (current_text.id if current_text else None):
-                            backup_ready, backup_reason = readiness_service.evaluate(db, backup_text, account_id)
-                            if backup_ready and backup_reason == "both":
-                                next_ready_event = SSEEvent("next_ready", {
-                                    "text_id": backup_text.id,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                })
-                                yield next_ready_event.format()
+                        if backup_text:
+                            next_ready_event = SSEEvent("next_ready", {
+                                "text_id": backup_text.id,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                            yield next_ready_event.format()
                 except Exception as e:
                     logger.warning(f"[SSE] Failed to check initial readiness: {e}")
                 
