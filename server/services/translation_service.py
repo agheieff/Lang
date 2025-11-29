@@ -353,6 +353,11 @@ class TranslationService:
                                       model_config=None) -> bool:
         """Generate structured sentence translations."""
         try:
+            # Debug logging
+            logger.info(f"[TRANSLATION] Sentence translation starting: provider={provider}, model_id={model_id}, base_url={base_url}")
+            if model_config:
+                logger.info(f"[TRANSLATION] model_config: model={getattr(model_config, 'model', None)}, base_url={getattr(model_config, 'base_url', None)}")
+            
             # Call LLM for structured translation
             tr_buf, tr_resp, used_provider, used_model = llm_call_and_log_to_file(
                 tr_messages, provider, model_id, base_url, job_dir / "structured.json",

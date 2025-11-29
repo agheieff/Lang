@@ -27,9 +27,9 @@
          hx-get="/reading/current"
          hx-trigger="load delay:200ms"
          hx-swap="innerHTML"
-         hx-target="#current-reading"
+         hx-target="this"
+         hx-select="unset"
          hx-disinherit="*"
-         hx-select="#reading-block"
          data-lang="{{ profile_lang or '' }}">
       <div class="animate-pulse space-y-3" aria-hidden="true">
         <div class="h-4 bg-gray-200 rounded w-3/4"></div>
@@ -664,21 +664,5 @@
   </div>
   {% endif %}
 </div>
-
-{% if is_authenticated and has_profile %}
-<script>
-(function() {
-    'use strict';
-
-    document.addEventListener('DOMContentLoaded', function() {
-        setTimeout(function() {
-            if (window.ReadingController && window.ReadingController.initHomeSSE) {
-                window.ReadingController.initHomeSSE();
-            }
-        }, 500);
-    });
-})();
-</script>
-{% endif %}
 
 {% endblock %}

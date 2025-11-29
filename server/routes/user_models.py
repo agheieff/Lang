@@ -445,22 +445,50 @@ def delete_model_html(
     return list_models_html(account=account, db=db)
 
 
-@htmx_router.get("/assignments", response_class=HTMLResponse)
-def get_assignments_html(
-    account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
-):
-    """HTMX: Returns the model assignment dropdowns."""
-    service = get_user_model_service()
-    models = service.list_models(db, account.id, include_inactive=False)
+def _get_show_advanced_setting(account: Account) -> bool:
+    """Check if user wants advanced model assignment UI."""
+    extras = account.extras or {}
+    return extras.get("show_advanced_model_ui", False)
+
+
+def _build_simple_assignments_html(models, current_model_id: Optional[int]) -> str:
+    """Simple view: one dropdown for all tasks."""
+    first_model_name = models[0].display_name if models else "system default"
+    options = [f'<option value="">-- Auto (uses: {first_model_name}) --</option>']
+    for m in models:
+        selected = "selected" if m.id == current_model_id else ""
+        options.append(f'<option value="{m.id}" {selected}>{m.display_name}</option>')
     
-    # Get current assignments
-    gen_model = service.get_assigned_model(db, account.id, "generation")
-    word_model = service.get_assigned_model(db, account.id, "word_translation")
-    sent_model = service.get_assigned_model(db, account.id, "sentence_translation")
-    
+    return f"""
+    <div class="space-y-4">
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Model for all tasks</label>
+            <select name="all_model" 
+                    hx-post="/settings/models/assign-all"
+                    hx-target="#assignment-status"
+                    hx-swap="innerHTML"
+                    class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                {''.join(options)}
+            </select>
+        </div>
+        <div class="flex justify-between items-center">
+            <div id="assignment-status" class="text-sm"></div>
+            <button hx-post="/settings/models/toggle-advanced?show=true"
+                    hx-target="#model-assignments"
+                    hx-swap="innerHTML"
+                    class="text-xs text-blue-600 hover:text-blue-800">
+                More options...
+            </button>
+        </div>
+    </div>
+    """
+
+
+def _build_advanced_assignments_html(models, gen_model, word_model, sent_model) -> str:
+    """Advanced view: separate dropdown for each task."""
     def build_dropdown(task: str, current_id: Optional[int]) -> str:
-        options = ['<option value="">-- Auto (first active) --</option>']
+        first_model_name = models[0].display_name if models else "system default"
+        options = [f'<option value="">-- Auto (uses: {first_model_name}) --</option>']
         for m in models:
             selected = "selected" if m.id == current_id else ""
             options.append(f'<option value="{m.id}" {selected}>{m.display_name}</option>')
@@ -489,25 +517,51 @@ def get_assignments_html(
             <label class="block text-sm font-medium text-gray-700 mb-1">Sentence Translations</label>
             {build_dropdown("sentence_translation", sent_model.id if sent_model else None)}
         </div>
-        <div id="assignment-status" class="text-sm"></div>
+        <div class="flex justify-between items-center">
+            <div id="assignment-status" class="text-sm"></div>
+            <button hx-post="/settings/models/toggle-advanced?show=false"
+                    hx-target="#model-assignments"
+                    hx-swap="innerHTML"
+                    class="text-xs text-blue-600 hover:text-blue-800">
+                Less options
+            </button>
+        </div>
     </div>
     """
 
 
+@htmx_router.get("/assignments", response_class=HTMLResponse)
+def get_assignments_html(
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """HTMX: Returns the model assignment dropdowns (simple or advanced based on preference)."""
+    service = get_user_model_service()
+    models = service.list_models(db, account.id, include_inactive=False)
+    
+    show_advanced = _get_show_advanced_setting(account)
+    
+    if show_advanced:
+        gen_model = service.get_assigned_model(db, account.id, "generation")
+        word_model = service.get_assigned_model(db, account.id, "word_translation")
+        sent_model = service.get_assigned_model(db, account.id, "sentence_translation")
+        return _build_advanced_assignments_html(models, gen_model, word_model, sent_model)
+    else:
+        # For simple view, show the model used for generation (or first assigned)
+        gen_model = service.get_assigned_model(db, account.id, "generation")
+        current_id = gen_model.id if gen_model else None
+        return _build_simple_assignments_html(models, current_id)
+
+
 @htmx_router.post("/assign/{task}", response_class=HTMLResponse)
-def assign_model_html(
+async def assign_model_html(
     task: TaskType,
     request: Request,
     account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
     """HTMX: Assign a model to a task from form data."""
-    import asyncio
-    
-    async def get_form():
-        return await request.form()
-    
-    form_data = asyncio.get_event_loop().run_until_complete(get_form())
+    form_data = await request.form()
     model_id_str = form_data.get(f"{task}_model", "")
     
     if not model_id_str:
@@ -529,3 +583,73 @@ def assign_model_html(
             return '<span class="text-red-600">Model not found</span>'
     except ValueError:
         return '<span class="text-red-600">Invalid model ID</span>'
+
+
+@htmx_router.post("/assign-all", response_class=HTMLResponse)
+async def assign_all_model_html(
+    request: Request,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """HTMX: Assign a single model to all tasks."""
+    form_data = await request.form()
+    model_id_str = form_data.get("all_model", "")
+    
+    service = get_user_model_service()
+    
+    if not model_id_str:
+        # Clear all assignments
+        for task in ["generation", "word_translation", "sentence_translation"]:
+            task_field = f"use_for_{task}"
+            db.query(UserModelConfig).filter(
+                UserModelConfig.account_id == account.id
+            ).update({task_field: False})
+        db.commit()
+        return '<span class="text-green-600">All assignments cleared</span>'
+    
+    try:
+        model_id = int(model_id_str)
+        # Assign to all three tasks
+        for task in ["generation", "word_translation", "sentence_translation"]:
+            service.assign_model_to_task(db, account.id, model_id, task, exclusive=True)
+        return '<span class="text-green-600">Saved for all tasks</span>'
+    except ValueError:
+        return '<span class="text-red-600">Invalid model ID</span>'
+
+
+@htmx_router.post("/toggle-advanced", response_class=HTMLResponse)
+def toggle_advanced_view(
+    show: bool,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """HTMX: Toggle between simple and advanced model assignment views."""
+    from server.db import get_global_db
+    
+    # Update account extras in global DB (where accounts live)
+    global_db = next(get_global_db())
+    try:
+        global_account = global_db.query(Account).filter(Account.id == account.id).first()
+        if global_account:
+            extras = global_account.extras or {}
+            extras["show_advanced_model_ui"] = show
+            global_account.extras = extras
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(global_account, "extras")
+            global_db.commit()
+    finally:
+        global_db.close()
+    
+    # Return the appropriate view
+    service = get_user_model_service()
+    models = service.list_models(db, account.id, include_inactive=False)
+    
+    if show:
+        gen_model = service.get_assigned_model(db, account.id, "generation")
+        word_model = service.get_assigned_model(db, account.id, "word_translation")
+        sent_model = service.get_assigned_model(db, account.id, "sentence_translation")
+        return _build_advanced_assignments_html(models, gen_model, word_model, sent_model)
+    else:
+        gen_model = service.get_assigned_model(db, account.id, "generation")
+        current_id = gen_model.id if gen_model else None
+        return _build_simple_assignments_html(models, current_id)

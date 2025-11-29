@@ -343,4 +343,87 @@
         stopPolling();
     });
     
+    // Also initialize after HTMX swaps (for home page where reading-seeds is loaded via HTMX)
+    function tryInitSSE() {
+        const seedsEl = document.getElementById('reading-seeds');
+        if (!seedsEl) return;
+        
+        // Don't reinitialize if already connected
+        if (window.readingSSE && window.readingSSE.isConnected()) return;
+        
+        try {
+            const seeds = JSON.parse(seedsEl.textContent);
+            if (!seeds.sse_endpoint || !seeds.text_id || !seeds.account_id) return;
+            
+            // Check if next text is already ready from server render
+            if (seeds.is_next_ready) {
+                console.log('[SSE] Next text already ready on load');
+                enableNextButton(seeds.next_ready_reason || 'both');
+            }
+            
+            // Create SSE manager if not exists
+            const sse = window.readingSSE || new ReadingSSEManager();
+            
+            // Set up handlers
+            sse.setHandlers({
+                onGenerationStarted: () => {
+                    updateStatus('Generating...', 'text-blue-500');
+                },
+                
+                onContentReady: (data) => {
+                    updateStatus('Processing translations...', 'text-yellow-500');
+                    
+                    // Refresh if this is for current text
+                    const textEl = document.getElementById('reading-text');
+                    const curId = textEl && textEl.dataset ? Number(textEl.dataset.textId) : null;
+                    if (curId && data && Number(data.text_id) === curId) {
+                        if (window.ReadingController && window.ReadingController.requestRefresh) {
+                            window.ReadingController.requestRefresh('content_ready_sse');
+                        }
+                    }
+                },
+                
+                onTranslationsReady: () => {
+                    loadWordsIfNeeded();
+                },
+                
+                onGenerationFailed: (data) => {
+                    updateStatus('Generation failed', 'text-red-500');
+                    console.error('[SSE] Generation failed:', data.error);
+                },
+                
+                onDisconnected: () => {
+                    updateStatus('Checking...', 'text-gray-500');
+                }
+            });
+            
+            // Initialize connection
+            sse.init({
+                textId: seeds.text_id,
+                accountId: seeds.account_id,
+                sseEndpoint: seeds.sse_endpoint,
+                isNextReady: seeds.is_next_ready
+            });
+            
+            // Store reference globally
+            window.readingSSE = sse;
+            
+        } catch (error) {
+            console.error('[SSE] Failed to initialize:', error);
+            startPolling();
+        }
+    }
+    
+    document.addEventListener('htmx:afterSwap', function(evt) {
+        if (evt.detail && evt.detail.target && evt.detail.target.id === 'current-reading') {
+            setTimeout(tryInitSSE, 100);
+        }
+    });
+    
+    document.addEventListener('htmx:afterSettle', function(evt) {
+        if (evt.detail && evt.detail.target && evt.detail.target.id === 'current-reading') {
+            setTimeout(tryInitSSE, 100);
+        }
+    });
+    
 })();

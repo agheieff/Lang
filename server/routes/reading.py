@@ -93,7 +93,7 @@ async def current_reading_block(
     if context.status == "error":
          return HTMLResponse(
             content='''
-            <div id="current-reading" class="text-center py-8">
+            <div class="text-center py-8">
               <p class="text-red-500">Error loading text. Please refresh the page.</p>
             </div>
             ''', status_code=500
@@ -114,26 +114,19 @@ async def current_reading_block(
         next_ready_reason=context.next_ready_reason,
     )
     
-    # Wrap with SSE metadata for the client
+    # Return content for innerHTML swap into #current-reading
     content_with_sse = f'''
-        <div id="current-reading"
-             data-sse-endpoint="{context.sse_endpoint}"
-             data-text-id="{context.text_id}"
-             data-is-ready="{str(context.is_fully_ready).lower()}"
-             data-is-next-ready="{str(context.is_next_ready).lower()}"
-             data-next-ready-reason="{context.next_ready_reason}">
-            {inner}
-            <script id="reading-seeds" type="application/json">
-                {{
-                    "sse_endpoint": "{context.sse_endpoint}",
-                    "text_id": {context.text_id},
-                    "ready": {str(context.is_fully_ready).lower()},
-                    "is_next_ready": {str(context.is_next_ready).lower()},
-                    "next_ready_reason": "{context.next_ready_reason}",
-                    "account_id": {account.id}
-                }}
-            </script>
-        </div>
+        {inner}
+        <script id="reading-seeds" type="application/json">
+            {{
+                "sse_endpoint": "{context.sse_endpoint}",
+                "text_id": {context.text_id},
+                "ready": {str(context.is_fully_ready).lower()},
+                "is_next_ready": {str(context.is_next_ready).lower()},
+                "next_ready_reason": "{context.next_ready_reason}",
+                "account_id": {account.id}
+            }}
+        </script>
     '''
     return HTMLResponse(content=content_with_sse)
 
@@ -195,7 +188,7 @@ async def next_text(
     from ..services.selection_service import SelectionService
     selection_service = SelectionService()
     
-    # Mark current text as read before moving to next
+    # Mark current text as read and clear current_text_id before moving to next
     if prof.current_text_id:
         from ..services.state_manager import GenerationStateManager
         state_manager = GenerationStateManager()
@@ -203,6 +196,9 @@ async def next_text(
             state_manager.mark_read(db, account.id, prof.current_text_id)
         except Exception:
             logger.debug("Failed to mark text as read", exc_info=True)
+        # Clear current_text_id so pick_current_or_new selects a new text
+        prof.current_text_id = None
+        db.commit()
     
     # Pick next text and set it as current (this updates current_text_id and marks opened)
     next_text = selection_service.pick_current_or_new(db, account.id, prof.lang)
@@ -220,8 +216,8 @@ async def next_text(
         return RedirectResponse(url="/reading/current", status_code=303)
     if request.headers.get("accept", "").lower().find("application/json") >= 0 or request.headers.get("content-type", "").lower().startswith("application/json"):
         return {"ok": True}
-    # For form submissions, always redirect
-    return RedirectResponse(url="/reading/current", status_code=303)
+    # For form submissions, redirect to home page (full page with layout)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @router.get("/reading/events/sse")
