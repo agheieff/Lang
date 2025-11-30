@@ -80,61 +80,61 @@ class TextGenerationService:
     
     def create_placeholder_text(
         self, 
-        account_db: Session, 
+        global_db: Session, 
         account_id: int, 
         lang: str,
+        target_lang: str = "en",
         ci_target: Optional[float] = None,
         topic: Optional[str] = None,
-        pooled: bool = False,
     ) -> Optional[int]:
         """
-        Create a placeholder ReadingText record.
+        Create a placeholder ReadingText record in the GLOBAL database.
         
         Args:
-            account_db: Database session
-            account_id: User account ID
-            lang: Language code
+            global_db: Global database session
+            account_id: User account ID (who requested generation)
+            lang: Source language code
+            target_lang: Target language for translations
             ci_target: Target comprehension level (for pool generation)
             topic: Topic category (for pool generation)
-            pooled: Whether this text is part of the pool
         
         Returns the text_id if created, None if error.
         """
         from ..models import ReadingText
         
         rt = ReadingText(
-            account_id=account_id,
+            generated_for_account_id=account_id,
             lang=lang,
+            target_lang=target_lang,
             content=None,
             request_sent_at=datetime.datetime.utcnow(),
             ci_target=ci_target,
             topic=topic,
-            pooled=pooled,
         )
         
         try:
-            account_db.add(rt)
-            account_db.flush()
-            print(f"[TEXT_GEN] Created placeholder for text_id={rt.id} account_id={account_id} lang={lang} ci={ci_target} topic={topic}")
+            global_db.add(rt)
+            global_db.flush()
+            print(f"[TEXT_GEN] Created placeholder for text_id={rt.id} account_id={account_id} lang={lang} target={target_lang} ci={ci_target} topic={topic}")
             return rt.id
         except Exception as e:
             try:
-                account_db.rollback()
+                global_db.rollback()
             except Exception:
                 pass
             # Try with empty string if content can't be NULL
             try:
                 rt = ReadingText(
-                    account_id=account_id,
+                    generated_for_account_id=account_id,
                     lang=lang,
+                    target_lang=target_lang,
                     content="",
                     request_sent_at=datetime.datetime.utcnow(),
                     ci_target=ci_target,
                     topic=topic,
-                    pooled=pooled,
                 )
-                account_db.add(rt)
-                account_db.flush()
+                global_db.add(rt)
+                global_db.flush()
                 print(f"[TEXT_GEN] Created placeholder (fallback) for text_id={rt.id} account_id={account_id} lang={lang}")
                 return rt.id
             except Exception:
@@ -153,11 +153,11 @@ class TextGenerationService:
         Generate text content for a placeholder text.
         
         Args:
-            account_db: Per-account database session
-            global_db: Global database session
+            account_db: Per-account database session (for logging, usage tracking)
+            global_db: Global database session (for ReadingText)
             account_id: User account ID
             lang: Language code
-            text_id: Text record ID
+            text_id: Text record ID (in global DB)
             job_dir: Directory for logging
             messages: LLM prompt messages
             
@@ -226,14 +226,17 @@ class TextGenerationService:
                     if not final_text or not final_text.strip():
                         raise ValueError("Empty or invalid text content")
                     
-                    # Update the database record
-                    rt = account_db.query(ReadingText).filter(ReadingText.id == text_id).first()
+                    # Update the database record in GLOBAL DB
+                    rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
                     if rt:
                         rt.content = final_text
+                        rt.title = title
                         rt.generated_at = datetime.datetime.utcnow()
-                        account_db.commit()
+                        # Count words for matching algorithm
+                        rt.word_count = len(final_text.split()) if not lang.startswith("zh") else len(final_text)
+                        global_db.commit()
                         
-                        # Record usage for Free tier users
+                        # Record usage for Free tier users (in account DB)
                         if user_tier == "Free":
                             from .usage_service import get_usage_service
                             usage_service = get_usage_service()
@@ -259,7 +262,7 @@ class TextGenerationService:
                 error_type = type(e).__name__
                 print(f"[TEXT_GEN] ❌ ERROR with {provider}: {error_type}: {error_msg}")
                 
-                # Log the error attempt
+                # Log the error attempt (in account DB)
                 try:
                     log_llm_request(
                         account_db,
@@ -288,16 +291,16 @@ class TextGenerationService:
         print(f"[TEXT_GEN] ❌ Final error message: {best_result.error}")
         print(f"[TEXT_GEN] ❌ Tried {[m.display_name for m in models_to_try]} models")
         
-        # Clean up the placeholder record
+        # Clean up the placeholder record from GLOBAL DB
         try:
-            rt = account_db.query(ReadingText).filter(ReadingText.id == text_id).first()
+            rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
             if rt:
-                account_db.delete(rt)
-                account_db.commit()
+                global_db.delete(rt)
+                global_db.commit()
                 print(f"[TEXT_GEN] ❌ Cleaned up placeholder text_id={text_id} due to failure")
         except Exception as e:
             try:
-                account_db.rollback()
+                global_db.rollback()
                 print(f"[TEXT_GEN] ❌ Failed to clean up placeholder: {e}")
             except Exception:
                 pass

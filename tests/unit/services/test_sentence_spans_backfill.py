@@ -7,29 +7,27 @@ from server.models import ReadingText, ReadingTextTranslation
 
 
 def test_backfill_sentence_spans_updates_missing_rows():
-    # Local in-memory DB for this test
+    """Test that backfill_sentence_spans updates translations without spans (global model)."""
     engine = create_engine("sqlite:///:memory:", echo=False)
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     db = SessionLocal()
     try:
-        account_id = 123
-        lang = "en"
-        text = ReadingText(account_id=account_id, lang=lang, content="Hello world.")
+        # Global model - no account_id
+        text = ReadingText(lang="en", target_lang="es", content="Hello world.")
         db.add(text)
         db.flush()
 
-        # Insert a sentence translation without spans
+        # Insert a sentence translation without spans (global model)
         rtt = ReadingTextTranslation(
-            account_id=account_id,
             text_id=text.id,
+            target_lang="es",
             unit="sentence",
-            target_lang="en",
             segment_index=0,
             span_start=None,
             span_end=None,
             source_text="Hello world.",
-            translated_text="Hello world (tr).",
+            translated_text="Hola mundo.",
             provider="test",
             model="test-model",
         )
@@ -38,21 +36,22 @@ def test_backfill_sentence_spans_updates_missing_rows():
 
         # Backfill spans
         svc = TranslationService()
-        ok = svc.backfill_sentence_spans(db, account_id, text.id)
+        ok = svc.backfill_sentence_spans(db, text.id, target_lang="es")
         assert ok is True
 
         # Verify row now has spans
         row = (
             db.query(ReadingTextTranslation)
-            .filter(ReadingTextTranslation.account_id == account_id,
-                    ReadingTextTranslation.text_id == text.id,
-                    ReadingTextTranslation.unit == "sentence")
+            .filter(
+                ReadingTextTranslation.text_id == text.id,
+                ReadingTextTranslation.target_lang == "es",
+                ReadingTextTranslation.unit == "sentence"
+            )
             .first()
         )
         assert row is not None
         assert isinstance(row.span_start, int)
         assert isinstance(row.span_end, int)
-        # Spans should be within the bounds of the source text
         assert 0 <= row.span_start <= row.span_end <= len("Hello world.")
     finally:
         db.close()

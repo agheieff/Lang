@@ -1,73 +1,104 @@
 """
 Pool-based text selection service.
-Manages a pool of pre-generated texts with varied stats and selects
-the best match based on proximity to user's current state.
+Manages global text pool and selection based on user state.
 """
 from __future__ import annotations
 
 import logging
 import random
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
 from ..config import POOL_SIZE, POOL_CI_VARIANCE, TOPICS, DEFAULT_TOPIC_WEIGHTS
-from ..models import Profile, ReadingText
+from ..models import Profile, ReadingText, ProfileTextRead
 
 logger = logging.getLogger(__name__)
 
 
 class PoolSelectionService:
     """
-    Manages text pool and selection based on user state.
+    Manages global text pool and selection based on user state.
     
     Key concepts:
-    - Pool: Pre-generated texts waiting to be read (pooled=True, opened_at=None)
-    - Selection: Pick text closest to user's current preferences
+    - Global Pool: Ready texts (lang/target_lang) shared across users
+    - Selection: Pick text closest to user's current preferences that user hasn't read
     - Backfill: Generate new texts when pool is depleted
     """
     
-    def get_pool(self, db: Session, account_id: int, lang: str) -> List[ReadingText]:
-        """Get all ready pooled texts for a user/language."""
-        return (
-            db.query(ReadingText)
+    def get_pool(
+        self,
+        global_db: Session,
+        lang: str,
+        target_lang: str,
+        exclude_ids: Optional[Set[int]] = None,
+    ) -> List[ReadingText]:
+        """Get all ready texts from global pool for a language pair."""
+        query = (
+            global_db.query(ReadingText)
             .filter(
-                ReadingText.account_id == account_id,
                 ReadingText.lang == lang,
-                ReadingText.pooled == True,
-                ReadingText.content.isnot(None),  # Has content
-                ReadingText.opened_at.is_(None),  # Not yet opened
-                ReadingText.words_complete == True,  # Words translated
-                ReadingText.sentences_complete == True,  # Sentences translated
+                ReadingText.target_lang == target_lang,
+                ReadingText.content.isnot(None),
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
             )
-            .all()
         )
+        
+        if exclude_ids:
+            query = query.filter(~ReadingText.id.in_(exclude_ids))
+        
+        return query.all()
     
-    def get_pool_size(self, db: Session, account_id: int, lang: str) -> int:
-        """Get count of pooled texts (including those still generating)."""
+    def get_pool_size(
+        self,
+        global_db: Session,
+        lang: str,
+        target_lang: str,
+    ) -> int:
+        """Get count of ready texts in global pool for a language pair."""
         return (
-            db.query(ReadingText)
+            global_db.query(ReadingText)
             .filter(
-                ReadingText.account_id == account_id,
                 ReadingText.lang == lang,
-                ReadingText.pooled == True,
-                ReadingText.opened_at.is_(None),
+                ReadingText.target_lang == target_lang,
+                ReadingText.content.isnot(None),
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
             )
             .count()
         )
     
+    def get_unread_text_ids(
+        self,
+        account_db: Session,
+        profile_id: int,
+    ) -> Set[int]:
+        """Get IDs of texts the profile has read."""
+        return set(
+            r.text_id for r in account_db.query(ProfileTextRead.text_id)
+            .filter(ProfileTextRead.profile_id == profile_id)
+            .all()
+        )
+    
     def select_from_pool(
         self,
-        db: Session,
-        account_id: int,
+        global_db: Session,
+        account_db: Session,
         lang: str,
+        target_lang: str,
         profile: Profile,
     ) -> Optional[ReadingText]:
         """
-        Select the best text from pool based on user's current state.
-        Returns None if pool is empty.
+        Select the best text from global pool based on user's current state.
+        Excludes texts the user has already read.
+        Returns None if no unread texts available.
         """
-        pool = self.get_pool(db, account_id, lang)
+        # Get texts user has already read
+        read_ids = self.get_unread_text_ids(account_db, profile.id)
+        
+        # Get available pool
+        pool = self.get_pool(global_db, lang, target_lang, exclude_ids=read_ids)
         if not pool:
             return None
         
@@ -98,7 +129,6 @@ class PoolSelectionService:
         text_topics = [t.strip() for t in text_topic_str.split(',') if t.strip()]
         
         if text_topics:
-            # Average weight across all topics in the text
             weights_sum = sum(topic_weights.get(t, 0.5) for t in text_topics)
             avg_weight = weights_sum / len(text_topics)
         else:
@@ -116,37 +146,22 @@ class PoolSelectionService:
     ) -> Tuple[float, str]:
         """
         Get CI target and topic for generating a new pool text.
-        
-        Args:
-            profile: User profile with preferences
-            vary: If True, add variance to create diversity in pool
-            
-        Returns:
-            (ci_target, topic)
         """
-        # Base CI from profile
         ci_pref = getattr(profile, 'ci_preference', None) or 0.92
         topic_weights = getattr(profile, 'topic_weights', None) or DEFAULT_TOPIC_WEIGHTS
         
         if vary:
-            # Add variance to CI target
             ci_target = ci_pref + random.uniform(-POOL_CI_VARIANCE, POOL_CI_VARIANCE)
-            ci_target = max(0.80, min(0.98, ci_target))  # Clamp to valid range
+            ci_target = max(0.80, min(0.98, ci_target))
         else:
             ci_target = ci_pref
         
-        # Weighted random topic selection
         topic = self._weighted_random_topic(topic_weights)
         
         return ci_target, topic
     
     def _weighted_random_topic(self, weights: dict) -> str:
-        """
-        Select 1-3 topics based on weights.
-        ~50% chance of 1 topic, ~35% chance of 2, ~15% chance of 3.
-        Returns comma-separated string like "technology,science".
-        """
-        # Filter out zero/negative weights
+        """Select 1-3 topics based on weights."""
         valid = {k: v for k, v in weights.items() if v > 0}
         if not valid:
             return random.choice(TOPICS)
@@ -156,7 +171,6 @@ class PoolSelectionService:
         total = sum(probs)
         probs = [p / total for p in probs]
         
-        # Decide how many topics: 50% → 1, 35% → 2, 15% → 3
         roll = random.random()
         if roll < 0.50:
             count = 1
@@ -165,10 +179,8 @@ class PoolSelectionService:
         else:
             count = 3
         
-        # Don't pick more topics than available
         count = min(count, len(topics))
         
-        # Pick topics without replacement
         selected = []
         remaining_topics = topics.copy()
         remaining_probs = probs.copy()
@@ -176,34 +188,45 @@ class PoolSelectionService:
         for _ in range(count):
             if not remaining_topics:
                 break
-            # Normalize remaining probs
             total_prob = sum(remaining_probs)
             if total_prob <= 0:
                 break
             norm_probs = [p / total_prob for p in remaining_probs]
             
-            # Pick one
             idx = random.choices(range(len(remaining_topics)), weights=norm_probs, k=1)[0]
             selected.append(remaining_topics[idx])
             
-            # Remove from pool
             remaining_topics.pop(idx)
             remaining_probs.pop(idx)
         
         return ",".join(selected)
     
-    def needs_backfill(self, db: Session, account_id: int, lang: str) -> int:
+    def needs_backfill(
+        self,
+        global_db: Session,
+        account_db: Session,
+        profile: Profile,
+    ) -> int:
         """
-        Check how many texts need to be generated to fill pool.
-        Returns count of texts needed (0 if pool is full).
+        Check how many texts need to be generated for this profile.
+        Returns count of texts needed (0 if enough unread texts exist).
         """
-        current_size = self.get_pool_size(db, account_id, lang)
-        return max(0, POOL_SIZE - current_size)
-    
-    def mark_selected(self, db: Session, text: ReadingText) -> None:
-        """Mark a text as selected (no longer in pool)."""
-        text.pooled = False
-        db.flush()
+        read_ids = self.get_unread_text_ids(account_db, profile.id)
+        
+        available = (
+            global_db.query(ReadingText)
+            .filter(
+                ReadingText.lang == profile.lang,
+                ReadingText.target_lang == profile.target_lang,
+                ReadingText.content.isnot(None),
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
+                ~ReadingText.id.in_(read_ids) if read_ids else True,
+            )
+            .count()
+        )
+        
+        return max(0, POOL_SIZE - available)
 
 
 # Singleton

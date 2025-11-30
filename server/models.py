@@ -48,46 +48,60 @@ class Profile(Base):
     text_length: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     # Free-form preferences/topics for reading generation
     text_preferences: Mapped[Optional[str]] = mapped_column(String, default=None)
-    # Current text being read (not yet fully read). One per profile.
-    current_text_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reading_texts.id", ondelete="SET NULL"), index=True, default=None)
+    # Current text being read (references global DB - no FK constraint)
+    current_text_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, default=None)
     # Pool-based selection preferences
     ci_preference: Mapped[float] = mapped_column(Float, default=0.92)  # Target comprehension (0.85-0.98)
     topic_weights: Mapped[dict] = mapped_column(JSON, default=dict)  # Populated from config.DEFAULT_TOPIC_WEIGHTS
     # Async preferences update tracking
     preferences_updating: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Re-read settings: None = never show again, 0 = always allow, N = cooldown in days
+    reread_cooldown_days: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
 
     # Relationship to Account (global DB) is not declared to avoid cross-DB FK
     # account: Mapped["Account"] = relationship("Account", foreign_keys=[account_id])
 
 
 class ReadingText(Base):
+    """
+    Global text storage - texts are shared across profiles with matching lang/target_lang.
+    """
     __tablename__ = "reading_texts"
+    __table_args__ = (
+        Index("ix_rt_lang_target", "lang", "target_lang"),
+        Index("ix_rt_ready", "lang", "target_lang", "words_complete", "sentences_complete"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(Integer, index=True)
-    lang: Mapped[str] = mapped_column(String(16), index=True)
+    # Who requested generation (nullable for imported texts)
+    generated_for_account_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, nullable=True)
+    # Source and target languages
+    lang: Mapped[str] = mapped_column(String(16), index=True)  # Source language (e.g., 'zh')
+    target_lang: Mapped[str] = mapped_column(String(16), index=True)  # Translation target (e.g., 'en')
+    # Content
     content: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual
+    source: Mapped[Optional[str]] = mapped_column(String(16), default="llm")  # llm|manual|import
     # Generation lifecycle timestamps
     request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
-    # Read tracking
-    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
-    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
-    # First time the text was opened by the user
-    opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     # Pool-based selection fields
     ci_target: Mapped[Optional[float]] = mapped_column(Float, default=None)  # Target comprehension (0.85-0.98)
-    topic: Mapped[Optional[str]] = mapped_column(String(32), default=None)  # Primary topic category
+    topic: Mapped[Optional[str]] = mapped_column(String(64), default=None)  # Topic category (can be comma-separated)
     difficulty_estimate: Mapped[Optional[float]] = mapped_column(Float, default=None)  # Estimated difficulty (0-1)
-    pooled: Mapped[bool] = mapped_column(Boolean, default=False)  # True if in pool (not yet opened)
     # Generation completion flags - text is ready when both are True
     words_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     sentences_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     # Retry tracking for failed translations
     translation_attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_translation_attempt: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    # Vocabulary stats for quick filtering
+    word_count: Mapped[int] = mapped_column(Integer, default=0)  # Total words
+    unique_lemma_count: Mapped[int] = mapped_column(Integer, default=0)  # Distinct lemmas
+    # Generation prompt data (for reproducibility and analysis)
+    prompt_words: Mapped[dict] = mapped_column(JSON, default=dict)  # Words used in generation prompt
+    prompt_level_hint: Mapped[Optional[str]] = mapped_column(String(128), default=None)  # Level hint used
 
 
 # Placeholder for future SRS tables (not implemented yet)
@@ -250,10 +264,12 @@ class GenerationLog(Base):
 
 
 class ReadingTextTranslation(Base):
+    """
+    Global translations storage - translations are shared across users.
+    """
     __tablename__ = "reading_text_translations"
     __table_args__ = (
         UniqueConstraint(
-            "account_id",
             "text_id",
             "target_lang",
             "unit",
@@ -262,13 +278,13 @@ class ReadingTextTranslation(Base):
             "span_end",
             name="uq_rtt_unique",
         ),
+        Index("ix_rtt_text_target", "text_id", "target_lang"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(Integer, index=True)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    target_lang: Mapped[str] = mapped_column(String(8), index=True)
     unit: Mapped[str] = mapped_column(String(16))  # sentence|paragraph|text
-    target_lang: Mapped[str] = mapped_column(String(8))
     segment_index: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
     span_start: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
     span_end: Mapped[Optional[int]] = mapped_column(Integer, default=None, nullable=True)
@@ -280,23 +296,26 @@ class ReadingTextTranslation(Base):
 
 
 class ReadingWordGloss(Base):
+    """
+    Global word glosses - per-word translations for texts.
+    """
     __tablename__ = "reading_word_glosses"
     __table_args__ = (
         UniqueConstraint(
-            "account_id",
             "text_id",
+            "target_lang",
             "span_start",
             "span_end",
-            name="uq_rwg_account_text_span",
+            name="uq_rwg_text_span",
         ),
         Index("ix_rwg_text_id", "text_id"),
-        Index("ix_rwg_account_text", "account_id", "text_id"),
+        Index("ix_rwg_text_target", "text_id", "target_lang"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(Integer, index=True)
     text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
-    lang: Mapped[str] = mapped_column(String(16))
+    target_lang: Mapped[str] = mapped_column(String(16), index=True)  # Translation target language
+    lang: Mapped[str] = mapped_column(String(16))  # Source language
     surface: Mapped[str] = mapped_column(String(256))
     lemma: Mapped[Optional[str]] = mapped_column(String(256), default=None)
     pos: Mapped[Optional[str]] = mapped_column(String(32), default=None)
@@ -508,3 +527,69 @@ class UserModelConfig(Base):
     
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+# ============================================================================
+# Global Text Vocabulary (for matching algorithm)
+# ============================================================================
+
+class TextVocabulary(Base):
+    """
+    Vocabulary index for texts - enables efficient word overlap matching.
+    Populated when text translations are generated.
+    """
+    __tablename__ = "text_vocabulary"
+    __table_args__ = (
+        UniqueConstraint("text_id", "lemma", "pos", name="uq_tv_text_lemma_pos"),
+        Index("ix_tv_text_id", "text_id"),
+        Index("ix_tv_lemma", "lemma"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text_id: Mapped[int] = mapped_column(ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True)
+    lemma: Mapped[str] = mapped_column(String(256), index=True)
+    pos: Mapped[Optional[str]] = mapped_column(String(32), default=None, nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+
+
+# ============================================================================
+# Per-Account: Profile Reading History and Queue
+# ============================================================================
+
+class ProfileTextRead(Base):
+    """
+    Tracks which texts a profile has read (per-account DB).
+    References global text IDs without FK constraint.
+    """
+    __tablename__ = "profile_text_reads"
+    __table_args__ = (
+        UniqueConstraint("profile_id", "text_id", name="uq_ptr_profile_text"),
+        Index("ix_ptr_profile_id", "profile_id"),
+        Index("ix_ptr_last_read", "profile_id", "last_read_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(Integer, index=True)  # References global DB (no FK)
+    read_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ProfileTextQueue(Base):
+    """
+    Cached text queue for a profile (per-account DB).
+    Contains pre-computed matches ranked by score.
+    """
+    __tablename__ = "profile_text_queue"
+    __table_args__ = (
+        UniqueConstraint("profile_id", "text_id", name="uq_ptq_profile_text"),
+        Index("ix_ptq_profile_rank", "profile_id", "rank"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), index=True)
+    text_id: Mapped[int] = mapped_column(Integer, index=True)  # References global DB (no FK)
+    rank: Mapped[int] = mapped_column(Integer)  # 1-10, lower = better match
+    score: Mapped[float] = mapped_column(Float)  # Matching score, lower = better
+    calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

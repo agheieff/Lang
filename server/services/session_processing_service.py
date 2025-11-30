@@ -444,9 +444,10 @@ class SessionProcessingService:
         # Ideally schema should include lang, but we can lookup text
         from ..models import ReadingText
         rt = db.get(ReadingText, state.text_id)
-        if not rt or rt.account_id != account_id:
+        if not rt:
             return False
             
+        # Texts are now global - just verify profile exists for this lang
         prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
         if not prof:
             return False
@@ -479,9 +480,10 @@ class SessionProcessingService:
         """Retrieve persisted session state for restoration."""
         from ..models import ReadingText, ProfilePref
         rt = db.get(ReadingText, text_id)
-        if not rt or rt.account_id != account_id:
+        if not rt:
             return None
             
+        # Texts are now global - just verify profile exists for this lang
         prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
         if not prof:
             return None

@@ -46,8 +46,14 @@ class FakeTextGen:
     def is_generation_in_progress(self, a, l):
         return False
 
-    def create_placeholder_text(self, db, a, l, ci_target=None, topic=None, pooled=False):
+    def create_placeholder_text(self, db, a, l, target_lang="en", ci_target=None, topic=None):
         return 1
+    
+    def mark_generation_started(self, a, l):
+        return True
+
+    def mark_generation_completed(self, a, l):
+        pass
 
     def generate_text_content(self, db, gdb, a, l, tid, job_dir, msgs):
         self.generated = True
@@ -153,6 +159,7 @@ def _setup_mocks(monkeypatch):
     class FakeProfile:
         ci_preference = 0.92
         topic_weights = {}
+        target_lang = "en"
     
     class FakeQuery:
         def filter(self, *args, **kwargs): return self
@@ -188,6 +195,10 @@ def _setup_mocks(monkeypatch):
     
     class FakeGlobalSession:
         def query(self, model): return FakeAccountQuery()
+        def get(self, model, id): return None
+        def add(self, obj): pass
+        def flush(self): pass
+        def commit(self): pass
         def close(self): pass
     monkeypatch.setattr("server.services.generation_orchestrator.GlobalSessionLocal", lambda: FakeGlobalSession())
     

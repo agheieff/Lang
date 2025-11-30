@@ -17,11 +17,11 @@ _ACCOUNTS_DIR = DATA_DIR / "accounts"
 _ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Tables to provision in per-account DBs (user-scoped data)
+# NOTE: reading_texts, reading_text_translations, reading_word_glosses are now GLOBAL
 PER_ACCOUNT_TABLES = {
-    # learning/profile + reading
+    # learning/profile
     "profiles",
     "profile_prefs",
-    "reading_texts",
     "cards",
     # lexicon + user stats
     "lexemes",
@@ -32,8 +32,6 @@ PER_ACCOUNT_TABLES = {
     "word_events",
     # activity/logs per reading
     "generation_logs",
-    "reading_text_translations",
-    "reading_word_glosses",
     "translation_logs",
     "reading_lookups",
     # readiness override
@@ -50,6 +48,9 @@ PER_ACCOUNT_TABLES = {
     "usage_tracking",
     # retry tracking
     "generation_retry_attempts",
+    # NEW: Profile reading history and queue (per-account, reference global texts)
+    "profile_text_reads",
+    "profile_text_queue",
 }
 
 
@@ -154,3 +155,13 @@ def open_account_session(account_id: int) -> Session:
     _ensure_account_tables(eng)
     Local = sessionmaker(autocommit=False, autoflush=False, bind=eng)
     return Local()
+
+
+def get_global_db() -> Generator[Session, None, None]:
+    """FastAPI dependency: yields a global DB Session."""
+    from .db import GlobalSessionLocal
+    db = GlobalSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

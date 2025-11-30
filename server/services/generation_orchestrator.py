@@ -79,7 +79,7 @@ class GenerationOrchestrator:
         
         self._start_generation_job(db, account_id, lang)
     
-    def retry_incomplete_texts(self, db: Session, account_id: int, lang: str) -> int:
+    def retry_incomplete_texts(self, global_db: Session, account_id: int, lang: str) -> int:
         """
         Retry translation for incomplete texts that are due for retry.
         Returns number of texts queued for retry.
@@ -90,11 +90,10 @@ class GenerationOrchestrator:
         now = datetime.utcnow()
         retried = 0
         
-        # Find texts with content but incomplete translations
+        # Find texts with content but incomplete translations (from GLOBAL DB)
         incomplete = (
-            db.query(ReadingText)
+            global_db.query(ReadingText)
             .filter(
-                ReadingText.account_id == account_id,
                 ReadingText.lang == lang,
                 ReadingText.content.isnot(None),
                 # Not fully complete
@@ -110,10 +109,11 @@ class GenerationOrchestrator:
             # Check if max attempts reached - delete it
             if attempts >= MAX_ATTEMPTS:
                 logger.warning(f"[ORCHESTRATOR] Deleting text {text.id} - max attempts ({MAX_ATTEMPTS}) reached")
-                from ..models import ReadingWordGloss, ReadingTextTranslation
-                db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text.id).delete()
-                db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text.id).delete()
-                db.delete(text)
+                from ..models import ReadingWordGloss, ReadingTextTranslation, TextVocabulary
+                global_db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text.id).delete()
+                global_db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text.id).delete()
+                global_db.query(TextVocabulary).filter(TextVocabulary.text_id == text.id).delete()
+                global_db.delete(text)
                 continue
             
             # Check backoff - exponential: 1, 2, 4, 8, 16 minutes
@@ -136,11 +136,11 @@ class GenerationOrchestrator:
             )
             retried += 1
         
-        if retried > 0:
+        if retried > 0 or incomplete:
             try:
-                db.commit()
+                global_db.commit()
             except Exception:
-                db.rollback()
+                global_db.rollback()
         
         return retried
     
@@ -246,44 +246,50 @@ class GenerationOrchestrator:
         Returns:
             (text_id, job_dir, ci_target, topic) - params for generation
         """
-        with db_manager.transaction(account_id) as gen_db:
-            from ..models import Profile
-            from ..auth import Account
-            
-            # Check Free tier quota before generating
-            global_db = GlobalSessionLocal()
-            try:
+        from ..models import Profile
+        from ..auth import Account
+        
+        # Get global DB session for text creation
+        global_db = GlobalSessionLocal()
+        
+        try:
+            with db_manager.transaction(account_id) as gen_db:
+                # Check Free tier quota before generating
                 account = global_db.query(Account).filter(Account.id == account_id).first()
                 user_tier = account.subscription_tier if account else "Free"
-            finally:
-                global_db.close()
+                
+                usage_service = get_usage_service()
+                can_generate, reason = usage_service.check_quota(gen_db, account_id, user_tier)
+                if not can_generate:
+                    raise QuotaExceededError(reason)
+                
+                # Get profile for pool generation params
+                prof = gen_db.query(Profile).filter(
+                    Profile.account_id == account_id, 
+                    Profile.lang == lang
+                ).first()
+                
+                # Get target language from profile (default to 'en')
+                target_lang = prof.target_lang if prof else "en"
+                
+                # Get varied generation params from pool service
+                pool_service = get_pool_selection_service()
+                if prof:
+                    ci_target, topic = pool_service.get_generation_params(prof, vary=True)
+                else:
+                    # Default values if no profile exists
+                    ci_target, topic = 0.92, "daily_life"
             
-            usage_service = get_usage_service()
-            can_generate, reason = usage_service.check_quota(gen_db, account_id, user_tier)
-            if not can_generate:
-                raise QuotaExceededError(reason)
-            
-            # Get profile for pool generation params
-            prof = gen_db.query(Profile).filter(
-                Profile.account_id == account_id, 
-                Profile.lang == lang
-            ).first()
-            
-            # Get varied generation params from pool service
-            pool_service = get_pool_selection_service()
-            if prof:
-                ci_target, topic = pool_service.get_generation_params(prof, vary=True)
-            else:
-                # Default values if no profile exists
-                ci_target, topic = 0.92, "daily_life"
-            
-            # Create placeholder text with pool metadata
+            # Create placeholder text in GLOBAL DB
             text_id = self.text_gen_service.create_placeholder_text(
-                gen_db, account_id, lang,
-                ci_target=ci_target, topic=topic, pooled=True
+                global_db, account_id, lang,
+                target_lang=target_lang,
+                ci_target=ci_target, topic=topic
             )
             if not text_id:
                 raise Exception("Failed to create placeholder text")
+            
+            global_db.commit()
             
             # Set up logging directory
             job_dir = self._get_job_dir(account_id, lang)
@@ -292,6 +298,8 @@ class GenerationOrchestrator:
             self.notification_service.send_generation_started(account_id, lang, text_id)
             
             return text_id, job_dir, ci_target, topic
+        finally:
+            global_db.close()
     
     async def _generate_main_text_content(
         self, 
@@ -322,6 +330,15 @@ class GenerationOrchestrator:
                 result = self.text_gen_service.generate_text_content(
                     gen_db, global_db, account_id, lang, text_id, job_dir, messages
                 )
+                
+                # Store prompt data in text record for analysis/reproducibility
+                if result.success:
+                    from ..models import ReadingText
+                    text = global_db.get(ReadingText, text_id)
+                    if text:
+                        text.prompt_words = words or {}
+                        text.prompt_level_hint = level_hint
+                        global_db.commit()
                 
                 # Store messages for later use in translation
                 result.messages = messages
@@ -382,15 +399,21 @@ class GenerationOrchestrator:
         from ..models import ReadingText
         MAX_ATTEMPTS = 5
         
-        # Track this attempt
+        # Track this attempt (ReadingText is now in GLOBAL DB)
         try:
-            with db_manager.transaction(account_id) as db:
-                text = db.get(ReadingText, text_id)
+            global_db = GlobalSessionLocal()
+            try:
+                text = global_db.get(ReadingText, text_id)
                 if text:
                     text.translation_attempts = (text.translation_attempts or 0) + 1
                     text.last_translation_attempt = datetime.utcnow()
                     current_attempt = text.translation_attempts
+                    global_db.commit()
                     logger.info(f"[ORCHESTRATOR] Translation attempt {current_attempt}/{MAX_ATTEMPTS} for text_id={text_id}")
+                else:
+                    current_attempt = 1
+            finally:
+                global_db.close()
         except Exception as e:
             logger.warning(f"[ORCHESTRATOR] Failed to track translation attempt: {e}")
             current_attempt = 1
@@ -448,11 +471,13 @@ class GenerationOrchestrator:
     def _handle_translation_failure(self, account_id: int, lang: str, text_id: int, 
                                     current_attempt: int, max_attempts: int) -> None:
         """Handle translation failure - delete text if max attempts reached."""
-        from ..models import ReadingText, ReadingWordGloss, ReadingTextTranslation
+        from ..models import ReadingText, ReadingWordGloss, ReadingTextTranslation, TextVocabulary
         
         try:
-            with db_manager.transaction(account_id) as db:
-                text = db.get(ReadingText, text_id)
+            # ReadingText is now in GLOBAL DB
+            global_db = GlobalSessionLocal()
+            try:
+                text = global_db.get(ReadingText, text_id)
                 if not text:
                     return
                 
@@ -465,32 +490,37 @@ class GenerationOrchestrator:
                     # Delete the broken text and its translations
                     logger.warning(f"[ORCHESTRATOR] Deleting text {text_id} after {max_attempts} failed attempts")
                     
-                    # Delete associated data
-                    db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text_id).delete()
-                    db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text_id).delete()
-                    db.delete(text)
+                    # Delete associated data from global DB
+                    global_db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text_id).delete()
+                    global_db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text_id).delete()
+                    global_db.query(TextVocabulary).filter(TextVocabulary.text_id == text_id).delete()
+                    global_db.delete(text)
+                    global_db.commit()
                     
                     logger.info(f"[ORCHESTRATOR] Deleted broken text {text_id}")
                 else:
                     # Schedule retry with exponential backoff
                     backoff_minutes = 2 ** (current_attempt - 1)  # 1, 2, 4, 8, 16 minutes
                     logger.info(f"[ORCHESTRATOR] Text {text_id} will be retried (attempt {current_attempt}/{max_attempts}, backoff {backoff_minutes}m)")
+            finally:
+                global_db.close()
         except Exception as e:
             logger.error(f"[ORCHESTRATOR] Error handling translation failure: {e}")
     
     def _notify_next_ready_if_backup(self, account_id: int, lang: str, text_id: int) -> None:
-        """Send next_ready event if this text is a backup (unopened) text."""
+        """Send next_ready event if this text is a backup (ready but not assigned) text."""
         try:
             from ..models import ReadingText
-            with db_manager.transaction(account_id) as db:
-                text = db.query(ReadingText).filter(
-                    ReadingText.id == text_id,
-                    ReadingText.account_id == account_id
-                ).first()
+            # ReadingText is now in GLOBAL DB
+            global_db = GlobalSessionLocal()
+            try:
+                text = global_db.get(ReadingText, text_id)
                 
-                # Only send next_ready if this text hasn't been opened yet
-                if text and text.opened_at is None:
+                # Send notification if text is ready
+                if text and text.words_complete and text.sentences_complete:
                     self.notification_service.send_next_ready(account_id, lang, text_id)
+            finally:
+                global_db.close()
         except Exception as e:
             logger.warning(f"[ORCHESTRATOR] Failed to check/send next_ready: {e}")
     

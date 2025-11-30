@@ -45,10 +45,10 @@ class TestReadingLookupCreation:
     
     def test_lookup_requires_lang_and_target_lang(self, db_session):
         """Verify that ReadingLookup requires lang and target_lang fields."""
-        # First create a ReadingText (required for FK)
+        # First create a ReadingText (required for FK) - now global without account_id
         text = ReadingText(
-            account_id=1,
             lang="zh",
+            target_lang="en",
             content="Test content",
         )
         db_session.add(text)
@@ -93,24 +93,22 @@ class TestReadingLookupCreation:
 
 
 class TestTextStateTransitions:
-    """Test ReadingText state transitions."""
+    """Test ReadingText state transitions (global pool model)."""
     
     def test_text_lifecycle(self, db_session):
-        """Test complete text lifecycle: create -> open -> read."""
-        # Create placeholder
+        """Test complete text lifecycle: create -> complete -> read."""
+        # Create placeholder (now global - no account_id, no opened_at, no read_at)
         text = ReadingText(
-            account_id=1,
             lang="zh",
+            target_lang="en",
             content=None,  # Placeholder
-            pooled=True,
         )
         db_session.add(text)
         db_session.commit()
         
         assert text.content is None
-        assert text.opened_at is None
-        assert text.read_at is None
-        assert text.pooled is True
+        assert text.words_complete is False
+        assert text.sentences_complete is False
         
         # Simulate generation complete
         text.content = "Generated content"
@@ -120,46 +118,41 @@ class TestTextStateTransitions:
         assert text.content == "Generated content"
         assert text.generated_at is not None
         
-        # Simulate user opens text
-        text.opened_at = datetime.now(timezone.utc)
-        text.pooled = False
+        # Simulate translations complete
+        text.words_complete = True
+        text.sentences_complete = True
         db_session.commit()
         
-        assert text.opened_at is not None
-        assert text.pooled is False
-        
-        # Simulate user finishes text
-        text.is_read = True
-        text.read_at = datetime.now(timezone.utc)
-        db_session.commit()
-        
-        assert text.is_read is True
-        assert text.read_at is not None
+        # Verify translations complete
+        assert text.words_complete is True
+        assert text.sentences_complete is True
     
     def test_pool_query_filters(self, db_session):
-        """Test that pool queries correctly filter texts."""
-        # Create texts in different states
-        pooled_ready = ReadingText(
-            account_id=1, lang="zh", content="Ready", pooled=True, opened_at=None
+        """Test that global pool queries correctly filter texts."""
+        # Create texts in different states (global pool model)
+        ready_text = ReadingText(
+            lang="zh", target_lang="en", content="Ready", 
+            words_complete=True, sentences_complete=True
         )
-        pooled_generating = ReadingText(
-            account_id=1, lang="zh", content=None, pooled=True, opened_at=None
+        generating_text = ReadingText(
+            lang="zh", target_lang="en", content=None,
+            words_complete=False, sentences_complete=False
         )
-        opened = ReadingText(
-            account_id=1, lang="zh", content="Opened", pooled=False, 
-            opened_at=datetime.now(timezone.utc)
+        partial_text = ReadingText(
+            lang="zh", target_lang="en", content="Partial",
+            words_complete=True, sentences_complete=False
         )
         
-        db_session.add_all([pooled_ready, pooled_generating, opened])
+        db_session.add_all([ready_text, generating_text, partial_text])
         db_session.commit()
         
-        # Query for pool (ready texts only)
+        # Query for ready texts only (content + both translations complete)
         pool = db_session.query(ReadingText).filter(
-            ReadingText.account_id == 1,
             ReadingText.lang == "zh",
-            ReadingText.pooled == True,
+            ReadingText.target_lang == "en",
             ReadingText.content.isnot(None),
-            ReadingText.opened_at.is_(None),
+            ReadingText.words_complete == True,
+            ReadingText.sentences_complete == True,
         ).all()
         
         assert len(pool) == 1
@@ -282,17 +275,17 @@ class TestLexemeSRS:
 
 
 class TestReadingWordGloss:
-    """Test ReadingWordGloss constraints."""
+    """Test ReadingWordGloss constraints (global model)."""
     
     def test_word_gloss_creation(self, db_session):
         """Test creating word glosses."""
-        text = ReadingText(account_id=1, lang="zh", content="你好世界")
+        text = ReadingText(lang="zh", target_lang="en", content="你好世界")
         db_session.add(text)
         db_session.flush()
         
         gloss = ReadingWordGloss(
-            account_id=1,
             text_id=text.id,
+            target_lang="en",
             lang="zh",
             surface="你好",
             translation="hello",
@@ -307,21 +300,21 @@ class TestReadingWordGloss:
         assert saved.translation == "hello"
     
     def test_word_gloss_unique_constraint(self, db_session):
-        """Test that duplicate spans are rejected."""
-        text = ReadingText(account_id=1, lang="zh", content="你好世界")
+        """Test that duplicate spans are rejected (per text+target_lang)."""
+        text = ReadingText(lang="zh", target_lang="en", content="你好世界")
         db_session.add(text)
         db_session.flush()
         
         gloss1 = ReadingWordGloss(
-            account_id=1, text_id=text.id, lang="zh",
+            text_id=text.id, target_lang="en", lang="zh",
             surface="你好", span_start=0, span_end=2,
         )
         db_session.add(gloss1)
         db_session.commit()
         
-        # Try to add duplicate span
+        # Try to add duplicate span (same text_id, target_lang, span)
         gloss2 = ReadingWordGloss(
-            account_id=1, text_id=text.id, lang="zh",
+            text_id=text.id, target_lang="en", lang="zh",
             surface="你好", span_start=0, span_end=2,  # Same span
         )
         db_session.add(gloss2)

@@ -35,29 +35,28 @@ def test_user(db_session):
 def test_reading_context_is_fully_ready(db_session, test_user):
     """
     Verify that ReadingViewService correctly flags a text as fully ready
-    when it has content, words, and sentence translations.
+    when it has content, words, and sentence translations (global model).
     """
-    # 1. Setup Data
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola mundo.")
+    # 1. Setup Data (global model - no account_id)
+    rt = ReadingText(lang="es", target_lang="en", content="Hola mundo.")
     db_session.add(rt)
     db_session.flush()
     
-    # Add Sentence Translation
+    # Add Sentence Translation (global model)
     trans = ReadingTextTranslation(
-        account_id=test_user.id,
         text_id=rt.id,
-        unit=TextUnit.SENTENCE,
         target_lang="en",
+        unit=TextUnit.SENTENCE,
         segment_index=0,
         source_text="Hola mundo.",
         translated_text="Hello world."
     )
     db_session.add(trans)
     
-    # Add Word Gloss
+    # Add Word Gloss (global model)
     word = ReadingWordGloss(
-        account_id=test_user.id,
         text_id=rt.id,
+        target_lang="en",
         lang="es",
         surface="mundo",
         span_start=5,
@@ -73,8 +72,8 @@ def test_reading_context_is_fully_ready(db_session, test_user):
         with patch.object(service.title_service, 'get_title', return_value=("Title", "Trans")):
             with patch.object(service.title_service, 'get_title_words', return_value=[]):
                 
-                # Action
-                context = service.get_current_reading_context(db_session, test_user.id)
+                # Action - pass same session as both account_db and global_db for test
+                context = service.get_current_reading_context(db_session, db_session, test_user.id)
                 
                 # Assertion
                 assert context.text_id == rt.id
@@ -82,40 +81,41 @@ def test_reading_context_is_fully_ready(db_session, test_user):
 
 def test_readiness_evaluation_logic(db_session, test_user):
     """
-    Directly test the ReadinessService evaluate logic.
+    Directly test the ReadinessService evaluate logic (global model).
     """
     from server.services.readiness_service import ReadinessService
     rs = ReadinessService()
     
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola.")
+    # Global model - no account_id
+    rt = ReadingText(lang="es", target_lang="en", content="Hola.")
     db_session.add(rt)
     db_session.flush()
+    db_session.commit()
     
     # No translations yet
-    # Note: We need to commit before evaluating because evaluate() runs new queries against DB
-    db_session.commit()
-    
-    ready, reason = rs.evaluate(db_session, rt, test_user.id)
+    ready, reason = rs.evaluate(db_session, rt, target_lang="en")
     assert ready is False
     
-    # Add Word
-    db_session.add(ReadingWordGloss(account_id=test_user.id, text_id=rt.id, lang="es", surface="Hola", span_start=0, span_end=4))
+    # Add Word (global model)
+    db_session.add(ReadingWordGloss(
+        text_id=rt.id, target_lang="en", lang="es", 
+        surface="Hola", span_start=0, span_end=4
+    ))
     db_session.commit()
     
-    ready, reason = rs.evaluate(db_session, rt, test_user.id)
-    assert ready is False # Needs sentences too
+    ready, reason = rs.evaluate(db_session, rt, target_lang="en")
+    assert ready is False  # Needs sentences too
     
-    # Add Sentence
+    # Add Sentence (global model)
     db_session.add(ReadingTextTranslation(
-        account_id=test_user.id, 
         text_id=rt.id, 
-        unit=TextUnit.SENTENCE, 
         target_lang="en",
+        unit=TextUnit.SENTENCE, 
         source_text="Hola.",
         translated_text="Hello."
     ))
     db_session.commit()
     
-    ready, reason = rs.evaluate(db_session, rt, test_user.id)
+    ready, reason = rs.evaluate(db_session, rt, target_lang="en")
     assert ready is True
     assert reason == "both"

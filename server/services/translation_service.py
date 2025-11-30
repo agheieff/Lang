@@ -160,6 +160,11 @@ class TranslationService:
         prof = account_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
         target_lang = (prof.target_lang if prof and getattr(prof, "target_lang", None) else "en")
         
+        # Get the text record from global DB to get target_lang
+        rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
+        if rt:
+            target_lang = rt.target_lang or target_lang
+        
         # Rebuild translation contexts
         ctx = build_translation_contexts(
             reading_messages,
@@ -188,21 +193,27 @@ class TranslationService:
             cur_base_url = model_config.base_url
             
             words_success = self._generate_word_translations(
-                account_db, account_id, text_id, lang, target_lang,
+                global_db, account_id, text_id, lang, target_lang,
                 text_content, job_dir, cur_provider, cur_model, cur_base_url,
                 w_messages, reading_messages, text_content, user_tier,
                 model_config=model_config
             )
             if words_success:
                 best_result.words = True
-                # Set words_complete flag on the text
+                # Set words_complete flag on the text (in GLOBAL DB)
                 try:
-                    rt = account_db.get(ReadingText, text_id)
+                    rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
                     if rt:
                         rt.words_complete = True
-                        account_db.flush()
+                        # Update unique_lemma_count from TextVocabulary
+                        from ..models import TextVocabulary
+                        lemma_count = global_db.query(TextVocabulary).filter(TextVocabulary.text_id == text_id).count()
+                        rt.unique_lemma_count = lemma_count
+                        global_db.commit()
+                        logger.info(f"[TRANSLATION] Set words_complete=True for text_id={text_id}, unique_lemmas={lemma_count}")
                 except Exception as e:
                     logger.warning(f"[TRANSLATION] Failed to set words_complete flag: {e}")
+                    global_db.rollback()
 
         # Generate sentence translations using sentence_models
         for model_config in (sentence_models or []):
@@ -213,21 +224,23 @@ class TranslationService:
             cur_base_url = model_config.base_url
             
             sentences_success = self._generate_sentence_translations(
-                account_db, account_id, text_id, lang, target_lang,
+                global_db, account_id, text_id, lang, target_lang,
                 text_content, job_dir, cur_provider, cur_model, cur_base_url,
                 tr_messages,
                 model_config=model_config
             )
             if sentences_success:
                 best_result.sentences = True
-                # Set sentences_complete flag on the text
+                # Set sentences_complete flag on the text (in GLOBAL DB)
                 try:
-                    rt = account_db.get(ReadingText, text_id)
+                    rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
                     if rt:
                         rt.sentences_complete = True
-                        account_db.flush()
+                        global_db.commit()
+                        logger.info(f"[TRANSLATION] Set sentences_complete=True for text_id={text_id}")
                 except Exception as e:
                     logger.warning(f"[TRANSLATION] Failed to set sentences_complete flag: {e}")
+                    global_db.rollback()
         
         # Generate title translation using sentence model (or first available)
         if text_title:
@@ -235,7 +248,7 @@ class TranslationService:
             if title_model:
                 cur_provider = "openrouter" if "openrouter" in title_model.base_url else "local"
                 self._generate_title_translation(
-                    account_db, account_id, text_id, lang, target_lang,
+                    global_db, account_id, text_id, lang, target_lang,
                     text_title, job_dir, cur_provider, title_model.model, title_model.base_url,
                     model_config=title_model
                 )
@@ -250,7 +263,7 @@ class TranslationService:
         return best_result
     
     def _generate_word_translations(self,
-                                    account_db: Session,
+                                    db: Session,  # Global DB for text tables
                                     account_id: int,
                                     text_id: int,
                                     lang: str,
@@ -266,7 +279,7 @@ class TranslationService:
                                     user_tier: str = "Free",
                                     user_api_key: Optional[str] = None,
                                     model_config=None) -> bool:
-        """Generate word translations split by sentence."""
+        """Generate word translations split by sentence. Writes to GLOBAL DB."""
         try:
             # Split text into sentences
             sent_spans = split_sentences(text_content, lang)
@@ -352,35 +365,18 @@ class TranslationService:
                         logger.warning(f"[TRANSLATION] Retry failed for sentence {idx + 1}: {e}")
         
             # Track existing and new word spans to avoid duplicates
-            existing = self._get_existing_spans(account_db, account_id, text_id)
+            existing = self._get_existing_spans(db, text_id, target_lang)
             seen = set()
             
             # Persist word translations
             for s, seg, tup, msgs_used in wd_seg_results:
-                # Log to DB per-call (main thread) before persisting
-                try:
-                    if tup:
-                        log_llm_request(
-                            account_db,
-                            account_id=account_id,
-                            text_id=text_id,
-                            kind="word_translation",
-                            provider=tup[2],
-                            model=tup[3],
-                            base_url=base_url,
-                            request={"messages": msgs_used},
-                            response=tup[1],
-                            status="ok",
-                        )
-                except Exception:
-                    pass
                 self._persist_word_translations(
-                    account_db, account_id, text_id, lang, s, seg, tup, msgs_used, existing, seen
+                    db, text_id, lang, target_lang, s, seg, tup, msgs_used, existing, seen
                 )
         
             # Flush the session to ensure word translations are written
             try:
-                account_db.flush()
+                db.flush()
             except Exception as e:
                 logger.error(f"[TRANSLATION] Failed to flush word translations: {e}", exc_info=True)
                 return False
@@ -392,8 +388,8 @@ class TranslationService:
             return False
     
     def _generate_sentence_translations(self,
-                                      account_db: Session,
-                                      account_id: int,
+                                      db: Session,  # Global DB
+                                      account_id: int,  # Kept for logging context
                                       text_id: int,
                                       lang: str,
                                       target_lang: str,
@@ -405,7 +401,7 @@ class TranslationService:
                                       tr_messages: List[Dict],
                                       user_api_key: Optional[str] = None,
                                       model_config=None) -> bool:
-        """Generate structured sentence translations."""
+        """Generate structured sentence translations. Writes to GLOBAL DB."""
         try:
             # Debug logging
             logger.info(f"[TRANSLATION] Sentence translation starting: provider={provider}, model_id={model_id}, base_url={base_url}")
@@ -436,22 +432,8 @@ class TranslationService:
                 logger.error("[TRANSLATION] No response buffer from LLM for structured translation after retries")
                 return False
             
-            # Log to DB (main thread) for structured translation
-            try:
-                log_llm_request(
-                    account_db,
-                    account_id=account_id,
-                    text_id=text_id,
-                    kind="structured_translation",
-                    provider=used_provider,
-                    model=used_model,
-                    base_url=base_url,
-                    request={"messages": tr_messages},
-                    response=tr_resp,
-                    status="ok",
-                )
-            except Exception:
-                pass
+            # Note: LLM request logging skipped for global DB operations
+            # The log would go to per-account DB which we don't have here
 
             # Parse and save sentence translations
             tr_parsed = extract_structured_translation(tr_buf)
@@ -473,11 +455,10 @@ class TranslationService:
                                 span_start, span_end, actual_source_text = sent_spans[idx]
                         except Exception:
                             span_start, span_end = None, None
-                        account_db.add(ReadingTextTranslation(
-                            account_id=account_id,
+                        db.add(ReadingTextTranslation(
                             text_id=text_id,
-                            unit="sentence",
                             target_lang=target_lang,
+                            unit="sentence",
                             segment_index=idx,
                             span_start=span_start,
                             span_end=span_end,
@@ -505,20 +486,19 @@ class TranslationService:
                     full_translation = "\n\n".join(full_translation_parts)
                     
                     # Check if already exists (idempotency)
-                    exists = account_db.query(ReadingTextTranslation).filter(
-                        ReadingTextTranslation.account_id == account_id,
+                    exists = db.query(ReadingTextTranslation).filter(
                         ReadingTextTranslation.text_id == text_id,
+                        ReadingTextTranslation.target_lang == target_lang,
                         ReadingTextTranslation.unit == "text",
                         # Exclude title translation which usually has segment_index=0 and different source
                         ReadingTextTranslation.segment_index == 1 
                     ).first()
                     
                     if not exists:
-                        account_db.add(ReadingTextTranslation(
-                            account_id=account_id,
+                        db.add(ReadingTextTranslation(
                             text_id=text_id,
-                            unit="text",
                             target_lang=target_lang,
+                            unit="text",
                             segment_index=1, # 0 is usually title
                             span_start=0,
                             span_end=len(text_content),
@@ -528,7 +508,7 @@ class TranslationService:
                             model=model_id,
                         ))
                         # Force flush here to ensure it's visible to queries immediately
-                        account_db.flush()
+                        db.flush()
                         logger.info(f"[TRANSLATION] Synthesized full text translation for text_id={text_id}")
             except Exception as e:
                 logger.error(f"[TRANSLATION] Failed to synthesize full text translation: {e}", exc_info=True)
@@ -536,7 +516,7 @@ class TranslationService:
             
             # Flush the session to ensure data is written
             try:
-                account_db.flush()
+                db.flush()
             except Exception as e:
                 logger.error(f"[TRANSLATION] Failed to flush sentence translations: {e}", exc_info=True)
                 return False
@@ -548,8 +528,8 @@ class TranslationService:
             return False
     
     def _generate_title_translation(self,
-                                account_db: Session,
-                                account_id: int,
+                                db: Session,  # Global DB
+                                account_id: int,  # Kept for context
                                 text_id: int,
                                 lang: str,
                                 target_lang: str,
@@ -576,22 +556,7 @@ class TranslationService:
             if not title_buf:
                 return False
             
-            # Log to DB (main thread) for title translation
-            try:
-                log_llm_request(
-                    account_db,
-                    account_id=account_id,
-                    text_id=text_id,
-                    kind="title_translation",
-                    provider=used_provider,
-                    model=used_model,
-                    base_url=base_url,
-                    request={"messages": title_messages},
-                    response=title_resp,
-                    status="ok",
-                )
-            except Exception:
-                pass
+            # Note: LLM request logging skipped for global DB operations
             
             # Extract title translation
             try:
@@ -619,12 +584,11 @@ class TranslationService:
                     logger.warning(f"[TRANSLATION] Could not extract title translation from: {title_buf}")
                     return False
                 
-                # Save title translation to database
-                account_db.add(ReadingTextTranslation(
-                    account_id=account_id,
+                # Save title translation to global database
+                db.add(ReadingTextTranslation(
                     text_id=text_id,
-                    unit="text",
                     target_lang=target_lang,
+                    unit="text",
                     segment_index=0,
                     span_start=0,
                     span_end=len(text_title),
@@ -636,7 +600,7 @@ class TranslationService:
                 
                 # Flush the session to ensure title translation is written
                 try:
-                    account_db.flush()
+                    db.flush()
                 except Exception as e:
                     logger.error(f"[TRANSLATION] Failed to flush title translation: {e}", exc_info=True)
                     return False
@@ -655,21 +619,22 @@ class TranslationService:
         """Deprecated; delegate to utils.text_segmentation.split_sentences."""
         return split_sentences(text, lang)
 
-    def backfill_sentence_spans(self, account_db: Session, account_id: int, text_id: int) -> bool:
+    def backfill_sentence_spans(self, db: Session, text_id: int, target_lang: str) -> bool:
         """Backfill span_start/span_end for existing sentence translations by index order.
-
+        
+        Now uses global DB (ReadingText and ReadingTextTranslation are global).
         Returns True if any updates were attempted.
         """
         try:
-            rt = account_db.query(ReadingText).filter(ReadingText.id == text_id, ReadingText.account_id == account_id).first()
+            rt = db.get(ReadingText, text_id)
             if not rt or not getattr(rt, "content", None):
                 return False
             sent_spans = self._split_sentences(rt.content, rt.lang)
             rows = (
-                account_db.query(ReadingTextTranslation)
+                db.query(ReadingTextTranslation)
                 .filter(
-                    ReadingTextTranslation.account_id == account_id,
                     ReadingTextTranslation.text_id == text_id,
+                    ReadingTextTranslation.target_lang == target_lang,
                     ReadingTextTranslation.unit == "sentence",
                 )
                 .order_by(ReadingTextTranslation.segment_index.asc().nullsfirst())
@@ -689,13 +654,13 @@ class TranslationService:
                     changed = True
             if changed:
                 try:
-                    account_db.commit()
+                    db.commit()
                 except Exception:
-                    account_db.rollback()
+                    db.rollback()
             return True
         except Exception:
             try:
-                account_db.rollback()
+                db.rollback()
             except Exception:
                 pass
             return False
@@ -703,17 +668,19 @@ class TranslationService:
     # llm_call_and_log_to_file moved to llm_logging; keep class focused on orchestration
     
     def _persist_word_translations(self,
-                                  account_db: Session,
-                                  account_id: int,
+                                  db: Session,  # Global DB
                                   text_id: int,
                                   lang: str,
+                                  target_lang: str,
                                   seg_start: int,
                                   seg_text: str,
                                   tup: Optional[tuple],
                                   msgs_used: List[Dict],
                                   existing: set,
                                   seen: set) -> None:
-        """Persist word translations for a sentence segment."""
+        """Persist word translations for a sentence segment. Writes to GLOBAL DB."""
+        from ..models import TextVocabulary
+        
         if not tup:
             return
         
@@ -739,12 +706,15 @@ class TranslationService:
             if not _pos_local and isinstance(it, dict):
                 _pos_local = it.get("part_of_speech")
             
-            account_db.add(ReadingWordGloss(
-                account_id=account_id,
+            lemma = (None if str(lang).startswith("zh") else it.get("lemma")) or it["word"]
+            
+            # Add word gloss to global DB
+            db.add(ReadingWordGloss(
                 text_id=text_id,
+                target_lang=target_lang,
                 lang=lang,
                 surface=it["word"],
-                lemma=(None if str(lang).startswith("zh") else it.get("lemma")),
+                lemma=lemma,
                 pos=_pos_local,
                 pinyin=it.get("pinyin"),
                 translation=it["translation"],
@@ -753,15 +723,33 @@ class TranslationService:
                 span_start=gs[0],
                 span_end=gs[1],
             ))
+            
+            # Add to TextVocabulary for matching algorithm (upsert pattern)
+            vocab_lemma = lemma or it["word"]
+            existing_vocab = db.query(TextVocabulary).filter(
+                TextVocabulary.text_id == text_id,
+                TextVocabulary.lemma == vocab_lemma,
+                TextVocabulary.pos == _pos_local
+            ).first()
+            if existing_vocab:
+                existing_vocab.occurrence_count += 1
+            else:
+                db.add(TextVocabulary(
+                    text_id=text_id,
+                    lemma=vocab_lemma,
+                    pos=_pos_local,
+                    occurrence_count=1
+                ))
+            
             seen.add(gs)
     
-    def _get_existing_spans(self, account_db: Session, account_id: int, text_id: int) -> set:
-        """Get existing word spans to avoid duplicates."""
+    def _get_existing_spans(self, db: Session, text_id: int, target_lang: str) -> set:
+        """Get existing word spans to avoid duplicates. Uses GLOBAL DB."""
         try:
             return set(
                 (rw.span_start, rw.span_end)
-                for rw in account_db.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
-                .filter(ReadingWordGloss.account_id == account_id, ReadingWordGloss.text_id == text_id)
+                for rw in db.query(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
+                .filter(ReadingWordGloss.text_id == text_id, ReadingWordGloss.target_lang == target_lang)
                 .all()
             )
         except Exception:

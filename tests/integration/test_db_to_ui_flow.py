@@ -15,7 +15,6 @@ from server.schemas.session import TextSessionState
 
 @pytest.fixture
 def db_session():
-    # Setup in-memory SQLite db
     engine = create_engine("sqlite:///:memory:", echo=False)
     Base.metadata.create_all(bind=engine)
     AuthBase.metadata.create_all(bind=engine)
@@ -38,10 +37,10 @@ def test_user(db_session):
 
 def test_reading_view_html_structure(db_session, test_user):
     """
-    Verify that data from DB is correctly embedded into the HTML structure.
+    Verify that data from DB is correctly embedded into the HTML structure (global model).
     """
-    # 1. Setup Data
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola mundo.")
+    # 1. Setup Data (global model - no account_id)
+    rt = ReadingText(lang="es", target_lang="en", content="Hola mundo.")
     db_session.add(rt)
     db_session.flush()
     
@@ -49,14 +48,10 @@ def test_reading_view_html_structure(db_session, test_user):
     prof = db_session.query(Profile).filter_by(account_id=test_user.id).first()
     prof.current_text_id = rt.id
     
-    # Add Title
-    # We'll mock TitleExtractionService for simplicity, or add data if we want to test that too.
-    # Let's patch the service method to return known title data
-    
-    # Add Words
+    # Add Words (global model)
     word = ReadingWordGloss(
-        account_id=test_user.id,
         text_id=rt.id,
+        target_lang="en",
         lang="es",
         surface="mundo",
         translation="world",
@@ -68,18 +63,14 @@ def test_reading_view_html_structure(db_session, test_user):
 
     service = ReadingViewService()
     
-    # Mock dependencies that aren't under test here
     with patch.object(service.title_service, 'get_title', return_value=("Hola Title", "Hello Title")):
         with patch.object(service.title_service, 'get_title_words', return_value=[]):
-            # Mock ReadinessService to avoid "no sentences" retry logic affecting status
             with patch.object(service.readiness_service, 'evaluate', return_value=(True, "both")):
-                # Force selection service to pick our text
                 with patch.object(service.selection_service, 'pick_current_or_new', return_value=rt):
                     
-                    # 2. Action
-                    context = service.get_current_reading_context(db_session, test_user.id)
+                    # Pass same session as both for testing
+                    context = service.get_current_reading_context(db_session, db_session, test_user.id)
                     
-                    # 3. Render (call the renderer logic directly or via context)
                     from server.views.reading_renderer import render_reading_block
                     html = render_reading_block(
                         context.text_id,
@@ -90,14 +81,10 @@ def test_reading_view_html_structure(db_session, test_user):
                         title_translation=context.title_translation
                     )
 
-    # 4. Assertions
     assert "Hola mundo." in html
     assert "Hola Title" in html
-    
-    # Check for embedded JSON data (the "DB -> UI" handoff)
     assert 'id="reading-words-json"' in html
     
-    # Parse the embedded JSON to verify structure
     import re
     match = re.search(r'<script id="reading-words-json" type="application/json">(.*?)</script>', html, re.DOTALL)
     assert match is not None
@@ -108,24 +95,23 @@ def test_reading_view_html_structure(db_session, test_user):
     assert json_data[0]['translation'] == "world"
     assert json_data[0]['span_start'] == 5
     
-    # Check title translation embed
     assert 'id="reading-title-translation"' in html
     assert "Hello Title" in html
 
 @pytest.mark.asyncio
 async def test_sentence_translations_api(db_session, test_user):
     """
-    Verify that the sentence translation API returns DB data in correct format.
+    Verify that the sentence translation API returns DB data in correct format (global model).
     """
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola. Mundo.")
+    rt = ReadingText(lang="es", target_lang="en", content="Hola. Mundo.")
     db_session.add(rt)
     db_session.flush()
     
+    # Global model - no account_id
     trans = ReadingTextTranslation(
-        account_id=test_user.id,
         text_id=rt.id,
-        unit=TextUnit.SENTENCE,
         target_lang="en",
+        unit=TextUnit.SENTENCE,
         segment_index=0,
         span_start=0,
         span_end=4,
@@ -135,7 +121,6 @@ async def test_sentence_translations_api(db_session, test_user):
     db_session.add(trans)
     db_session.commit()
     
-    # Call the API function directly (simulating route)
     result = await get_translations(
         text_id=rt.id,
         unit="sentence",
@@ -166,18 +151,17 @@ def test_renderer_loading_state():
 @pytest.mark.asyncio
 async def test_see_translation_data_availability(db_session, test_user):
     """
-    Verify full text translation availability for the 'See Translation' button.
+    Verify full text translation availability for the 'See Translation' button (global model).
     """
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola mundo.")
+    rt = ReadingText(lang="es", target_lang="en", content="Hola mundo.")
     db_session.add(rt)
     db_session.flush()
     
-    # Translation for the whole text
+    # Global model
     trans = ReadingTextTranslation(
-        account_id=test_user.id,
         text_id=rt.id,
-        unit="text",  # Note: DB stores string enum usually
         target_lang="en",
+        unit="text",
         source_text="Hola mundo.",
         translated_text="Hello world.",
         segment_index=0
@@ -185,7 +169,6 @@ async def test_see_translation_data_availability(db_session, test_user):
     db_session.add(trans)
     db_session.commit()
     
-    # The "See Translation" button fetches unit='text' (or paragraph)
     result = await get_translations(
         text_id=rt.id,
         unit="text",
@@ -201,11 +184,10 @@ async def test_sync_session_nested_schema(db_session, test_user):
     """
     Verify that the sync endpoint accepts the nested 'Big JSON' structure.
     """
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola world")
+    rt = ReadingText(lang="es", target_lang="en", content="Hola world")
     db_session.add(rt)
     db_session.commit()
     
-    # Mock payload matching home.html structure
     payload = {
         "session_id": "test_sess_123",
         "text_id": rt.id,
@@ -228,13 +210,11 @@ async def test_sync_session_nested_schema(db_session, test_user):
         ]
     }
     
-    # Validate via Pydantic model first
     state = TextSessionState(**payload)
     assert len(state.paragraphs) == 1
     assert len(state.paragraphs[0].sentences[0].words) == 2
     assert state.paragraphs[0].sentences[0].words[0].looked_up_at == 12345
     
-    # Call the endpoint function
     result = await sync_session_state(
         state=state,
         db=db_session,
@@ -242,7 +222,6 @@ async def test_sync_session_nested_schema(db_session, test_user):
     )
     assert result["ok"] is True
     
-    # Verify persistence
     from server.models import ProfilePref
     pref = db_session.query(ProfilePref).first()
     assert pref is not None

@@ -78,12 +78,10 @@ SAMPLE_TITLE_RESPONSE = """
 @pytest.fixture
 def test_user(db_session):
     # Create a test account and profile
-    # Using integer ID to match models
     account = Account(id=999, email="pipeline_test@example.com", password_hash="hash", subscription_tier="Free")
     db_session.add(account)
     db_session.flush()
     
-    # Use 'es' as source language since prompts exist for it
     profile = Profile(account_id=999, lang="es", target_lang="en")
     db_session.add(profile)
     db_session.commit()
@@ -94,28 +92,28 @@ def test_text_generation_persistence(db_session, test_user):
     service = TextGenerationService()
     account_id = test_user.id
     lang = "es"
+    target_lang = "en"
     
-    # 1. Create placeholder
-    text_id = service.create_placeholder_text(db_session, account_id, lang)
+    # 1. Create placeholder in global DB (same session in test)
+    text_id = service.create_placeholder_text(
+        db_session, account_id, lang, target_lang=target_lang
+    )
     assert text_id is not None
 
     # 2. Generate Content (Mocked)
-    # We mock llm_call_and_log_to_file to return our sample response
     with patch("server.services.text_generation_service.llm_call_and_log_to_file") as mock_llm:
-        # Return: (text_content, response_dict, provider, model)
         mock_llm.return_value = (SAMPLE_TEXT_RESPONSE, {}, "mock-provider", "mock-model")
         
-        # Mocking logging directory
         mock_dir = MagicMock()
-        mock_dir.__truediv__.return_value = MagicMock() # handle job_dir / "text.json"
+        mock_dir.__truediv__.return_value = MagicMock()
 
+        # account_db and global_db are same in test
         result = service.generate_text_content(
             db_session, db_session, account_id, lang, text_id, 
             job_dir=mock_dir, messages=[]
         )
         
     assert result.success
-    # The service extracts text from the JSON
     assert result.text == "The cat sat on the mat." 
     assert result.title == "The Cat"
     
@@ -124,29 +122,26 @@ def test_text_generation_persistence(db_session, test_user):
     assert rt is not None
     assert rt.content == "The cat sat on the mat."
     assert rt.generated_at is not None
+    assert rt.target_lang == "en"
 
 def test_word_translation_persistence(db_session, test_user):
-    """Test that word translations are correctly persisted."""
-    # Setup existing text
-    rt = ReadingText(account_id=test_user.id, lang="es", content="The cat sat on the mat.")
+    """Test that word translations are correctly persisted to global DB."""
+    # Setup existing text (global model - no account_id)
+    rt = ReadingText(lang="es", target_lang="en", content="The cat sat on the mat.")
     db_session.add(rt)
     db_session.commit()
     
     service = TranslationService()
     
-    # Mock LLM
     with patch("server.services.translation_service.llm_call_and_log_to_file") as mock_llm:
         mock_llm.return_value = (SAMPLE_WORD_RESPONSE, {}, "mock-provider", "mock-model")
-        
-        # We mock ThreadPoolExecutor by running sequentially or relying on the mocked function
-        # Since the service uses standard concurrent.futures, and we mocked the target function `llm_call_and_log_to_file`,
-        # it should work fine even if threaded.
         
         dummy_reading_msgs = [
             {"role": "system", "content": "system prompt"},
             {"role": "user", "content": "user prompt"}
         ]
 
+        # Method now takes global_db (db), no account_id needed for inserts
         success = service._generate_word_translations(
             db_session, test_user.id, rt.id, "es", "en", rt.content, 
             job_dir=MagicMock(), provider="mock", model_id="mock", base_url="mock",
@@ -155,11 +150,11 @@ def test_word_translation_persistence(db_session, test_user):
         
     assert success
     
-    # Verify DB
-    words = db_session.query(ReadingWordGloss).filter_by(text_id=rt.id).all()
+    # Verify DB - now filtering by text_id and target_lang
+    words = db_session.query(ReadingWordGloss).filter_by(
+        text_id=rt.id, target_lang="en"
+    ).all()
     
-    # We expect at least cat and mat. 
-    # Note: split_sentences might produce one sentence, so one call to LLM.
     assert len(words) >= 2
     
     cat = next((w for w in words if w.surface == "cat"), None)
@@ -172,9 +167,9 @@ def test_word_translation_persistence(db_session, test_user):
     assert mat.translation == "alfombra"
 
 def test_sentence_translation_persistence(db_session, test_user):
-    """Test that sentence translations are correctly persisted."""
-    # Setup existing text
-    rt = ReadingText(account_id=test_user.id, lang="es", content="The cat sat on the mat.")
+    """Test that sentence translations are correctly persisted to global DB."""
+    # Setup existing text (global model)
+    rt = ReadingText(lang="es", target_lang="en", content="The cat sat on the mat.")
     db_session.add(rt)
     db_session.commit()
     
@@ -183,6 +178,7 @@ def test_sentence_translation_persistence(db_session, test_user):
     with patch("server.services.translation_service.llm_call_and_log_to_file") as mock_llm:
         mock_llm.return_value = (SAMPLE_SENTENCE_RESPONSE, {}, "mock-provider", "mock-model")
         
+        # Method now takes global_db
         success = service._generate_sentence_translations(
             db_session, test_user.id, rt.id, "es", "en", rt.content,
             job_dir=MagicMock(), provider="mock", model_id="mock", base_url="mock",
@@ -191,18 +187,19 @@ def test_sentence_translation_persistence(db_session, test_user):
 
     assert success
     
-    # Verify DB
-    sents = db_session.query(ReadingTextTranslation).filter_by(text_id=rt.id, unit=TextUnit.SENTENCE).all()
+    # Verify DB - now filtering by text_id and target_lang
+    sents = db_session.query(ReadingTextTranslation).filter_by(
+        text_id=rt.id, target_lang="en", unit=TextUnit.SENTENCE
+    ).all()
     assert len(sents) == 1
     assert sents[0].source_text == "The cat sat on the mat."
     assert sents[0].translated_text == "El gato se sentó en la alfombra."
-    # Span calculation check (basic)
     assert sents[0].span_start == 0
     assert sents[0].span_end == len("The cat sat on the mat.")
 
 def test_title_translation_persistence(db_session, test_user):
-    """Test that title translation is correctly persisted."""
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Content")
+    """Test that title translation is correctly persisted to global DB."""
+    rt = ReadingText(lang="es", target_lang="en", content="Content")
     db_session.add(rt)
     db_session.commit()
     
@@ -211,6 +208,7 @@ def test_title_translation_persistence(db_session, test_user):
     with patch("server.services.translation_service.llm_call_and_log_to_file") as mock_llm:
         mock_llm.return_value = (SAMPLE_TITLE_RESPONSE, {}, "mock-provider", "mock-model")
         
+        # Method now takes global_db
         success = service._generate_title_translation(
             db_session, test_user.id, rt.id, "es", "en", "The Cat",
             job_dir=MagicMock(), provider="mock", model_id="mock", base_url="mock"
@@ -218,8 +216,10 @@ def test_title_translation_persistence(db_session, test_user):
         
     assert success
     
-    # Verify DB
-    title = db_session.query(ReadingTextTranslation).filter_by(text_id=rt.id, unit=TextUnit.TEXT).first()
+    # Verify DB - now filtering by text_id and target_lang
+    title = db_session.query(ReadingTextTranslation).filter_by(
+        text_id=rt.id, target_lang="en", unit=TextUnit.TEXT
+    ).first()
     assert title is not None
     assert title.source_text == "The Cat"
     assert title.translated_text == "El Gato"

@@ -165,6 +165,20 @@ async def next_text(
     except Exception as e:
         logger.warning(f"Failed to parse request data: {e}")
     
+    # Save full session JSON for debugging
+    if session_data:
+        try:
+            import os
+            from pathlib import Path
+            debug_dir = Path(__file__).parent.parent.parent / "data" / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_file = debug_dir / f"session_{account.id}_{int(time.time())}.json"
+            with open(debug_file, "w") as f:
+                json.dump(session_data, f, indent=2, default=str)
+            logger.info(f"Saved session JSON to {debug_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save debug session JSON: {e}")
+    
     # Process session data in background (don't block the redirect)
     if session_data:
         import threading
@@ -278,7 +292,7 @@ async def get_translations(
     account: Account = Depends(_get_current_account),
 ):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.account_id != account.id:
+    if not rt:
         raise HTTPException(404, "reading text not found")
 
     if target_lang is None:
@@ -294,7 +308,6 @@ async def get_translations(
             db.query(ReadingTextTranslation)
             .filter(
                 ReadingTextTranslation.text_id == text_id,
-                ReadingTextTranslation.account_id == account.id,
                 ReadingTextTranslation.unit == unit,
                 ReadingTextTranslation.target_lang == target_lang,
             )
@@ -313,8 +326,8 @@ async def get_translations(
             sents = (
                 db.query(ReadingTextTranslation.span_start, ReadingTextTranslation.span_end)
                 .filter(
-                    ReadingTextTranslation.account_id == account.id,
                     ReadingTextTranslation.text_id == text_id,
+                    ReadingTextTranslation.target_lang == target_lang,
                     ReadingTextTranslation.unit == "sentence",
                     ReadingTextTranslation.span_start.is_not(None),
                     ReadingTextTranslation.span_end.is_not(None),
@@ -326,8 +339,8 @@ async def get_translations(
                     has = (
                         db.query(ReadingWordGloss.id)
                         .filter(
-                            ReadingWordGloss.account_id == account.id,
                             ReadingWordGloss.text_id == text_id,
+                            ReadingWordGloss.target_lang == target_lang,
                             ReadingWordGloss.span_start >= ss,
                             ReadingWordGloss.span_end <= ee,
                         )
@@ -398,7 +411,7 @@ def get_reading_lookups(
     account: Account = Depends(_get_current_account),
 ):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.account_id != account.id:
+    if not rt:
         raise HTTPException(404, "reading text not found")
 
     if target_lang is None:
@@ -442,15 +455,18 @@ async def get_reading_words(
     account: Account = Depends(_get_current_account),
 ):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.account_id != account.id:
+    if not rt:
         raise HTTPException(404, "reading text not found")
 
+    # Use text's target_lang for filtering
+    target_lang = rt.target_lang or "en"
+    
     def _load_rows():
         return (
             db.query(ReadingWordGloss)
             .filter(
-                ReadingWordGloss.account_id == account.id,
                 ReadingWordGloss.text_id == text_id,
+                ReadingWordGloss.target_lang == target_lang,
             )
             .order_by(ReadingWordGloss.span_start, ReadingWordGloss.span_end)
             .all()
@@ -502,7 +518,7 @@ def get_reading_meta(
     account: Account = Depends(_get_current_account),
 ):
     rt = db.get(ReadingText, text_id)
-    if not rt or rt.account_id != account.id:
+    if not rt:
         raise HTTPException(404, "reading text not found")
     return {
         "text_id": rt.id,

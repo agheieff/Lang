@@ -13,6 +13,7 @@ from ..models import (
     ReadingWordGloss,
     ReadingTextTranslation,
     ReadingLookup,
+    ProfileTextRead,
 )
 from .selection_service import SelectionService
 from .readiness_service import ReadinessService
@@ -33,9 +34,9 @@ class ReadingContext:
     title_translation: Optional[str] = None
     is_fully_ready: bool = False
     sse_endpoint: Optional[str] = None
-    session_state: Optional[Dict] = None  # Restored session state
-    is_next_ready: bool = False  # Whether backup/next text is ready
-    next_ready_reason: str = "waiting"  # Reason: both, grace, content_only, waiting
+    session_state: Optional[Dict] = None
+    is_next_ready: bool = False
+    next_ready_reason: str = "waiting"
 
 @dataclass
 class ReadinessStatus:
@@ -43,12 +44,14 @@ class ReadinessStatus:
     text_id: Optional[int]
     reason: str = "waiting"
     retry_info: Optional[Dict[str, Any]] = None
-    status: str = "waiting"  # for SSE: connecting, waiting, complete
+    status: str = "waiting"
 
 class ReadingViewService:
     """
     Service to handle view logic for reading pages.
-    Aggregates data from various services to provide a clean context for the UI.
+    Now supports global/per-account DB split:
+    - account_db: Profile, ProfileTextRead, lookups, logs
+    - global_db: ReadingText, ReadingTextTranslation, ReadingWordGloss
     """
 
     def __init__(self):
@@ -58,70 +61,89 @@ class ReadingViewService:
         self.title_service = TitleExtractionService()
         self.session_service = SessionProcessingService()
 
-    def get_current_reading_context(self, db: Session, account_id: int) -> ReadingContext:
+    def get_current_reading_context(
+        self,
+        account_db: Session,  # Per-account DB
+        global_db: Session,   # Global DB
+        account_id: int,
+    ) -> ReadingContext:
         """
         Prepare all data needed to render the current reading view.
         """
         start_time = time.time()
         
-        # Get user profile
-        prof = db.query(Profile).filter(Profile.account_id == account_id).first()
+        # Get user profile (per-account)
+        prof = account_db.query(Profile).filter(Profile.account_id == account_id).first()
         if not prof:
             logger.error(f"Profile not found for account_id={account_id}")
             return ReadingContext(status="error")
 
         lang = prof.lang
+        target_lang = prof.target_lang
 
         # Select text (current or new)
         text_obj = None
         try:
-            text_obj = self.selection_service.pick_current_or_new(db, account_id, lang)
+            text_obj = self.selection_service.pick_current_or_new(
+                account_db, global_db, account_id, lang
+            )
         except Exception as e:
             logger.error(f"SelectionService failed: {e}", exc_info=True)
             # Fallback
             try:
-                text_obj = self.state_manager.get_unopened_text(db, account_id, lang)
+                text_obj = self.state_manager.get_unopened_text(global_db, account_id, lang)
             except Exception:
                 pass
 
         # Determine status if no text
         if text_obj is None:
-            generating = self.state_manager.get_generating_text(db, account_id, lang)
+            generating = self.state_manager.get_generating_text(global_db, account_id, lang)
             status = "generating" if generating else "loading"
             return ReadingContext(status=status)
 
-        # Prepare text data
         text_id = text_obj.id
         
-        # Get title data
-        raw_title, title_translation = self.title_service.get_title(db, account_id, text_id)
-        title_words_list = self.title_service.get_title_words(db, account_id, text_id)
+        # Get title data (from global DB)
+        raw_title, title_translation = self.title_service.get_title(
+            global_db, text_id, target_lang
+        )
+        title_words_list = self.title_service.get_title_words(
+            global_db, text_id, target_lang
+        )
 
-        # Get words
+        # Get words (from global DB)
         rows = (
-            db.query(ReadingWordGloss)
-            .filter(ReadingWordGloss.account_id == account_id, ReadingWordGloss.text_id == text_id)
-            .order_by(ReadingWordGloss.span_start.asc().nullsfirst(), ReadingWordGloss.span_end.asc().nullsfirst())
+            global_db.query(ReadingWordGloss)
+            .filter(
+                ReadingWordGloss.text_id == text_id,
+                ReadingWordGloss.target_lang == target_lang
+            )
+            .order_by(
+                ReadingWordGloss.span_start.asc().nullsfirst(),
+                ReadingWordGloss.span_end.asc().nullsfirst()
+            )
             .all()
         )
 
         # Check readiness
         try:
-            is_fully_ready, _ = self.readiness_service.evaluate(db, text_obj, account_id)
+            is_fully_ready, _ = self.readiness_service.evaluate(global_db, text_obj)
         except Exception:
             is_fully_ready = (len(rows) > 0)
 
         sse_endpoint = f"/reading/events/sse?text_id={text_id}"
 
-        # Retrieve any persisted session state to restore progress
-        session_state = self.session_service.get_persisted_session_state(db, account_id, text_id)
+        # Retrieve any persisted session state
+        session_state = self.session_service.get_persisted_session_state(
+            account_db, account_id, text_id
+        )
 
-        # Check if any backup/next text is ready in the pool
+        # Check if any backup/next text is ready
         is_next_ready = False
         next_ready_reason = "waiting"
         try:
             backup_text, backup_reason = self.readiness_service.first_ready_backup(
-                db, account_id, lang, exclude_text_id=text_id
+                global_db, account_db, lang, target_lang, prof.id, exclude_text_id=text_id
             )
             if backup_text:
                 is_next_ready = True
@@ -148,36 +170,46 @@ class ReadingViewService:
 
     def check_next_text_readiness(
         self, 
-        db: Session, 
+        account_db: Session,
+        global_db: Session, 
         account_id: int, 
-        lang: str, 
+        lang: str,
+        target_lang: str,
+        profile_id: int,
         force_check: bool = False
     ) -> ReadinessStatus:
         """
         Check if the next text is ready for the user.
-        Used by both polling endpoint and SSE stream.
         """
-        # Check if ANY backup text is ready (not just the newest)
-        rt, reason = self.readiness_service.first_ready_backup(db, account_id, lang)
+        # Check if ANY backup text is ready
+        rt, reason = self.readiness_service.first_ready_backup(
+            global_db, account_db, lang, target_lang, profile_id
+        )
         
         if rt and reason in ("both", "grace", "content_only"):
             return ReadinessStatus(ready=True, text_id=rt.id, reason=reason, status="complete")
         
-        # Fall back to checking newest unopened for retry info
-        rt = self.readiness_service.next_unopened(db, account_id, lang)
+        # Fall back to checking newest unopened
+        rt = self.readiness_service.next_unopened(
+            global_db, account_db, lang, target_lang, profile_id
+        )
         
         if not rt:
             return ReadinessStatus(ready=False, text_id=None)
 
-        ready, reason = self.readiness_service.evaluate(db, rt, account_id)
+        ready, reason = self.readiness_service.evaluate(global_db, rt)
 
-        # Accept "both" (full), "grace" (partial after timeout), or "content_only" (no translations after long timeout)
         is_ready_final = ready and reason in ("both", "grace", "content_only")
         
         return ReadinessStatus(
             ready=is_ready_final,
             text_id=rt.id,
             reason=reason if ready else "waiting",
-            retry_info=None,  # Retries are automatic via background worker
+            retry_info=None,
             status="complete" if is_ready_final else "waiting"
         )
+    
+    # Legacy single-session methods for backwards compatibility
+    def get_current_reading_context_legacy(self, db: Session, account_id: int) -> ReadingContext:
+        """Legacy method using single DB session (treats it as both)."""
+        return self.get_current_reading_context(db, db, account_id)

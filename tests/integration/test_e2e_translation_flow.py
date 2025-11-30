@@ -36,17 +36,16 @@ async def test_e2e_full_text_translation_synthesis(db_session, test_user):
     """
     E2E Test verifying the gap: Generation -> DB Persistence -> API Retrieval.
     Ensures that generating sentence translations ALSO synthesizes and persists
-    a full-text translation that the API can serve.
+    a full-text translation that the API can serve (global model).
     """
-    # 1. Setup: Existing text waiting for translation
-    rt = ReadingText(account_id=test_user.id, lang="es", content="Hola mundo. Esto es una prueba.")
+    # 1. Setup: Existing text waiting for translation (global model - no account_id)
+    rt = ReadingText(lang="es", target_lang="en", content="Hola mundo. Esto es una prueba.")
     db_session.add(rt)
     db_session.commit()
     
     service = TranslationService()
     
     # 2. Execution: Trigger Translation Generation (Mocking LLM)
-    # We return a structured response for sentences to verify synthesis logic
     structured_json = """
     {
         "paragraphs": [
@@ -61,37 +60,32 @@ async def test_e2e_full_text_translation_synthesis(db_session, test_user):
     """
     
     with patch("server.services.translation_service.llm_call_and_log_to_file") as mock_llm:
-        # Mocks for: words 1, words 2, sentences, title, extra
         mock_llm.side_effect = [
-            ("{}", {}, "mock", "mock"), # words call 1
-            ("{}", {}, "mock", "mock"), # words call 2
-            (structured_json, {}, "mock", "mock"), # sentences (CRITICAL)
-            ("{}", {}, "mock", "mock"), # title
-            ("{}", {}, "mock", "mock") # extra safety
+            ("{}", {}, "mock", "mock"),  # words call 1
+            ("{}", {}, "mock", "mock"),  # words call 2
+            (structured_json, {}, "mock", "mock"),  # sentences (CRITICAL)
+            ("{}", {}, "mock", "mock"),  # title
+            ("{}", {}, "mock", "mock")   # extra safety
         ]
         
+        # Pass same session for both account_db and global_db in test
         service.generate_translations(
             db_session, db_session, test_user.id, "es", rt.id, rt.content, "Test Title",
             MagicMock(), [{"role": "user", "content": "dummy"}, {"role": "user", "content": "dummy"}]
         )
         
-    # 3. Verification Point 1: Database State (The "Generation -> DB" link)
-    # We expect a translation with unit='text' that IS NOT the title (segment_index=1)
-    
+    # 3. Verification Point 1: Database State (global model)
     full_text_db = db_session.query(ReadingTextTranslation).filter(
         ReadingTextTranslation.text_id == rt.id,
+        ReadingTextTranslation.target_lang == "en",
         ReadingTextTranslation.unit == "text",
         ReadingTextTranslation.segment_index == 1
     ).first()
     
     assert full_text_db is not None, "Full text translation was not synthesized/persisted in DB"
-    # Note: synthesis joins sentences with space, and paragraphs with newlines.
-    # Our mock has one paragraph with 2 sentences.
     assert full_text_db.translated_text == "Hello world. This is a test."
     
-    # 4. Verification Point 2: API Access (The "DB -> UI" link)
-    # We simulate the API call made by the "See Translation" button
-    
+    # 4. Verification Point 2: API Access
     api_response = await get_translations(
         text_id=rt.id,
         unit="text",
@@ -100,12 +94,8 @@ async def test_e2e_full_text_translation_synthesis(db_session, test_user):
         account=test_user
     )
     
-    # The API should return the item we just verified in DB
     assert api_response["unit"] == "text"
     assert len(api_response["items"]) >= 1
-    
-    # Find our body translation in the items (filtering out potential title if segment_index=0 returned)
-    # The API doesn't strictly filter segment_index unless specified, so we look for content match
     
     matched_item = next(
         (item for item in api_response["items"] if "Hello world" in item["translation"]), 
