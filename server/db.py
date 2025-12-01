@@ -51,6 +51,25 @@ GlobalSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=global
 SessionLocal = GlobalSessionLocal  # Backwards compatibility
 Base = declarative_base()
 
+# Tables for global DB (shared reference data + profile settings)
+# Per-account DBs have: lexemes, word_events, reading history, etc.
+GLOBAL_TABLES = {
+    "accounts",
+    "profiles",
+    "profile_prefs",  # Preferences are part of profile settings
+    "languages",
+    "reading_texts",
+    "reading_word_glosses",
+    "reading_text_translations",
+    "text_vocabulary",
+    "llm_models",
+    "subscription_tiers",
+    "generation_logs",
+    "translation_logs",
+    "llm_request_logs",
+    "reading_lookups",
+}
+
 # ---- Dependency Injection ----
 def get_global_db() -> Generator[Session, None, None]:
     """Provide database session with automatic cleanup"""
@@ -60,16 +79,28 @@ def get_global_db() -> Generator[Session, None, None]:
     finally:
         db.close()
 
+
+def open_global_session() -> Session:
+    """Create and return a global DB Session (caller must close).
+    
+    Use this for background threads that need to access global DB tables
+    (profiles, texts, translations, etc.).
+    """
+    return GlobalSessionLocal()
+
 # ---- Database Initialization ----
 def init_db() -> None:
-    """Initialize database: create all tables from models"""
+    """Initialize database: create only global tables from models"""
     try:
         # Import models to register them with Base
         from . import models  # noqa: F401
 
-        # Create all tables
-        Base.metadata.create_all(bind=global_engine)
-        logger.info("Database tables created successfully")
+        # Create only global tables (per-account tables go in per-account DBs)
+        with global_engine.begin() as conn:
+            for table in Base.metadata.sorted_tables:
+                if table.name in GLOBAL_TABLES:
+                    table.create(bind=conn, checkfirst=True)
+        logger.info("Global database tables created successfully")
 
         # Create auth tables
         _ensure_auth_tables()
@@ -95,9 +126,13 @@ def _ensure_auth_tables() -> None:
 
 # ---- Utilities ----
 def drop_all_tables() -> None:
-    """Drop all tables - useful for development resets"""
-    logger.warning("Dropping all database tables!")
-    Base.metadata.drop_all(bind=global_engine)
+    """Drop global tables - useful for development resets"""
+    logger.warning("Dropping global database tables!")
+    from . import models  # noqa: F401
+    with global_engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            if table.name in GLOBAL_TABLES:
+                table.drop(bind=conn, checkfirst=True)
 
 def recreate_db() -> None:
     """Drop and recreate all tables - development only"""

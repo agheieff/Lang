@@ -6,7 +6,7 @@
     <div class="flex items-center space-x-6">
       {% if request.state.user %}
         <nav class="flex space-x-4" aria-label="Primary">
-          <a href="/" class="hover:text-blue-300 transition-colors">Practice</a>
+          <a href="/reading" class="hover:text-blue-300 transition-colors">Practice</a>
           <a href="/words" class="hover:text-blue-300 transition-colors">Words</a>
           <a href="/stats" class="hover:text-blue-300 transition-colors">Stats</a>
         </nav>
@@ -19,6 +19,10 @@
           <div class="absolute right-0 top-full mt-2 w-48 bg-white text-gray-800 rounded-lg shadow-lg border border-gray-200 py-2 hidden" id="user-menu">
             <a href="/profile" class="block px-4 py-2 hover:bg-gray-100">Profile</a>
             <a href="/settings" class="block px-4 py-2 hover:bg-gray-100">Settings</a>
+            {% if request.state.user and (request.state.user.role == 'admin' or request.state.user.subscription_tier == 'admin') %}
+            <a href="/admin/texts" class="block px-4 py-2 hover:bg-gray-100 text-purple-600">Admin: Texts</a>
+            <a href="/admin/accounts" class="block px-4 py-2 hover:bg-gray-100 text-purple-600">Admin: Accounts</a>
+            {% endif %}
             <hr class="my-2" />
             <a href="/auth/logout" class="block px-4 py-2 hover:bg-gray-100">Log out</a>
           </div>

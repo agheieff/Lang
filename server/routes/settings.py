@@ -150,7 +150,7 @@ def update_global_preferences(
     preferred_generation_model: Optional[str] = Form(None),
     preferred_translation_model: Optional[str] = Form(None),
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not profile:
@@ -444,7 +444,7 @@ def _render_topic_chip(topic: str, weight: float, lang: str) -> str:
 def get_topics_section(
     lang: Optional[str] = None,
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     """HTMX: Returns the topic interests section."""
     # Get user's profile
@@ -513,7 +513,7 @@ def adjust_topic_weight(
     lang: str,
     delta: float = WEIGHT_STEP,
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     """HTMX: Adjust a topic's weight and return updated section."""
     if topic not in TOPICS:
@@ -547,7 +547,7 @@ def adjust_topic_weight(
 def reset_topic_weights(
     lang: str,
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     """HTMX: Reset all topic weights to default."""
     profile = db.query(Profile).filter(
@@ -569,7 +569,7 @@ def decrease_topic_weight(
     topic: str,
     lang: str,
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     """HTMX: Decrease a topic's weight."""
     return adjust_topic_weight(topic, lang, delta=-WEIGHT_STEP, account=account, db=db)
@@ -588,7 +588,7 @@ class PreferencesUpdateRequest(BaseModel):
 
 def _run_preferences_update(account_id: int, message: str, current_weights: dict, current_length: int):
     """Background thread to update preferences via LLM."""
-    from server.account_db import open_account_session
+    from server.db import open_global_session
     from server.services.interests_parser import update_preferences_from_message
     
     try:
@@ -599,8 +599,8 @@ def _run_preferences_update(account_id: int, message: str, current_weights: dict
             available_topics=TOPICS,
         )
         
-        # Open new session for this thread
-        db = open_account_session(account_id)
+        # Open new global session for this thread (profiles are in global DB)
+        db = open_global_session()
         try:
             profile = db.query(Profile).filter(Profile.account_id == account_id).first()
             if not profile:
@@ -625,7 +625,7 @@ def _run_preferences_update(account_id: int, message: str, current_weights: dict
         _prefs_logger.error(f"[PREFS] Failed to update preferences: {e}")
         # Try to clear the updating flag
         try:
-            db = open_account_session(account_id)
+            db = open_global_session()
             profile = db.query(Profile).filter(Profile.account_id == account_id).first()
             if profile:
                 profile.preferences_updating = False
@@ -639,7 +639,7 @@ def _run_preferences_update(account_id: int, message: str, current_weights: dict
 async def update_preferences_via_chat(
     request: PreferencesUpdateRequest,
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     """
     Start async update of user preferences via natural language message.
@@ -676,7 +676,7 @@ async def update_preferences_via_chat(
 @router.get("/settings/preferences/status")
 async def get_preferences_status(
     account: Account = Depends(get_current_account),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
 ):
     """Check if preferences update is in progress."""
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()

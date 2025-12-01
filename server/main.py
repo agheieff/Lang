@@ -22,12 +22,17 @@ from .routes.srs import router as srs_router
 from .routes.ui import router as ui_router
 from .routes.settings import router as settings_router
 from .routes.user_models import router as user_models_router, htmx_router as user_models_htmx_router
+from .routes.admin import router as admin_router
 from .services.background_worker import get_background_worker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    
+    # Pre-generate texts for configured languages (blocks until ready)
+    from .services.startup_service import ensure_startup_texts
+    await ensure_startup_texts()
     
     # Start background worker for pool management
     worker = get_background_worker(interval_seconds=30)
@@ -90,6 +95,7 @@ app.include_router(ui_router)
 app.include_router(settings_router)
 app.include_router(user_models_router)
 app.include_router(user_models_htmx_router)
+app.include_router(admin_router)
 
 # Optional module stream processing API
 if MSP_ENABLE:

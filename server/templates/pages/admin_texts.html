@@ -1,0 +1,134 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+<div class="container mx-auto max-w-6xl p-4">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-bold">Text Pool Status</h1>
+    <a href="/admin/texts" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-sm">
+      Refresh
+    </a>
+  </div>
+
+  <!-- Summary -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-blue-600">{{ total_count }}</div>
+      <div class="text-sm text-gray-600">Total Texts</div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-green-600">{{ ready_count }}</div>
+      <div class="text-sm text-gray-600">Fully Ready</div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-yellow-600">{{ pending_count }}</div>
+      <div class="text-sm text-gray-600">Pending</div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-red-600">{{ failed_count }}</div>
+      <div class="text-sm text-gray-600">Failed (3+ attempts)</div>
+    </div>
+  </div>
+
+  <!-- By Language -->
+  <div class="bg-white rounded-lg shadow mb-6 p-4">
+    <h2 class="text-lg font-bold mb-3">By Language</h2>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {% for lang, stats in by_lang.items() %}
+      <div class="border rounded p-3">
+        <div class="font-semibold">{{ lang }}</div>
+        <div class="text-sm text-gray-600">
+          {{ stats.ready }}/{{ stats.total }} ready
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Texts Table -->
+  <div class="bg-white rounded-lg shadow overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-100">
+        <tr>
+          <th class="px-3 py-2 text-left">ID</th>
+          <th class="px-3 py-2 text-left">Lang</th>
+          <th class="px-3 py-2 text-left">Title</th>
+          <th class="px-3 py-2 text-left">Content</th>
+          <th class="px-3 py-2 text-center">Words</th>
+          <th class="px-3 py-2 text-center">Sents</th>
+          <th class="px-3 py-2 text-center">Attempts</th>
+          <th class="px-3 py-2 text-left">Created</th>
+          <th class="px-3 py-2 text-center">Status</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y">
+        {% for text in texts %}
+        <tr class="hover:bg-gray-50">
+          <td class="px-3 py-2 font-mono">{{ text.id }}</td>
+          <td class="px-3 py-2">
+            <span class="px-2 py-0.5 bg-gray-200 rounded text-xs">{{ text.lang }}</span>
+            <span class="text-gray-400">→</span>
+            <span class="px-2 py-0.5 bg-gray-200 rounded text-xs">{{ text.target_lang }}</span>
+          </td>
+          <td class="px-3 py-2 max-w-[150px] truncate" title="{{ text.title or '' }}">
+            {{ text.title[:30] + '...' if text.title and text.title|length > 30 else text.title or '-' }}
+          </td>
+          <td class="px-3 py-2 max-w-[200px] truncate text-gray-600" title="{{ text.content or '' }}">
+            {% if text.content %}
+              {{ text.content[:50] + '...' if text.content|length > 50 else text.content }}
+            {% else %}
+              <span class="text-red-500 italic">No content</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-center">
+            {% if text.words_complete %}
+              <span class="text-green-600">✓</span>
+            {% else %}
+              <span class="text-gray-400">✗</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-center">
+            {% if text.sentences_complete %}
+              <span class="text-green-600">✓</span>
+            {% else %}
+              <span class="text-gray-400">✗</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-center">
+            {% if text.translation_attempts >= 3 %}
+              <span class="text-red-600 font-bold">{{ text.translation_attempts }}</span>
+            {% elif text.translation_attempts > 0 %}
+              <span class="text-yellow-600">{{ text.translation_attempts }}</span>
+            {% else %}
+              <span class="text-gray-400">0</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-gray-600 text-xs">
+            {{ text.created_at.strftime('%m/%d %H:%M') if text.created_at else '-' }}
+          </td>
+          <td class="px-3 py-2 text-center">
+            {% if text.content and text.words_complete and text.sentences_complete %}
+              <span class="px-2 py-0.5 bg-green-100 text-green-800 rounded text-xs">Ready</span>
+            {% elif text.content and (text.words_complete or text.sentences_complete) %}
+              <span class="px-2 py-0.5 bg-yellow-100 text-yellow-800 rounded text-xs">Partial</span>
+            {% elif text.content %}
+              <span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs">Content</span>
+            {% elif text.translation_attempts >= 3 %}
+              <span class="px-2 py-0.5 bg-red-100 text-red-800 rounded text-xs">Failed</span>
+            {% else %}
+              <span class="px-2 py-0.5 bg-gray-100 text-gray-800 rounded text-xs">Pending</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not texts %}
+        <tr>
+          <td colspan="9" class="px-3 py-8 text-center text-gray-500">
+            No texts in the database
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

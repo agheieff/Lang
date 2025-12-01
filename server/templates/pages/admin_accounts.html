@@ -1,0 +1,104 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+<div class="container mx-auto max-w-6xl p-4">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-bold">Accounts</h1>
+    <a href="/admin/accounts" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-sm">
+      Refresh
+    </a>
+  </div>
+
+  <!-- Summary -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-blue-600">{{ total_count }}</div>
+      <div class="text-sm text-gray-600">Total Accounts</div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-purple-600">{{ admin_count }}</div>
+      <div class="text-sm text-gray-600">Admins</div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-green-600">{{ with_profile_count }}</div>
+      <div class="text-sm text-gray-600">With Profiles</div>
+    </div>
+    <div class="bg-white rounded-lg shadow p-4">
+      <div class="text-3xl font-bold text-gray-600">{{ total_profiles }}</div>
+      <div class="text-sm text-gray-600">Total Profiles</div>
+    </div>
+  </div>
+
+  <!-- Accounts Table -->
+  <div class="bg-white rounded-lg shadow overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-100">
+        <tr>
+          <th class="px-3 py-2 text-left">ID</th>
+          <th class="px-3 py-2 text-left">Email</th>
+          <th class="px-3 py-2 text-left">Role</th>
+          <th class="px-3 py-2 text-left">Tier</th>
+          <th class="px-3 py-2 text-left">Profiles</th>
+          <th class="px-3 py-2 text-left">Created</th>
+          <th class="px-3 py-2 text-center">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y">
+        {% for acc in accounts %}
+        <tr class="hover:bg-gray-50">
+          <td class="px-3 py-2 font-mono">{{ acc.id }}</td>
+          <td class="px-3 py-2">
+            {{ acc.email }}
+            {% if not acc.is_active %}
+              <span class="ml-1 px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-xs">inactive</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2">
+            {% if acc.role == 'admin' %}
+              <span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded text-xs">{{ acc.role }}</span>
+            {% elif acc.role == 'system' %}
+              <span class="px-2 py-0.5 bg-gray-100 text-gray-800 rounded text-xs">{{ acc.role }}</span>
+            {% else %}
+              <span class="text-gray-500">{{ acc.role or 'user' }}</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2">
+            <form method="POST" action="/admin/accounts/{{ acc.id }}/tier" class="inline-flex items-center gap-1">
+              <select name="tier" class="text-xs border rounded px-1 py-0.5" onchange="this.form.submit()">
+                {% for tier in tiers %}
+                  <option value="{{ tier }}" {% if acc.subscription_tier == tier %}selected{% endif %}>{{ tier }}</option>
+                {% endfor %}
+              </select>
+            </form>
+          </td>
+          <td class="px-3 py-2">
+            {% if acc.profiles %}
+              {% for profile in acc.profiles %}
+                <span class="inline-block px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs mr-1 mb-1">
+                  {{ profile.lang }}→{{ profile.target_lang }}
+                </span>
+              {% endfor %}
+            {% else %}
+              <span class="text-gray-400 text-xs">No profiles</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-gray-600 text-xs">
+            {{ acc.created_at.strftime('%Y-%m-%d %H:%M') if acc.created_at else '-' }}
+          </td>
+          <td class="px-3 py-2 text-center">
+            <a href="/admin/accounts/{{ acc.id }}" class="text-blue-600 hover:underline text-xs">View</a>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not accounts %}
+        <tr>
+          <td colspan="7" class="px-3 py-8 text-center text-gray-500">
+            No accounts found
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

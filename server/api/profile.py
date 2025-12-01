@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..db import get_global_db
-from ..account_db import get_db
 from ..models import Profile, ProfilePref
 from server.auth import Account
 from ..deps import get_current_account
@@ -76,7 +75,7 @@ def get_available_languages(_: Session = Depends(get_global_db)):
 @router.post("/me/profile")
 def create_profile(
     req: ProfileRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     """Create a new learning profile. Accepts 'zh-Hans'/'zh-Hant' and stores as 'zh' with script."""
@@ -147,7 +146,7 @@ def create_profile(
         
         # Start background thread for LLM parsing
         import threading
-        from server.account_db import open_account_session
+        from server.db import open_global_session
         
         def _parse_initial_preferences():
             try:
@@ -158,8 +157,8 @@ def create_profile(
                     available_topics=TOPICS,
                 )
                 
-                # Open new session for background thread
-                bg_db = open_account_session(account.id)
+                # Open new global session for background thread (profiles are in global DB)
+                bg_db = open_global_session()
                 try:
                     bg_prof = bg_db.query(Profile).filter(Profile.id == prof.id).first()
                     if bg_prof and result.get("success"):
@@ -176,7 +175,7 @@ def create_profile(
             except Exception as e:
                 logger.error(f"[PROFILE] Failed to parse preferences on create: {e}")
                 try:
-                    bg_db = open_account_session(account.id)
+                    bg_db = open_global_session()
                     bg_prof = bg_db.query(Profile).filter(Profile.id == prof.id).first()
                     if bg_prof:
                         bg_prof.preferences_updating = False
@@ -234,7 +233,7 @@ def update_profile(
     lang: str,
     target_lang: str = "en",
     req: Optional[ProfileUpdateRequest] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     """Update an existing profile (languages cannot be changed)."""
@@ -278,7 +277,7 @@ def update_profile(
 
 @router.get("/me/profiles", response_model=List[ProfileOut])
 def list_profiles(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     profiles = db.query(Profile).filter(Profile.account_id == account.id).all()
@@ -306,7 +305,7 @@ def list_profiles(
 def delete_profile(
     lang: str,
     target_lang: str = "en",
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     prof = get_user_profile(db, account.id, lang, target_lang)
@@ -348,7 +347,7 @@ class UIPrefsIn(BaseModel):
 @router.get("/prefs")
 def get_ui_prefs(
     lang: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     prof = get_or_create_profile(db, account.id, lang)
@@ -361,7 +360,7 @@ def get_ui_prefs(
 def set_ui_prefs(
     payload: UIPrefsIn,
     lang: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     prof = get_or_create_profile(db, account.id, lang)
@@ -399,7 +398,7 @@ class InterestsResponse(BaseModel):
 @router.post("/me/interests", response_model=InterestsResponse)
 def update_interests(
     req: InterestsRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     """
@@ -440,7 +439,7 @@ def update_interests(
 @router.get("/me/interests", response_model=InterestsResponse)
 def get_interests(
     lang: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(get_current_account),
 ):
     """Get current interests and topic weights for a language profile."""

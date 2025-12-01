@@ -14,6 +14,7 @@ import logging
 from server.auth import Account  # type: ignore
 
 from ..account_db import get_db
+from ..db import get_global_db
 from ..deps import get_current_account as _get_current_account
 from ..models import (
     Profile,
@@ -80,14 +81,15 @@ async def wait_until(pred, timeout: float, db: Session, interval: float = 0.5):
 
 @router.get("/reading/current", response_class=HTMLResponse)
 async def current_reading_block(
-    db: Session = Depends(get_db),
+    global_db: Session = Depends(get_global_db),
+    account_db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
     """Return the Current Reading block HTML."""
     from ..services.reading_view_service import ReadingViewService
     
     view_service = ReadingViewService()
-    context = view_service.get_current_reading_context(db, account.id)
+    context = view_service.get_current_reading_context(account_db, global_db, account.id)
     
     if context.status == "error":
          return HTMLResponse(
@@ -135,7 +137,7 @@ async def current_reading_block(
 @router.post("/reading/next")
 async def next_text(
     request: Request,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
     prof = db.query(Profile).filter(Profile.account_id == account.id).first()
@@ -248,7 +250,7 @@ async def next_text(
 
 @router.get("/reading/events/sse")
 async def reading_events_sse(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
     """
@@ -533,7 +535,7 @@ def get_reading_meta(
 async def next_ready(
     wait: Optional[float] = None,
     force: Optional[bool] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
     from ..services.reading_view_service import ReadingViewService
@@ -572,7 +574,7 @@ async def next_ready(
 
 @router.get("/reading/next/ready/sse")
 async def next_ready_sse(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
     """Server-Sent Events endpoint for next text readiness notifications."""

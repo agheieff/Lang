@@ -13,6 +13,7 @@ from server.auth import Account  # type: ignore
 
 from ..deps import get_current_account as _get_current_account
 from ..account_db import get_db as get_account_db
+from ..db import get_global_db
 
 
 router = APIRouter(tags=["ui"])
@@ -40,7 +41,7 @@ def words_page(
     request: Request,
     lang: Optional[str] = None,
     account: Account = Depends(_get_current_account),
-    db: Session = Depends(get_account_db),
+    db: Session = Depends(get_global_db),
 ):
     t = _templates()
     # Default to the user's first profile language if not provided
@@ -83,7 +84,7 @@ def profile_page(request: Request, account: Account = Depends(_get_current_accou
 def settings_page(
     request: Request,
     account: Account = Depends(_get_current_account),
-    db: Session = Depends(get_account_db),
+    db: Session = Depends(get_global_db),
 ):
     t = _templates()
     from ..models import Profile
@@ -104,13 +105,13 @@ def stats_page(request: Request, account: Account = Depends(_get_current_account
 
 
 @router.get("/", response_class=HTMLResponse)
-def home_page(
+def dashboard_page(
     request: Request,
-    db: Session = Depends(get_account_db),
+    no_texts: Optional[str] = None,
+    db: Session = Depends(get_global_db),
 ):
+    """Dashboard/home page - simple landing with links to reading and other features."""
     t = _templates()
-
-    # Get the user's default language (first profile)
     from ..models import Profile
 
     account_id: Optional[int] = None
@@ -118,7 +119,7 @@ def home_page(
         u = getattr(request.state, "user", None)
         if u is not None:
             if isinstance(u, dict) and "id" in u:
-                account_id = int(u["id"])  # type: ignore[arg-type]
+                account_id = int(u["id"])
             elif hasattr(u, "id"):
                 account_id = int(getattr(u, "id"))
     except Exception:
@@ -128,14 +129,78 @@ def home_page(
     if account_id is not None:
         profile = db.query(Profile).filter(Profile.account_id == account_id).first()
 
+    # Map language codes to display names
+    lang_names = {
+        "es": "Spanish",
+        "zh": "Chinese",
+        "en": "English",
+        "fr": "French",
+        "de": "German",
+    }
+
     context = {
         "title": "Arcadia Lang",
         "has_profile": profile is not None,
         "profile_lang": (profile.lang if profile is not None else None),
+        "profile_lang_name": lang_names.get(profile.lang, profile.lang) if profile else None,
         "is_authenticated": account_id is not None,
+        "no_texts": no_texts == "1",
     }
 
-    # Do not generate or fetch reading synchronously here; HTMX will fetch it after load.
+    return t.TemplateResponse(request, "pages/dashboard.html", context)
+
+
+@router.get("/reading", response_class=HTMLResponse)
+def reading_page(
+    request: Request,
+    db: Session = Depends(get_global_db),
+):
+    """Reading practice page with text display."""
+    t = _templates()
+    from ..models import Profile, ReadingText
+
+    account_id: Optional[int] = None
+    try:
+        u = getattr(request.state, "user", None)
+        if u is not None:
+            if isinstance(u, dict) and "id" in u:
+                account_id = int(u["id"])
+            elif hasattr(u, "id"):
+                account_id = int(getattr(u, "id"))
+    except Exception:
+        account_id = None
+
+    # Redirect to login if not authenticated
+    if account_id is None:
+        return RedirectResponse(url="/login", status_code=302)
+
+    profile = None
+    if account_id is not None:
+        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+
+    # Redirect to profile creation if no profile
+    if profile is None:
+        return RedirectResponse(url="/profile", status_code=302)
+
+    # Check if there are any ready texts for this language
+    ready_count = db.query(ReadingText).filter(
+        ReadingText.lang == profile.lang,
+        ReadingText.target_lang == profile.target_lang,
+        ReadingText.content.isnot(None),
+        ReadingText.words_complete == True,
+        ReadingText.sentences_complete == True,
+    ).count()
+
+    # If no texts ready, redirect to dashboard with message
+    if ready_count == 0:
+        return RedirectResponse(url="/?no_texts=1", status_code=302)
+
+    context = {
+        "title": "Reading Practice",
+        "has_profile": profile is not None,
+        "profile_lang": (profile.lang if profile is not None else None),
+        "is_authenticated": account_id is not None,
+    }
 
     return t.TemplateResponse(request, "pages/home.html", context)
 

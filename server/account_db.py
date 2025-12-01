@@ -16,41 +16,22 @@ _ACCOUNT_ENGINES: Dict[int, Engine] = {}
 _ACCOUNTS_DIR = DATA_DIR / "accounts"
 _ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Tables to provision in per-account DBs (user-scoped data)
-# NOTE: reading_texts, reading_text_translations, reading_word_glosses are now GLOBAL
+# Tables to provision in per-account DBs (user-specific state)
+# Global DB has: accounts, profiles, profile_prefs, languages, texts, translations, logs
 PER_ACCOUNT_TABLES = {
-    # learning/profile
-    "profiles",
-    "profile_prefs",
-    "cards",
-    # lexicon + user stats
+    # User's word knowledge (SRS state)
     "lexemes",
     "lexeme_variants",
-    "lexeme_info",
-    "user_lexemes",
     "user_lexeme_contexts",
     "word_events",
-    # activity/logs per reading
-    "generation_logs",
-    "translation_logs",
-    "reading_lookups",
-    # readiness override
-    "next_ready_overrides",
-    # request logs
-    "llm_request_logs",
-    # curated/user-specific lists
-    "language_word_lists",
-    # user provider configs (legacy)
-    "user_provider_configs",
-    # user model configs (new)
-    "user_model_configs",
-    # usage tracking for Free tier
-    "usage_tracking",
-    # retry tracking
-    "generation_retry_attempts",
-    # NEW: Profile reading history and queue (per-account, reference global texts)
+    # Reading history and queue
     "profile_text_reads",
     "profile_text_queue",
+    # User configs
+    "user_model_configs",
+    "usage_tracking",
+    "next_ready_overrides",
+    "generation_retry_attempts",
 }
 
 

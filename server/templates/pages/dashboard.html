@@ -1,0 +1,84 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+<div class="container mx-auto max-w-4xl p-4">
+  
+  {% if not is_authenticated %}
+  <!-- Not logged in -->
+  <div class="text-center py-16">
+    <h1 class="text-4xl font-bold mb-4">Welcome to Arcadia Lang</h1>
+    <p class="text-xl text-gray-600 mb-8">
+      Learn languages through AI-generated reading practice
+    </p>
+    <div class="flex justify-center gap-4">
+      <a href="/login" class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+        Log in
+      </a>
+      <a href="/signup" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">
+        Sign up
+      </a>
+    </div>
+  </div>
+  
+  {% elif not has_profile %}
+  <!-- Logged in but no profile -->
+  <div class="text-center py-16">
+    <h1 class="text-3xl font-bold mb-4">Get Started</h1>
+    <p class="text-gray-600 mb-8">
+      Create a language profile to start practicing with automatically generated texts.
+    </p>
+    <a href="/profile" class="px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white text-lg rounded-lg transition-colors inline-block">
+      Create Profile
+    </a>
+  </div>
+  
+  {% else %}
+  <!-- Logged in with profile -->
+  <div class="text-center py-12">
+    <h1 class="text-3xl font-bold mb-2">Ready to Practice?</h1>
+    <p class="text-gray-600 mb-8">
+      Continue your {{ profile_lang_name or profile_lang or 'language' }} reading practice
+    </p>
+    
+    {% if no_texts %}
+    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-6 mb-8 max-w-md mx-auto">
+      <p class="text-yellow-800">
+        <span class="font-semibold">No texts available yet.</span><br>
+        Texts are being generated. Please wait a moment and try again.
+      </p>
+    </div>
+    {% endif %}
+    
+    <a href="/reading" 
+       class="inline-block px-12 py-5 bg-blue-600 hover:bg-blue-700 text-white text-xl font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105">
+      Go to Reading
+    </a>
+  </div>
+  
+  <!-- Quick links -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-12">
+    <a href="/words" class="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow">
+      <h3 class="text-lg font-bold mb-2">Your Words</h3>
+      <p class="text-sm text-gray-600">
+        Review and manage your vocabulary
+      </p>
+    </a>
+    
+    <a href="/stats" class="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow">
+      <h3 class="text-lg font-bold mb-2">Progress Stats</h3>
+      <p class="text-sm text-gray-600">
+        Track your learning progress
+      </p>
+    </a>
+    
+    <a href="/settings" class="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow">
+      <h3 class="text-lg font-bold mb-2">Settings</h3>
+      <p class="text-sm text-gray-600">
+        Customize your experience
+      </p>
+    </a>
+  </div>
+  {% endif %}
+  
+</div>
+{% endblock %}

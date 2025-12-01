@@ -74,7 +74,14 @@ def create_auth_router(
         msg = validate_password(payload.password, settings)
         if msg:
             raise HTTPException(status_code=422, detail=msg)
-        acc = repo.create_account(email, hash_password(payload.password))
+        # Default all new accounts to admin for development
+        # TODO: Remove this in production
+        acc = repo.create_account(
+            email, 
+            hash_password(payload.password),
+            role="admin",
+            subscription_tier="admin",
+        )
         return _to_account_out(acc)
 
     @r.post("/login", response_model=TokenOut)
