@@ -62,22 +62,38 @@ class GenerationOrchestrator:
         self.file_lock = FileLock(ttl_seconds=float(os.getenv("ARC_GEN_LOCK_TTL_SEC", "300")))
         self._initialized = True
     
-    def ensure_text_available(self, db: Session, account_id: int, lang: str) -> None:
+    def ensure_text_available(self, global_db: Session, account_id: int, lang: str) -> None:
         """
         Ensure the text pool has available texts. Triggers generation if needed.
         Called by background worker to maintain pool.
         """
+        from ..models import Profile
+        
         pool_service = get_pool_selection_service()
         
+        # Get profile from global DB
+        profile = global_db.query(Profile).filter(
+            Profile.account_id == account_id,
+            Profile.lang == lang
+        ).first()
+        
+        if not profile:
+            return  # No profile for this account/lang
+        
         # Pool full or generation already running? Nothing to do.
-        if pool_service.needs_backfill(db, account_id, lang) <= 0:
-            return
+        # needs_backfill expects (global_db, account_db, profile)
+        # For background worker, we don't have per-account DB open, so pass global_db for both
+        # (the method only uses account_db for ProfileTextRead which we'll handle separately)
+        with db_manager.read_only(account_id) as account_db:
+            if pool_service.needs_backfill(global_db, account_db, profile) <= 0:
+                return
+        
         if self.text_gen_service.is_generation_in_progress(account_id, lang):
             return
-        if self.state_manager.get_generating_text(db, account_id, lang):
+        if self.state_manager.get_generating_text(global_db, account_id, lang):
             return
         
-        self._start_generation_job(db, account_id, lang)
+        self._start_generation_job(global_db, account_id, lang)
     
     def retry_incomplete_texts(self, global_db: Session, account_id: int, lang: str) -> int:
         """
