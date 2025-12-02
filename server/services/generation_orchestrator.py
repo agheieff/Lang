@@ -328,12 +328,12 @@ class GenerationOrchestrator:
     ) -> 'TextGenerationResult':
         """Generate the main text content."""
         with db_manager.transaction(account_id) as gen_db:
-            # Get global database session for account lookups
+            # Get global database session for Profile and Account lookups
             global_db = GlobalSessionLocal()
             try:
-                # Build prompt specification with pool params
+                # Build prompt specification with pool params (Profile is in global DB)
                 spec, words, level_hint = build_reading_prompt_spec(
-                    gen_db, 
+                    global_db,  # Profile is in global DB
                     account_id=account_id, 
                     lang=lang,
                     ci_target_override=ci_target,

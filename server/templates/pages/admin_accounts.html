@@ -53,12 +53,13 @@
             {% endif %}
           </td>
           <td class="px-3 py-2">
-            <form method="POST" action="/admin/accounts/{{ acc.id }}/tier" class="inline-flex items-center gap-1">
-              <select name="tier" class="text-xs border rounded px-1 py-0.5 {% if acc.subscription_tier == 'admin' %}bg-purple-50{% elif acc.subscription_tier == 'system' %}bg-gray-50{% endif %}" onchange="this.form.submit()">
+            <form method="POST" action="/admin/accounts/{{ acc.id }}/tier" class="inline-flex items-center gap-2">
+              <select name="tier" class="text-xs border rounded px-1 py-0.5 {% if acc.subscription_tier == 'admin' %}bg-purple-50{% elif acc.subscription_tier == 'system' %}bg-gray-50{% endif %}">
                 {% for tier in tiers %}
                   <option value="{{ tier }}" {% if acc.subscription_tier == tier %}selected{% endif %}>{{ tier }}</option>
                 {% endfor %}
               </select>
+              <button type="submit" class="px-2 py-0.5 bg-blue-500 text-white text-xs rounded hover:bg-blue-600">Save</button>
             </form>
           </td>
           <td class="px-3 py-2">
