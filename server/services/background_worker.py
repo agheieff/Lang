@@ -87,31 +87,19 @@ class BackgroundWorker:
     
     def _get_active_profiles(self) -> List[Tuple[int, str]]:
         """Get all account_id, lang pairs that have profiles."""
-        from ..auth.models import Account
         from ..models import Profile
         
         results = []
         
         try:
-            # Get all accounts from global DB
+            # Profiles are in the global DB, not per-account DB
             global_db = GlobalSessionLocal()
             try:
-                accounts = global_db.query(Account.id).all()
-                account_ids = [a.id for a in accounts]
+                profiles = global_db.query(Profile.account_id, Profile.lang).all()
+                for account_id, lang in profiles:
+                    results.append((account_id, lang))
             finally:
                 global_db.close()
-            
-            # For each account, get their profiles
-            for account_id in account_ids:
-                try:
-                    with db_manager.read_only(account_id) as db:
-                        profiles = db.query(Profile.lang).filter(
-                            Profile.account_id == account_id
-                        ).all()
-                        for (lang,) in profiles:
-                            results.append((account_id, lang))
-                except Exception as e:
-                    logger.debug(f"[WORKER] Could not read profiles for account {account_id}: {e}")
         except Exception as e:
             logger.error(f"[WORKER] Error getting active profiles: {e}")
         
