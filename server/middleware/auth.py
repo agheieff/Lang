@@ -13,7 +13,7 @@ def install_auth(app) -> None:
         app.add_middleware(
             CookieUserMiddleware,
             session_factory=GlobalSessionLocal,
-            user_model=Account,
+            UserModel=Account,
             secret_key=secret,
             algorithm="HS256",
             cookie_name="access_token",

@@ -1,112 +1,103 @@
 # Arcadia Lang
 
-### DISCLAIMER: It doesn't work, there is no stable version. Come back later
-
-A click-to-translate web application for language learning, featuring pluggable language parsing and dictionary providers with intelligent spaced repetition.
+A language learning application with LLM-generated reading practice, click-to-translate word glosses, and sentence translations.
 
 ## Overview
 
-Arcadia Lang generates reading texts tailored to individual learner levels, providing:
+Arcadia Lang generates personalized reading texts for language learners:
 
-- Custom text generation based on user proficiency and SRS data
-- Sentence-by-sentence translations
-- Detailed word analysis with linguistic annotations
-- Support for Spanish and Chinese languages
+- **Global text pool** - Texts are generated once and shared across users with matching language pairs
+- **Multi-profile support** - Users can learn multiple languages with separate profiles
+- **Click-to-translate** - Word glosses and sentence translations appear on hover/click
+- **Background generation** - Texts are pre-generated so they're ready when users need them
 
-## Text/Translation Generation Pipeline
-
-The system uses a multi-stage pipeline:
-
-1. **Text Generation**: Creates targeted reading content based on user level and vocabulary needs
-2. **Structured Translation**: Provides sentence-by-sentence translations
-3. **Word Analysis**: Detailed linguistic analysis with translations, lemmas, and grammar
-4. **Retry System**: Automatic recovery from failed components
-
-## Configuration
-
-### Parallel Word Glossing
-
-Enable per‑sentence parallel word‑gloss requests to reduce latency while keeping context:
-
-- `ARC_WORDS_PARALLEL`: integer. If >1, split the generated text into sentences and fire one words request per sentence in parallel. If 1 or unset, use the single‑request path.
-- `ARC_OR_WORDS_ATTEMPTS`: integer. Retry count per sentence for OpenRouter provider only (429/5xx backoff: 2^n with jitter). Other providers use a single attempt.
-- `ARC_LLM_PROVIDERS`: provider order used during reading generation (e.g., "openrouter,local"). The chosen provider/model/base are reused for both structured translations and word glosses.
-- `LOCAL_LLM_BASE_URL`: base URL for the local provider when selected.
-- `ARC_OR_LOG_DIR`: directory for per‑request logs; per‑sentence calls are saved as words_{i}.json; single‑request path uses words.json.
-- `ARC_OR_LOG_KEEP`: how many recent job directories to keep per account/lang (best‑effort retention).
-
-## Running the Application
+## Quick Start
 
 ```bash
-# Ensure dependencies are installed
+# Install dependencies
 uv sync
 
-# Set environment variables for parallel processing
-export ARC_WORDS_PARALLEL=6
-export ARC_OR_WORDS_ATTEMPTS=2
-# optional provider order, default is "openrouter,local"
-export ARC_LLM_PROVIDERS=openrouter,local
+# Set required environment variables
+export ARC_LANG_JWT_SECRET="your-secret-key"
+export OPENROUTER_API_KEY="your-openrouter-key"  # or use local LLM
 
-# Start the development server
-uv run uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
-
-# Or use the convenience script
+# Start the server
 ./run.sh
+# or: uv run uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Visit `http://localhost:8000`, create an account, set up a profile with your target language, and start reading.
 
 ## Architecture
 
-### Core Components
-- **FastAPI Application** (`server/main.py`) - Main web server with API routes
-- **Generation Queue** (`server/services/gen_queue.py`) - Async text generation pipeline
-- **LLM Integration** (`server/llm/`) - Language model communication and prompt management
-- **Database Models** (`server/models.py`) - SQLAlchemy ORM for text storage
+### Database Structure
 
-### Service Layer
-- `generation_orchestrator.py` - High-level coordination
-- `llm_common.py` - Prompt building and user context
-- `retry_service.py` - Automatic error recovery
-- `readiness_service.py` - Component availability checking
+**Global database** (`data/arcadia_lang.db`):
+- `accounts` - User accounts with auth
+- `profiles` - Language learning profiles (one per language pair per user)
+- `reading_texts` - Generated texts shared across users
+- `reading_text_translations` - Sentence translations
+- `reading_word_glosses` - Word-level translations
 
-## Logging & Monitoring
+**Per-account databases** (`data/user_<id>.db`):
+- `lexemes` - User's vocabulary knowledge
+- `word_events` - Interaction history
+- `user_reading_history` - Which texts the user has read
 
-Generation logs are stored under:
+### Key Components
 
-```
-data/llm_stream_logs/<account_id>/<lang>/<timestamp>/
-  text.json              # Main text generation request/response
-  structured.json        # Sentence translations
-  words_0.json, ...      # Per-sentence word translations
-  meta.json              # Job metadata and status
-```
+- **Background Worker** (`server/services/background_worker.py`) - Manages text pool, retries failed translations
+- **Generation Orchestrator** (`server/services/generation_orchestrator.py`) - Coordinates text + translation generation
+- **LLM Providers** (`server/llm/`) - OpenRouter, local LLM, and provider fallback chain
 
-### Language Support
-- **Spanish**: Uses regex tokenization, spaCy/StarDict integration
-- **Chinese**: Jieba tokenization with pinyin generation, CC-CEDICT integration
+### Text Generation Pipeline
+
+1. User requests reading → system checks for available texts in pool
+2. If pool is low, background worker triggers generation
+3. Text content generated via LLM
+4. Parallel requests for word glosses and sentence translations
+5. Text marked "ready" when all components complete
+6. Failed translations automatically retried by background worker
+
+## Configuration
+
+### Required
+- `ARC_LANG_JWT_SECRET` - JWT signing secret
+- `OPENROUTER_API_KEY` - For OpenRouter provider (or configure local LLM)
+
+### Optional
+- `ARC_LLM_PROVIDERS` - Provider order, e.g., `"openrouter,local"` (default: `"openrouter,local"`)
+- `LOCAL_LLM_BASE_URL` - Base URL for local LLM provider
+- `ARC_WORDS_PARALLEL` - Number of parallel word gloss requests (default: 1)
+- `ARC_OR_WORDS_ATTEMPTS` - Retry count for OpenRouter word requests
+
+### Startup Pre-generation
+- `ARC_SYSTEM_API_KEY` - API key for system account to run startup generation
+- `ARC_STARTUP_LANGS` - Languages to pre-generate on startup (e.g., `"zh,es"`)
+- `ARC_STARTUP_TARGET_LANG` - Target language for translations (default: `"en"`)
+- `ARC_STARTUP_TEXTS_PER_LANG` - Texts to generate per language on startup (default: 2)
 
 ## Development
 
-### Installing Dependencies
 ```bash
-uv sync                    # Install all dependencies
-uv add <package>          # Add new dependency
+# Run tests
+./run_tests.sh
+# or: uv run pytest tests/
+
+# Run specific test
+uv run pytest tests/unit/path/to/test.py -v
 ```
 
-### Testing
-```bash
-uv run pytest             # Run all tests
-uv run pytest path/to/test.py::test_function  # Run specific test
-```
+## Admin Pages
 
-### Code Style
-- Use `uv` for all Python operations
-- Modular architecture with easy component swapping
-- Comments explain "why" not "what"
-- Clean production-ready code
+Admin users can access monitoring pages:
+- `/admin/texts` - View all texts in the pool with status (ready/pending/failed)
+- `/admin/accounts` - View accounts, profiles, change subscription tiers
 
-## Notes
+## Language Support
 
-- For Chinese, word translation templates use `{sentence}`; other languages support `{text}` placeholders
-- The server preserves original reading conversation context for each sentence to maintain translation coherence
-- Parallel word processing significantly reduces latency for longer texts
-- File-based cross-process locking prevents duplicate generations
+Currently supports:
+- **Chinese** (zh) - Jieba tokenization, pinyin generation
+- **Spanish** (es) - Regex tokenization
+
+Target language for translations is typically English (en).
