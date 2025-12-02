@@ -331,11 +331,13 @@ class GenerationOrchestrator:
             # Get global database session for Profile and Account lookups
             global_db = GlobalSessionLocal()
             try:
-                # Build prompt specification with pool params (Profile is in global DB)
+                # Build prompt specification with pool params
+                # Profile is in global DB, Lexemes are in per-account DB
                 spec, words, level_hint = build_reading_prompt_spec(
-                    global_db,  # Profile is in global DB
+                    global_db,
                     account_id=account_id, 
                     lang=lang,
+                    account_db=gen_db,  # Lexemes are in per-account DB
                     ci_target_override=ci_target,
                     topic=topic,
                 )

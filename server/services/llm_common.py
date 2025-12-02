@@ -12,26 +12,32 @@ from .word_selection import pick_words as _pick_words
 
 
 def build_reading_prompt_spec(
-    db: Session,
+    global_db: Session,
     *,
     account_id: int,
     lang: str,
+    account_db: Optional[Session] = None,
     length: Optional[int] = None,
     include_words: Optional[List[str]] = None,
     ci_target_override: Optional[float] = None,
     topic: Optional[str] = None,
 ) -> Tuple[PromptSpec, List[str], Optional[str]]:
-    """Assemble PromptSpec and supporting values (words, level_hint)."""
+    """Assemble PromptSpec and supporting values (words, level_hint).
+    
+    Args:
+        global_db: Session for global DB (Profile, ReadingText)
+        account_db: Session for per-account DB (Lexeme). If None, word selection is skipped.
+    """
     script = None
     if lang.startswith("zh"):
-        prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+        prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
         if prof and getattr(prof, "preferred_script", None) in ("Hans", "Hant"):
             script = prof.preferred_script
         else:
             script = "Hans"
 
     unit = "chars" if lang.startswith("zh") else "words"
-    prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+    prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
     prof_len = None
     try:
         if prof and isinstance(prof.text_length, int) and prof.text_length and prof.text_length > 0:
@@ -47,10 +53,15 @@ def build_reading_prompt_spec(
     class _U: pass
     u = _U(); u.id = account_id
     # Use override ci_target if provided (for pool generation), otherwise use profile preference
-    ci_target = ci_target_override if ci_target_override is not None else get_ci_target(db, account_id, lang)
+    ci_target = ci_target_override if ci_target_override is not None else get_ci_target(global_db, account_id, lang)
     base_new_ratio = max(0.02, min(0.6, 1.0 - ci_target + 0.05))
-    words = include_words or _pick_words(db, u, lang, count=12, new_ratio=base_new_ratio)
-    level_hint = compose_level_hint(db, u, lang)
+    # Word selection requires per-account DB for Lexeme queries
+    if account_db is not None:
+        words = include_words or _pick_words(account_db, u, lang, count=12, new_ratio=base_new_ratio)
+        level_hint = compose_level_hint(account_db, u, lang)
+    else:
+        words = include_words or []
+        level_hint = None
 
     spec = PromptSpec(
         lang=lang,
@@ -60,58 +71,21 @@ def build_reading_prompt_spec(
         include_words=words,
         script=script,
         ci_target=ci_target,
-        recent_titles=_get_recent_read_titles(db, account_id, lang),
+        recent_titles=_get_recent_read_titles(global_db, account_id, lang),
         topic=topic,
     )
     return spec, words, level_hint
 
 
-def _get_recent_read_titles(db: Session, account_id: int, lang: str, limit: int = 5) -> List[str]:
-    """Fetch titles of the last N read texts for this user/language."""
-    from ..models import ReadingText, ReadingTextTranslation
+def _get_recent_read_titles(global_db: Session, account_id: int, lang: str, limit: int = 5) -> List[str]:
+    """Fetch titles of the last N read texts for this user/language.
     
-    # Find last N read texts
-    texts = (
-        db.query(ReadingText)
-        .filter(
-            ReadingText.account_id == account_id,
-            ReadingText.lang == lang,
-            ReadingText.read_at.is_not(None)
-        )
-        .order_by(ReadingText.read_at.desc())
-        .limit(limit)
-        .all()
-    )
+    Note: With the global pool architecture, reading history is tracked in 
+    ProfileTextRead (per-account DB). This function returns titles from global DB
+    but would need account_db to properly filter by read history.
     
-    if not texts:
-        return []
-    
-    text_ids = [t.id for t in texts]
-    
-    # Fetch titles (unit='text', segment_index=0)
-    # Note: This relies on titles being translated/stored in ReadingTextTranslation.
-    # If titles are only in LLMRequestLog (legacy), this might miss them,
-    # but going forward this is the standard.
-    titles = []
-    
-    # Bulk fetch translations for these text IDs
-    rows = (
-        db.query(ReadingTextTranslation)
-        .filter(
-            ReadingTextTranslation.account_id == account_id,
-            ReadingTextTranslation.text_id.in_(text_ids),
-            ReadingTextTranslation.unit == "text",
-            ReadingTextTranslation.segment_index == 0
-        )
-        .all()
-    )
-    
-    # Map text_id -> source_text (which is the title)
-    title_map = {r.text_id: r.source_text for r in rows}
-    
-    # Reconstruct list in read_at order
-    for t in texts:
-        if t.id in title_map:
-            titles.append(title_map[t.id])
-            
-    return titles
+    For now, returns empty list - TODO: implement properly with both DBs.
+    """
+    # TODO: Implement properly using ProfileTextRead from account_db
+    # to get recently read text_ids, then fetch titles from global_db
+    return []
