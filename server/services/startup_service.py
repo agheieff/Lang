@@ -44,14 +44,13 @@ def _get_or_create_system_account(db: Session) -> int:
         logger.info(f"[STARTUP] System account exists: id={account.id}")
         return account.id
     
-    # Create system account
+    # Create system account with "system" tier (unlimited access, not for human use)
     account = Account(
         email=SYSTEM_ACCOUNT_EMAIL,
         password_hash=hash_password("system-no-login"),  # Not used for login
         is_active=True,
         is_verified=True,
-        role="system",
-        subscription_tier="admin",
+        subscription_tier="system",
     )
     db.add(account)
     db.commit()

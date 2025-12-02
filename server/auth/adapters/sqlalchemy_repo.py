@@ -52,8 +52,7 @@ class SQLAlchemyRepo(AuthRepository):
             "email": getattr(u, self.uf_email),
             "is_active": bool(getattr(u, self.uf_active, True)),
             "is_verified": bool(getattr(u, self.uf_verified, True)),
-            "role": (getattr(u, self.uf_role) if self.uf_role else None),
-            "subscription_tier": (getattr(u, self.uf_sub) if self.uf_sub else None),
+            "subscription_tier": (getattr(u, self.uf_sub) if self.uf_sub else "Free"),
             "name": getattr(u, "name", None),
             "extras": None,
         }

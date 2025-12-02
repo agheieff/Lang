@@ -18,8 +18,8 @@ class Account(Base):
     # Core fields from original schema
     is_active = Column(Boolean, default=True, nullable=False)
     is_verified = Column(Boolean, default=True, nullable=False) 
-    role = Column(String(50), nullable=True)  # user|admin|...
-    subscription_tier = Column(String(50), nullable=True)  # free|pro|...
+    # Unified tier for both access control and features: Free|Standard|Pro|Pro+|BYOK|admin|system
+    subscription_tier = Column(String(50), default="Free", nullable=False)
     
     # OpenRouter per-user key management (for paid tiers)
     openrouter_key_encrypted = Column(Text, nullable=True)  # Fernet-encrypted API key
@@ -43,7 +43,6 @@ class Account(Base):
             "email": self.email,
             "is_active": self.is_active,
             "is_verified": self.is_verified,
-            "role": self.role,
             "subscription_tier": self.subscription_tier,
             "extras": self.extras,
             "has_openrouter_key": self.openrouter_key_id is not None,

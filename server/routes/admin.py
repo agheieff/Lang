@@ -34,8 +34,8 @@ def _get_templates():
 
 
 def _require_admin(account: Account) -> None:
-    """Raise 403 if account is not admin."""
-    if account.role != "admin" and account.subscription_tier != "admin":
+    """Raise 403 if account is not admin or system."""
+    if account.subscription_tier not in ("admin", "system"):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
@@ -102,7 +102,6 @@ def admin_text_detail(
     ).count()
     
     t = _get_templates()
-    
     context = {
         "title": f"Text #{text_id}",
         "text": text,
@@ -110,38 +109,11 @@ def admin_text_detail(
         "sentence_count": sentence_count,
     }
     
-    # Simple detail view (can be expanded later)
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head><title>Text #{text_id}</title></head>
-    <body style="font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto;">
-        <a href="/admin/texts">&larr; Back to list</a>
-        <h1>Text #{text.id}</h1>
-        <p><strong>Language:</strong> {text.lang} → {text.target_lang}</p>
-        <p><strong>Title:</strong> {text.title or '(none)'}</p>
-        <p><strong>Status:</strong> 
-            Content: {'✓' if text.content else '✗'} | 
-            Words: {'✓' if text.words_complete else '✗'} ({word_count} glosses) | 
-            Sentences: {'✓' if text.sentences_complete else '✗'} ({sentence_count} translations)
-        </p>
-        <p><strong>Attempts:</strong> {text.translation_attempts}</p>
-        <p><strong>Created:</strong> {text.created_at}</p>
-        <p><strong>Topic:</strong> {text.topic or '(none)'}</p>
-        <hr>
-        <h2>Content</h2>
-        <div style="background: #f5f5f5; padding: 15px; white-space: pre-wrap; border-radius: 4px;">
-{text.content or '(no content)'}
-        </div>
-    </body>
-    </html>
-    """
-    
-    return HTMLResponse(content=html)
+    return t.TemplateResponse(request, "pages/admin_text_detail.html", context)
 
 
-# Available tiers for dropdown
-AVAILABLE_TIERS = ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"]
+# Available tiers for dropdown (unified access control + features)
+AVAILABLE_TIERS = ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin", "system"]
 
 
 @router.get("/accounts", response_class=HTMLResponse)
@@ -170,7 +142,7 @@ def admin_accounts_page(
     
     # Stats
     total_count = len(accounts)
-    admin_count = sum(1 for a in accounts if a.role == "admin" or a.subscription_tier == "admin")
+    admin_count = sum(1 for a in accounts if a.subscription_tier in ("admin", "system"))
     with_profile_count = sum(1 for a in accounts if profiles_by_account.get(a.id))
     total_profiles = len(all_profiles)
     
@@ -226,25 +198,11 @@ def admin_account_detail(
     
     profiles = db.query(Profile).filter(Profile.account_id == account_id).all()
     
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head><title>Account #{account_id}</title></head>
-    <body style="font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto;">
-        <a href="/admin/accounts">&larr; Back to list</a>
-        <h1>Account #{target.id}</h1>
-        <p><strong>Email:</strong> {target.email}</p>
-        <p><strong>Role:</strong> {target.role or 'user'}</p>
-        <p><strong>Tier:</strong> {target.subscription_tier or 'Free'}</p>
-        <p><strong>Active:</strong> {'Yes' if target.is_active else 'No'}</p>
-        <p><strong>Created:</strong> {target.created_at}</p>
-        <hr>
-        <h2>Profiles ({len(profiles)})</h2>
-        <ul>
-        {''.join(f'<li>{p.lang} → {p.target_lang} (level: {p.level_value:.1f})</li>' for p in profiles) or '<li>No profiles</li>'}
-        </ul>
-    </body>
-    </html>
-    """
+    t = _get_templates()
+    context = {
+        "title": f"Account #{account_id}",
+        "target": target,
+        "profiles": profiles,
+    }
     
-    return HTMLResponse(content=html)
+    return t.TemplateResponse(request, "pages/admin_account_detail.html", context)

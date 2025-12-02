@@ -269,32 +269,32 @@ class GenerationOrchestrator:
         global_db = GlobalSessionLocal()
         
         try:
-            with db_manager.transaction(account_id) as gen_db:
-                # Check Free tier quota before generating
-                account = global_db.query(Account).filter(Account.id == account_id).first()
-                user_tier = account.subscription_tier if account else "Free"
-                
+            # Check Free tier quota before generating
+            account = global_db.query(Account).filter(Account.id == account_id).first()
+            user_tier = account.subscription_tier if account else "Free"
+            
+            with db_manager.transaction(account_id) as account_db:
                 usage_service = get_usage_service()
-                can_generate, reason = usage_service.check_quota(gen_db, account_id, user_tier)
+                can_generate, reason = usage_service.check_quota(account_db, account_id, user_tier)
                 if not can_generate:
                     raise QuotaExceededError(reason)
-                
-                # Get profile for pool generation params
-                prof = gen_db.query(Profile).filter(
-                    Profile.account_id == account_id, 
-                    Profile.lang == lang
-                ).first()
-                
-                # Get target language from profile (default to 'en')
-                target_lang = prof.target_lang if prof else "en"
-                
-                # Get varied generation params from pool service
-                pool_service = get_pool_selection_service()
-                if prof:
-                    ci_target, topic = pool_service.get_generation_params(prof, vary=True)
-                else:
-                    # Default values if no profile exists
-                    ci_target, topic = 0.92, "daily_life"
+            
+            # Get profile for pool generation params (Profile is in global DB)
+            prof = global_db.query(Profile).filter(
+                Profile.account_id == account_id, 
+                Profile.lang == lang
+            ).first()
+            
+            # Get target language from profile (default to 'en')
+            target_lang = prof.target_lang if prof else "en"
+            
+            # Get varied generation params from pool service
+            pool_service = get_pool_selection_service()
+            if prof:
+                ci_target, topic = pool_service.get_generation_params(prof, vary=True)
+            else:
+                # Default values if no profile exists
+                ci_target, topic = 0.92, "daily_life"
             
             # Create placeholder text in GLOBAL DB
             text_id = self.text_gen_service.create_placeholder_text(

@@ -1,0 +1,53 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+<div class="container mx-auto max-w-4xl p-4">
+  <a href="/admin/texts" class="text-blue-600 hover:underline mb-4 inline-block">&larr; Back to texts</a>
+  
+  <div class="bg-white rounded-lg shadow p-6 mb-6">
+    <h1 class="text-2xl font-bold mb-4">Text #{{ text.id }}</h1>
+    
+    <div class="grid grid-cols-2 gap-4 mb-6">
+      <div>
+        <p class="text-sm text-gray-500">Language</p>
+        <p class="font-medium">
+          <span class="px-2 py-0.5 bg-gray-200 rounded text-sm">{{ text.lang }}</span>
+          <span class="text-gray-400 mx-1">→</span>
+          <span class="px-2 py-0.5 bg-gray-200 rounded text-sm">{{ text.target_lang }}</span>
+        </p>
+      </div>
+      <div>
+        <p class="text-sm text-gray-500">Title</p>
+        <p class="font-medium">{{ text.title or '(none)' }}</p>
+      </div>
+      <div>
+        <p class="text-sm text-gray-500">Status</p>
+        <p class="font-medium">
+          Content: {% if text.content %}<span class="text-green-600">✓</span>{% else %}<span class="text-red-600">✗</span>{% endif %}
+          &nbsp;|&nbsp;
+          Words: {% if text.words_complete %}<span class="text-green-600">✓</span>{% else %}<span class="text-gray-400">✗</span>{% endif %} ({{ word_count }} glosses)
+          &nbsp;|&nbsp;
+          Sentences: {% if text.sentences_complete %}<span class="text-green-600">✓</span>{% else %}<span class="text-gray-400">✗</span>{% endif %} ({{ sentence_count }} translations)
+        </p>
+      </div>
+      <div>
+        <p class="text-sm text-gray-500">Attempts</p>
+        <p class="font-medium">{{ text.translation_attempts }}</p>
+      </div>
+      <div>
+        <p class="text-sm text-gray-500">Created</p>
+        <p class="font-medium">{{ text.created_at.strftime('%Y-%m-%d %H:%M') if text.created_at else '-' }}</p>
+      </div>
+      <div>
+        <p class="text-sm text-gray-500">Topic</p>
+        <p class="font-medium">{{ text.topic or '(none)' }}</p>
+      </div>
+    </div>
+  </div>
+  
+  <div class="bg-white rounded-lg shadow p-6">
+    <h2 class="text-xl font-bold mb-4">Content</h2>
+    <div class="bg-gray-50 p-4 rounded whitespace-pre-wrap font-mono text-sm">{{ text.content or '(no content)' }}</div>
+  </div>
+</div>
+{% endblock %}

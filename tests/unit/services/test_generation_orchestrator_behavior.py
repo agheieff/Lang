@@ -193,8 +193,18 @@ def _setup_mocks(monkeypatch):
         def filter(self, *args, **kwargs): return self
         def first(self): return FakeAccount()
     
+    class FakeProfileQuery:
+        def filter(self, *args, **kwargs): return self
+        def first(self): return FakeProfile()
+    
     class FakeGlobalSession:
-        def query(self, model): return FakeAccountQuery()
+        def query(self, model):
+            # Return appropriate fake based on model
+            if model.__name__ == "Account":
+                return FakeAccountQuery()
+            elif model.__name__ == "Profile":
+                return FakeProfileQuery()
+            return FakeAccountQuery()  # fallback
         def get(self, model, id): return None
         def add(self, obj): pass
         def flush(self): pass

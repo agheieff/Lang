@@ -19,8 +19,7 @@ class TestAccountModel:
             password_hash="hashed_password",
             is_active=True,
             is_verified=True,
-            role="user",
-            subscription_tier="free",
+            subscription_tier="Free",
             extras={"preferences": {"theme": "dark"}}
         )
 
@@ -30,8 +29,7 @@ class TestAccountModel:
         assert sample_account.password_hash == "hashed_password"
         assert sample_account.is_active is True
         assert sample_account.is_verified is True
-        assert sample_account.role == "user"
-        assert sample_account.subscription_tier == "free"
+        assert sample_account.subscription_tier == "Free"
         assert sample_account.extras == {"preferences": {"theme": "dark"}}
 
     def test_account_to_dict(self, sample_account):
@@ -46,8 +44,7 @@ class TestAccountModel:
             "email": "test@example.com",
             "is_active": True,
             "is_verified": True,
-            "role": "user",
-            "subscription_tier": "free",
+            "subscription_tier": "Free",
             "extras": {"preferences": {"theme": "dark"}},
             "has_openrouter_key": False,
         }
@@ -55,10 +52,15 @@ class TestAccountModel:
         assert result == expected
 
     def test_account_to_dict_optional_fields(self):
-        """Test Account to_dict with None/missing optional fields."""
+        """Test Account to_dict with explicit fields."""
+        # Note: Column defaults are only applied on database insertion
+        # For in-memory objects, we need to set values explicitly
         account = Account(
             email="minimal@example.com",
-            password_hash="hash"
+            password_hash="hash",
+            is_active=True,
+            is_verified=True,
+            subscription_tier="Free"
         )
         account.id = 2
         
@@ -67,10 +69,9 @@ class TestAccountModel:
         expected = {
             "id": 2,
             "email": "minimal@example.com",
-            "is_active": None,  # No default set in model
-            "is_verified": None,  # No default set in model  
-            "role": None,
-            "subscription_tier": None,
+            "is_active": True,
+            "is_verified": True,
+            "subscription_tier": "Free",
             "extras": None,
             "has_openrouter_key": False,
         }
@@ -93,9 +94,10 @@ class TestAccountModel:
         account = Account()
         
         # Check that the Account model has the expected attributes
+        # Note: role was removed, subscription_tier is the unified field
         expected_fields = [
             'id', 'email', 'password_hash', 'is_active', 'is_verified',
-            'role', 'subscription_tier', 'extras', 'created_at', 'updated_at'
+            'subscription_tier', 'extras', 'created_at', 'updated_at'
         ]
         
         for field in expected_fields:

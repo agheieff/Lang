@@ -24,7 +24,6 @@ class AccountOut(BaseModel):
     email: str
     is_active: bool = True
     is_verified: bool = True
-    role: Optional[str] = None  # user|admin|... optional
-    subscription_tier: Optional[str] = None  # free|pro|...
+    subscription_tier: str = "Free"  # Free|Standard|Pro|Pro+|BYOK|admin|system
     extras: Optional[Dict[str, Any]] = None
 

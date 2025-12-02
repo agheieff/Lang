@@ -60,8 +60,7 @@ def create_auth_router(
             "email": acc.get("email"),
             "is_active": bool(acc.get("is_active", True)),
             "is_verified": bool(acc.get("is_verified", True)),
-            "role": acc.get("role"),
-            "subscription_tier": acc.get("subscription_tier"),
+            "subscription_tier": acc.get("subscription_tier", "Free"),
             "extras": acc.get("extras"),
         })
 
@@ -75,11 +74,10 @@ def create_auth_router(
         if msg:
             raise HTTPException(status_code=422, detail=msg)
         # Default all new accounts to admin for development
-        # TODO: Remove this in production
+        # TODO: Change to "Free" in production
         acc = repo.create_account(
             email, 
             hash_password(payload.password),
-            role="admin",
             subscription_tier="admin",
         )
         return _to_account_out(acc)
