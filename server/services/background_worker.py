@@ -8,7 +8,6 @@ import time
 from typing import List, Tuple
 
 from ..db import GlobalSessionLocal
-from ..utils.session_manager import db_manager
 from .generation_orchestrator import GenerationOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -73,17 +72,19 @@ class BackgroundWorker:
         logger.debug(f"[WORKER] Running maintenance for {len(profiles)} profile(s)")
         
         for account_id, lang in profiles:
+            global_db = GlobalSessionLocal()
             try:
-                with db_manager.transaction(account_id) as db:
-                    # Retry incomplete texts first
-                    retried = self.orchestrator.retry_incomplete_texts(db, account_id, lang)
-                    if retried > 0:
-                        logger.info(f"[WORKER] Queued {retried} text(s) for retry (account={account_id}, lang={lang})")
-                    
-                    # Then ensure pool is filled
-                    self.orchestrator.ensure_text_available(db, account_id, lang)
+                # Retry incomplete texts first (uses global DB for reading_texts)
+                retried = self.orchestrator.retry_incomplete_texts(global_db, account_id, lang)
+                if retried > 0:
+                    logger.info(f"[WORKER] Queued {retried} text(s) for retry (account={account_id}, lang={lang})")
+                
+                # Then ensure pool is filled (uses global DB for reading_texts)
+                self.orchestrator.ensure_text_available(global_db, account_id, lang)
             except Exception as e:
                 logger.error(f"[WORKER] Error processing account={account_id} lang={lang}: {e}")
+            finally:
+                global_db.close()
     
     def _get_active_profiles(self) -> List[Tuple[int, str]]:
         """Get all account_id, lang pairs that have profiles."""
