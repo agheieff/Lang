@@ -78,13 +78,13 @@ class SrsService:
         # In a full refactor, we'd move the logic here.
         pass
 
-def _ensure_profile(db: Session, account_id: int, lang: str, target_lang: str = "en") -> Profile:
+def _ensure_profile(global_db: Session, account_id: int, lang: str, target_lang: str = "en") -> Profile:
     """Get or create profile without implicit flush."""
-    prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+    prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
     if prof:
         return prof
     prof = Profile(account_id=account_id, lang=lang, target_lang=target_lang)
-    db.add(prof)
+    global_db.add(prof)
     # Removed db.flush() - let caller handle transaction
     return prof
 
@@ -95,6 +95,7 @@ def _schedule_next(lex: Lexeme, quality: int, now: datetime) -> None:
 
 def srs_click(
     db: Session,
+    global_db: Session,
     *,
     account_id: int,
     lang: str,
@@ -106,7 +107,7 @@ def srs_click(
     profile: Optional[Profile] = None,  # Optimization: pass profile if known
     lexeme: Optional[Lexeme] = None,    # Optimization: pass lexeme if known
 ) -> None:
-    prof = profile or _ensure_profile(db, account_id, lang)
+    prof = profile or _ensure_profile(global_db, account_id, lang)
     lex = lexeme or _resolve_lexeme(db, lang, lemma, pos, account_id=account_id, profile_id=prof.id)
     
     # Since lexemes are now user-specific, we can use them directly
@@ -134,6 +135,7 @@ def srs_click(
 
 def srs_exposure(
     db: Session,
+    global_db: Session,
     *,
     account_id: int,
     lang: str,
@@ -146,7 +148,7 @@ def srs_exposure(
     lexeme: Optional[Lexeme] = None,    # Optimization: pass lexeme if known
     session_start_time: Optional[datetime] = None, # Optimization: pass session start to skip query
 ) -> None:
-    prof = profile or _ensure_profile(db, account_id, lang)
+    prof = profile or _ensure_profile(global_db, account_id, lang)
     lex = lexeme or _resolve_lexeme(db, lang, lemma, pos, account_id=account_id, profile_id=prof.id)
     
     # Since lexemes are now user-specific, we can use them directly
@@ -271,6 +273,7 @@ def srs_exposure(
 
 def srs_nonlookup(
     db: Session,
+    global_db: Session,
     *,
     account_id: int,
     lang: str,
@@ -282,7 +285,7 @@ def srs_nonlookup(
     profile: Optional[Profile] = None,
     lexeme: Optional[Lexeme] = None,
 ) -> None:
-    prof = profile or _ensure_profile(db, account_id, lang)
+    prof = profile or _ensure_profile(global_db, account_id, lang)
     lex = lexeme or _resolve_lexeme(db, lang, lemma, pos, account_id=account_id, profile_id=prof.id)
     
     # Since lexemes are now user-specific, we can use them directly

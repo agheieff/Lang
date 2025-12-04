@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..models import GenerationRetryAttempt, ReadingText
 from ..enums import RetryComponent
-from .readiness_service import ReadinessService
+from ..services.user_content_service import UserContentService
 
 
 def _job_dir(account_id: int, lang: str) -> Path:
@@ -38,7 +38,7 @@ class RetryService:
     
     def __init__(self):
         self.settings = self._get_settings()
-        self.readiness = ReadinessService()
+        self.user_content = UserContentService()
     
     def _get_settings(self) -> dict:
         """Load retry-related settings."""
@@ -240,10 +240,11 @@ class RetryService:
         failed_texts = []
         try:
             for text in texts:
-                needs_retry = self.readiness.needs_retry(db, account_id, text.id)
+                failed_components = self.user_content.get_failed_components(db, text.id, text.target_lang)
+                needs_retry = failed_components.get("words") or failed_components.get("sentences")
                 
                 if needs_retry:
-                    failed_components = self.readiness.get_failed_components(db, account_id, text.id)
+                    failed_components = self.user_content.get_failed_components(db, text.id, text.target_lang)
                     can_retry, reason = self.can_retry(db, account_id, text.id, failed_components)
                     
                     if can_retry:
@@ -267,7 +268,14 @@ class RetryService:
 
         try:
             with db_manager.transaction(account_id) as db:
-                failed_components = self.readiness.get_failed_components(db, account_id, text_id)
+                # Get text to determine target_lang
+                text = db.query(ReadingText).filter(ReadingText.id == text_id).first()
+                if not text:
+                    results["error"] = "text_not_found"
+                    return results
+                    
+                target_lang = text.target_lang
+                failed_components = self.user_content.get_failed_components(db, text.id, target_lang)
                 if not (failed_components.get("words") or failed_components.get("sentences")):
                     return results
 

@@ -8,9 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from ..models import Profile, ProfilePref, WordEvent, Lexeme
-from .math.decay import decay_factor
-from .math.kernel import gaussian_kernel_weights
-from .math.bayesian import compute_level_from_counts
+from ..utils.math_utils import decay_factor, gaussian_kernel_weights, compute_level_from_counts
 
 
 def _f(name: str, default: float) -> float:
@@ -53,17 +51,17 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, float(v)))
 
 
-def get_ci_target(db: Session, account_id: int, lang: str) -> float:
+def get_ci_target(global_db: Session, account_id: int, lang: str) -> float:
     try:
         default = float(os.getenv("ARC_CI_DEFAULT", "0.95"))
     except Exception:
         default = 0.95
     ci_min = float(os.getenv("ARC_CI_MIN", "0.8"))
     ci_max = float(os.getenv("ARC_CI_MAX", "0.99"))
-    prof = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+    prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
     if not prof:
         return _clamp(default, ci_min, ci_max)
-    pref = db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
+    pref = global_db.query(ProfilePref).filter(ProfilePref.profile_id == prof.id).first()
     if not pref or not isinstance(pref.data, dict):
         return _clamp(default, ci_min, ci_max)
     ci = pref.data.get("ci_target")
@@ -176,8 +174,8 @@ def _resolve_bin_for_lexeme(db: Session, lexeme_id: int, lang: str) -> Optional[
     return None
 
 
-def update_level_for_profile(db: Session, profile: Profile, *, force: bool = False) -> None:
-    pref = _ensure_profile_pref(db, profile.id)
+def update_level_for_profile(account_db: Session, global_db: Session, profile: Profile, *, force: bool = False) -> None:
+    pref = _ensure_profile_pref(global_db, profile.id)
     st = _state_for_profile(pref)
     now = datetime.utcnow()
     if not force and st.get("last_update_at"):
@@ -199,7 +197,7 @@ def update_level_for_profile(db: Session, profile: Profile, *, force: bool = Fal
             pass
 
     last_eid = st.get("last_event_id")
-    q = db.query(WordEvent).filter(WordEvent.profile_id == profile.id)
+    q = account_db.query(WordEvent).filter(WordEvent.profile_id == profile.id)
     if last_eid:
         q = q.filter(WordEvent.id > int(last_eid))
     q = q.order_by(WordEvent.id.asc())
@@ -210,7 +208,7 @@ def update_level_for_profile(db: Session, profile: Profile, *, force: bool = Fal
         lvl, lvar = compute_level_from_counts(a, b, PRIOR_A, PRIOR_B, P_TARGET)
         profile.level_value = float(lvl)
         profile.level_var = float(lvar)
-        _save_state(db, pref, st, lvl, lvar)
+        _save_state(global_db, pref, st, lvl, lvar)
         return
 
     S = [0.0] * 6
@@ -229,7 +227,7 @@ def update_level_for_profile(db: Session, profile: Profile, *, force: bool = Fal
             succ = False; w0 = W_CLICK
         else:
             continue
-        b0 = _resolve_bin_for_lexeme(db, ev.lexeme_id, profile.lang)
+        b0 = _resolve_bin_for_lexeme(account_db, ev.lexeme_id, profile.lang)
         if not b0:
             continue
         try:
@@ -272,33 +270,45 @@ def update_level_for_profile(db: Session, profile: Profile, *, force: bool = Fal
     lvl, lvar = compute_level_from_counts(a, b, PRIOR_A, PRIOR_B, P_TARGET)
     profile.level_value = float(lvl)
     profile.level_var = float(lvar)
-    _save_state(db, pref, st, lvl, lvar)
+    _save_state(global_db, pref, st, lvl, lvar)
 
 
-def update_level_if_stale(db: Session, user_id: int, lang: str, *, force: bool = False) -> None:
-    prof = db.query(Profile).filter(Profile.account_id == user_id, Profile.lang == lang).first()
+def update_level_if_stale(global_db: Session, user_id: int, lang: str, *, force: bool = False, account_db: Session = None) -> None:
+    """Update level if stale. If account_db is provided, uses it for WordEvent queries, otherwise uses global_db."""
+    prof = global_db.query(Profile).filter(Profile.account_id == user_id, Profile.lang == lang).first()
     if not prof:
         return
-    pref = _ensure_profile_pref(db, prof.id)
+    pref = _ensure_profile_pref(global_db, prof.id)
     st = _state_for_profile(pref)
     now = datetime.utcnow()
+    
+    # If account_db is not provided, we can't process WordEvents properly
+    # In this case, just skip the update
+    if account_db is None:
+        # We can still update if forced, but won't have WordEvent data
+        if force:
+            # Create minimal update without WordEvent processing
+            st["last_update_at"] = now.isoformat(timespec="seconds")
+            _save_state(global_db, pref, st, prof.level_value or 0.0, prof.level_var or 1.0)
+        return
+        
     if force:
-        update_level_for_profile(db, prof, force=True)
+        update_level_for_profile(account_db, global_db, prof, force=True)
         return
     last = st.get("last_update_at")
     if not last:
-        update_level_for_profile(db, prof, force=True)
+        update_level_for_profile(account_db, global_db, prof, force=True)
         return
     try:
         last_dt = datetime.fromisoformat(last)  # type: ignore
         if (now - last_dt).total_seconds() >= STALE_SEC:
-            update_level_for_profile(db, prof, force=False)
+            update_level_for_profile(account_db, global_db, prof, force=False)
     except Exception:
-        update_level_for_profile(db, prof, force=True)
+        update_level_for_profile(account_db, global_db, prof, force=True)
 
 
-def get_level_summary(db: Session, profile: Profile) -> Dict:
-    pref = _ensure_profile_pref(db, profile.id)
+def get_level_summary(global_db: Session, profile: Profile) -> Dict:
+    pref = _ensure_profile_pref(global_db, profile.id)
     st = _state_for_profile(pref)
     a = list(st["bins"]["a"])
     b = list(st["bins"]["b"])

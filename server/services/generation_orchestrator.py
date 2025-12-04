@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +14,7 @@ from ..utils.session_manager import db_manager
 from ..db import GlobalSessionLocal
 from sqlalchemy.orm import Session
 
-from .readiness_service import ReadinessService
+from ..services.user_content_service import UserContentService
 from .state_manager import GenerationStateManager
 from .text_generation_service import TextGenerationService, TextGenerationResult
 from .translation_service import TranslationService
@@ -21,6 +23,12 @@ from .notification_service import get_notification_service
 from .llm_common import build_reading_prompt_spec
 from .pool_selection_service import get_pool_selection_service
 from .usage_service import get_usage_service, QuotaExceededError
+from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
+from ..enums import TextUnit
+from ..utils.json_parser import extract_structured_translation, extract_word_translations
+from ..utils.gloss import compute_spans
+from ..llm.client import _pick_openrouter_model, chat_complete_with_raw
+from ..utils.text_segmentation import split_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +61,7 @@ class GenerationOrchestrator:
     def __init__(self):
         if getattr(self, '_initialized', False):
             return
-        self.readiness_service = ReadinessService()
+        self.user_content_service = UserContentService()
         self.state_manager = GenerationStateManager()
         self.text_gen_service = TextGenerationService()
         self.translation_service = TranslationService()
@@ -549,6 +557,213 @@ class GenerationOrchestrator:
         job_dir = base / ts
         job_dir.mkdir(parents=True, exist_ok=True)
         return job_dir
+    
+    def retry_missing_words(self, account_id: int, text_id: int, log_dir: Path) -> bool:
+        """Retry generation of missing word translations for a text.
+        Uses the original text.json messages and full response to build per-sentence word prompts.
+        """
+        from ..db import open_global_session
+        
+        # Use global DB session for global models
+        global_db = open_global_session()
+        try:
+            rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
+            if not rt or not rt.content:
+                return False
+
+            prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
+            target_lang = (prof.target_lang if prof and getattr(prof, "target_lang", None) else "en")
+            
+            text_json = log_dir / "text.json"
+            if not text_json.exists():
+                return False
+            text_log = json.loads(text_json.read_text(encoding="utf-8"))
+            original_messages = text_log.get("request", {}).get("messages")
+            text_content = (
+                text_log.get("response", {})
+                        .get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content")
+            )
+            if not original_messages or not text_content:
+                return False
+
+            # Extract main text string (handle possible JSON-in-text cases)
+            m = re.search(r'\{[^}]*"text":\s*"([^"]+)"', text_content)
+            main_text = m.group(1) if m else text_content
+            main_text = main_text.replace("\\n", "\n")
+
+            sent_spans = split_sentences(main_text, rt.lang)
+
+            provider = "openrouter"
+            model_id = _pick_openrouter_model(None)
+
+            from ..llm.prompts import build_word_translation_prompt
+
+            with db_manager.transaction(account_id) as account_db:
+                for i, (s, e, seg) in enumerate(sent_spans):
+                    try:
+                        msgs = build_word_translation_prompt(rt.lang, target_lang, seg)
+                        words_ctx = [
+                            {"role": "system", "content": msgs[0]["content"]},
+                            {"role": "user", "content": original_messages[1]["content"] if len(original_messages) > 1 else ""},
+                            {"role": "assistant", "content": text_content},
+                            {"role": "user", "content": msgs[1]["content"]},
+                        ]
+                        words_text, words_resp = chat_complete_with_raw(
+                            words_ctx, provider=provider, model=model_id, max_tokens=16384
+                        )
+                        # Log file for this retry call
+                        try:
+                            words_file = log_dir / f"words_retry_{i+1}.json"
+                            words_log = {
+                                "request": {"provider": provider, "model": model_id, "messages": words_ctx, "retry": True},
+                                "response": words_resp,
+                            }
+                            words_file.write_text(json.dumps(words_log, ensure_ascii=False, indent=2), encoding="utf-8")
+                        except Exception:
+                            pass
+
+                        # Parse and persist
+                        wd_parsed = extract_word_translations(words_text or "")
+                        if not wd_parsed or not wd_parsed.get("words"):
+                            continue
+                        words_list = [w for w in wd_parsed.get("words", []) if isinstance(w, dict) and w.get("word")]
+                        if not words_list:
+                            continue
+                        spans = compute_spans(seg, words_list, key="word")
+                        for it, sp in zip(words_list, spans):
+                            gloss = ReadingWordGloss(
+                                text_id=text_id,
+                                sentence_index=i,
+                                word=it.get("word"),
+                                gloss=it.get("gloss"),
+                                context=it.get("context", ""),
+                                span_start=sp[0] if sp else None,
+                                span_end=sp[1] if sp else None,
+                            )
+                            account_db.add(gloss)
+                        account_db.commit()  # Commit per sentence for better progress tracking
+
+                    except Exception as e:
+                        logger.warning(f"Failed to retry words for sentence {i+1} of text {text_id}: {e}")
+                        continue
+
+                # Mark words complete
+                rt.words_complete = True
+                global_db.commit()
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to retry missing words for text {text_id}: {e}")
+            try:
+                global_db.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            global_db.close()
+    
+    def retry_missing_sentences(self, account_id: int, text_id: int, log_dir: Path) -> bool:
+        """Retry generation of missing sentence translations for a text."""
+        from ..db import open_global_session
+        
+        global_db = open_global_session()
+        try:
+            rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
+            if not rt or not rt.content:
+                return False
+
+            prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
+            target_lang = (prof.target_lang if prof and getattr(prof, "target_lang", None) else "en")
+            
+            text_json = log_dir / "text.json"
+            if not text_json.exists():
+                return False
+            text_log = json.loads(text_json.read_text(encoding="utf-8"))
+            original_messages = text_log.get("request", {}).get("messages")
+            text_content = (
+                text_log.get("response", {})
+                        .get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content")
+            )
+            if not original_messages or not text_content:
+                return False
+
+            # Extract main text string
+            m = re.search(r'\{[^}]*"text":\s*"([^"]+)"', text_content)
+            main_text = m.group(1) if m else text_content
+            main_text = main_text.replace("\\n", "\n")
+
+            sent_spans = split_sentences(main_text, rt.lang)
+
+            provider = "openrouter"
+            model_id = _pick_openrouter_model(None)
+
+            from ..llm.prompts import build_translation_contexts
+
+            all_ctxs = build_translation_contexts(rt.lang, original_messages[1]["content"] if len(original_messages) > 1 else "", main_text, [])
+            prompt_payload = {
+                "sentences": all_ctxs,
+                "output_format": "structured_json",
+                "target_language": target_lang,
+            }
+
+            msgs = [
+                {"role": "system", "content": "You are a professional translator. Translate the given sentences and provide structured output."},
+                {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False, indent=2)},
+            ]
+
+            sent_text, sent_resp = chat_complete_with_raw(
+                msgs, provider=provider, model=model_id, max_tokens=16384
+            )
+
+            # Log the retry attempt
+            try:
+                sent_file = log_dir / "sentences_retry.json"
+                sent_log = {
+                    "request": {"provider": provider, "model": model_id, "messages": msgs, "retry": True},
+                    "response": sent_resp,
+                }
+                sent_file.write_text(json.dumps(sent_log, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+            with db_manager.transaction(account_id) as account_db:
+                parsed = extract_structured_translation(sent_text or "")
+                if not parsed or not isinstance(parsed, list):
+                    logger.warning(f"Sentence retry parsing failed for text {text_id}")
+                    return False
+
+                for i, seg in enumerate(sent_spans):
+                    if i < len(parsed):
+                        translation = parsed[i]
+                        record = ReadingTextTranslation(
+                            text_id=text_id,
+                            unit=TextUnit.SENTENCE,
+                            sentence_index=i,
+                            original=seg[2],
+                            translation=translation,
+                        )
+                        account_db.add(record)
+
+                account_db.commit()
+
+            # Mark sentences complete
+            rt.sentences_complete = True
+            global_db.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to retry missing sentences for text {text_id}: {e}")
+            try:
+                global_db.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            global_db.close()
 
 
 def get_generation_orchestrator() -> GenerationOrchestrator:

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from server.auth import Account  # type: ignore
 
 from ..account_db import get_db
+from ..db import get_global_db
 from ..deps import get_current_account as _get_current_account, require_tier
 from ..level import get_level_summary, update_level_if_stale
 from ..services.word_selection import urgent_words_detailed
@@ -74,9 +75,10 @@ def srs_urgent(
     total: int = 12,
     new_ratio: float = 0.3,
     db: Session = Depends(get_db),
+    global_db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
-    items = urgent_words_detailed(db, account, lang, total=total, new_ratio=new_ratio)
+    items = urgent_words_detailed(db, global_db, account, lang, total=total, new_ratio=new_ratio)
     return {"words": [it["form"] for it in items], "items": items}
 
 
@@ -103,6 +105,7 @@ def srs_exposures(
             continue
         _svc_srs_exposure(
             db,
+            global_db,
             account_id=account.id,
             lang=req.lang,
             lemma=lemma,
@@ -124,6 +127,7 @@ def srs_exposures(
 def srs_nonlookup(
     req: NonLookupRequest,
     db: Session = Depends(get_db),
+    global_db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
     count = 0
@@ -137,6 +141,7 @@ def srs_nonlookup(
             continue
         _svc_srs_nonlookup(
             db,
+            global_db,
             account_id=account.id,
             lang=req.lang,
             lemma=lemma,
@@ -147,7 +152,7 @@ def srs_nonlookup(
         )
         count += 1
     try:
-        update_level_if_stale(db, account.id, req.lang)
+        update_level_if_stale(global_db, account.id, req.lang, account_db=db)
     except Exception:
         pass
     db.commit()
@@ -158,6 +163,7 @@ def srs_nonlookup(
 def srs_click(
     req: ClickRequest,
     db: Session = Depends(get_db),
+    global_db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
     lemma = req.lemma
@@ -169,6 +175,7 @@ def srs_click(
         raise HTTPException(400, "lemma or surface required")
     _svc_srs_click(
         db,
+        global_db,
         account_id=account.id,
         lang=req.lang,
         lemma=lemma,
@@ -178,7 +185,7 @@ def srs_click(
         text_id=req.text_id,
     )
     try:
-        update_level_if_stale(db, account.id, req.lang)
+        update_level_if_stale(global_db, account.id, req.lang, account_db=db)
         db.commit()
     except Exception:
         pass

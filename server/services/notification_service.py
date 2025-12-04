@@ -17,6 +17,8 @@ from weakref import WeakSet
 from fastapi import Response
 from fastapi.responses import StreamingResponse
 
+from ..models import Profile
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,17 +236,18 @@ class NotificationService:
             try:
                 # Check current text readiness immediately on connection
                 from ..utils.session_manager import db_manager
-                from ..services.readiness_service import ReadinessService
-                from ..services.selection_service import SelectionService
+                from ..services.user_content_service import UserContentService
                 
                 try:
                     with db_manager.transaction(account_id) as db:
-                        selection_service = SelectionService()
-                        readiness_service = ReadinessService()
-                        current_text = selection_service.pick_current_or_new(db, account_id, lang)
+                        content_service = UserContentService()
+                        from ..db import get_global_db
+                        global_db = get_global_db()
+                        
+                        current_text = content_service.pick_current_or_new(db, global_db, account_id, lang)
                         
                         if current_text:
-                            is_ready, reason = readiness_service.evaluate(db, current_text, account_id)
+                            is_ready, reason = content_service.evaluate(global_db, current_text)
                             
                             # Check if content is ready (text exists but translations might not be)
                             if current_text.content and current_text.generated_at:
@@ -270,8 +273,11 @@ class NotificationService:
                         
                         # Check if there's any ready backup text in the pool
                         current_id = current_text.id if current_text else None
-                        backup_text, backup_reason = readiness_service.first_ready_backup(
-                            db, account_id, lang, exclude_text_id=current_id
+                        # Get profile for target_lang
+                        profile = db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == lang).first()
+                        target_lang = profile.target_lang if profile else "en"
+                        backup_text, backup_reason = content_service.first_ready_backup(
+                            global_db, db, lang, target_lang=target_lang, profile_id=profile.id if profile else None, exclude_text_id=current_id
                         )
                         if backup_text:
                             next_ready_event = SSEEvent("next_ready", {

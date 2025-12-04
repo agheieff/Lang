@@ -1,9 +1,33 @@
 from __future__ import annotations
 
+import math
 from typing import List, Tuple
 
 
+def decay_factor(dt_days: float, hl_days: float) -> float:
+    """Calculate exponential decay factor based on half-life."""
+    if hl_days <= 0:
+        return 1.0
+    try:
+        return math.exp(-math.log(2.0) * (dt_days / hl_days))
+    except Exception:
+        return 1.0
+
+
+def gaussian_kernel_weights(center: float, sigma: float, bins: int = 6) -> List[float]:
+    """Generate Gaussian kernel weights for level estimation."""
+    if sigma <= 0:
+        sigma = 1.0
+    out: List[float] = []
+    for i in range(1, bins + 1):
+        d = (i - center)
+        out.append(math.exp(-0.5 * (d / sigma) ** 2))
+    s = sum(out) or 1.0
+    return [v / s for v in out]
+
+
 def estimate_level(mu: List[float], var: List[float], p_target: float) -> Tuple[float, float]:
+    """Estimate user level from probability distributions."""
     jstar = 0
     for j in range(6):
         if mu[j] >= p_target:
@@ -27,6 +51,7 @@ def estimate_level(mu: List[float], var: List[float], p_target: float) -> Tuple[
 
 
 def compute_level_from_counts(a: List[float], b: List[float], prior_a: float, prior_b: float, p_target: float) -> Tuple[float, float]:
+    """Compute level from success/failure counts using Bayesian estimation."""
     mu: List[float] = []
     vr: List[float] = []
     for j in range(6):
@@ -36,4 +61,3 @@ def compute_level_from_counts(a: List[float], b: List[float], prior_a: float, pr
         mu.append(alpha / s)
         vr.append((alpha * beta) / (s * s * (s + 1.0)))
     return estimate_level(mu, vr, p_target)
-

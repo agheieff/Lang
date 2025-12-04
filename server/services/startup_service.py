@@ -153,20 +153,45 @@ def _trigger_generation(account_id: int, lang: str) -> None:
 
 async def ensure_startup_texts() -> None:
     """
-    Main startup function - ensure minimum texts exist before server is ready.
+    Main startup function - ensure system account exists and minimum texts are ready.
     
     This function:
-    1. Creates/gets system account
-    2. Configures API key
-    3. Triggers generation for each configured language
-    4. Waits until minimum texts are ready
+    1. Creates/gets system account (always)
+    2. Configures API key (if provided)
+    3. Triggers generation for each configured language (if API key provided)
+    4. Waits until minimum texts are ready (if API key provided)
     """
+    # Step 1: Always create system account for admin visibility
+    global_db = open_global_session()
+    try:
+        account_id = _get_or_create_system_account(global_db)
+        
+        # Create profiles for each configured language
+        langs = [l.strip() for l in STARTUP_LANGS.split(",") if l.strip()]
+        for lang in langs:
+            _ensure_system_profile(global_db, account_id, lang, STARTUP_TARGET_LANG)
+    finally:
+        global_db.close()
+    
+    logger.info(f"[STARTUP] System account ready (id={account_id})")
+    
+    # Step 2: Configure API key if provided
+    if SYSTEM_API_KEY:
+        account_db = open_account_session(account_id)
+        try:
+            _configure_system_model(account_db, account_id, SYSTEM_API_KEY)
+        finally:
+            account_db.close()
+    else:
+        logger.info("[STARTUP] No ARC_SYSTEM_API_KEY configured - system account created but text generation disabled")
+    
+    # Step 3: Text pre-generation (only if API key and texts enabled)
     if STARTUP_TEXTS_PER_LANG <= 0:
         logger.info("[STARTUP] Text pre-generation disabled (ARC_STARTUP_TEXTS_PER_LANG=0)")
         return
     
     if not SYSTEM_API_KEY:
-        logger.warning("[STARTUP] No ARC_SYSTEM_API_KEY set - skipping text pre-generation")
+        logger.info("[STARTUP] No ARC_SYSTEM_API_KEY set - skipping text pre-generation")
         return
     
     langs = [l.strip() for l in STARTUP_LANGS.split(",") if l.strip()]
@@ -176,26 +201,7 @@ async def ensure_startup_texts() -> None:
     
     logger.info(f"[STARTUP] Ensuring {STARTUP_TEXTS_PER_LANG} text(s) ready for: {langs}")
     
-    # Step 1: Setup system account
-    global_db = open_global_session()
-    try:
-        account_id = _get_or_create_system_account(global_db)
-        
-        # Create profiles for each language
-        for lang in langs:
-            _ensure_system_profile(global_db, account_id, lang, STARTUP_TARGET_LANG)
-    finally:
-        global_db.close()
-    
-    # Step 2: Configure API key (per-account DB)
-    if SYSTEM_API_KEY:
-        account_db = open_account_session(account_id)
-        try:
-            _configure_system_model(account_db, account_id, SYSTEM_API_KEY)
-        finally:
-            account_db.close()
-    
-    # Step 3: Check current state and trigger generation if needed
+    # Check current state and trigger generation if needed
     needs_generation: List[str] = []
     global_db = open_global_session()
     try:
@@ -209,11 +215,11 @@ async def ensure_startup_texts() -> None:
     finally:
         global_db.close()
     
-    # Step 4: Trigger generation for languages that need it
+    # Trigger generation for languages that need it
     for lang in needs_generation:
         _trigger_generation(account_id, lang)
     
-    # Step 5: Wait for texts to be ready
+    # Wait for texts to be ready
     if needs_generation:
         start_time = time.time()
         while True:
@@ -239,7 +245,7 @@ async def ensure_startup_texts() -> None:
             
             await asyncio.sleep(2.0)  # Check every 2 seconds
     
-    logger.info("[STARTUP] Text pre-generation complete")
+    logger.info("[STARTUP] Startup complete")
 
 
 def get_system_account_id() -> Optional[int]:
