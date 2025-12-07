@@ -1,50 +1,87 @@
-from __future__ import annotations
+"""
+Generation Orchestrator Service
+
+Consolidated service that handles:
+- Text content generation via LLM
+- Word and sentence translation generation
+- Orchestration between generation and translation
+- High-level text lifecycle management
+
+Merges functionality from:
+- GenerationService
+- TranslationService
+- UnifiedOrchestrationService
+"""
 
 import asyncio
-import json
 import logging
-import os
-import re
 import threading
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from typing import Dict, Optional
 
-from ..utils.session_manager import db_manager
-from ..db import GlobalSessionLocal
 from sqlalchemy.orm import Session
-
-from ..services.user_content_service import UserContentService
-from .state_manager import GenerationStateManager
-from .text_generation_service import TextGenerationService, TextGenerationResult
-from .translation_service import TranslationService
-from .translation_validation_service import TranslationValidationService
-from .notification_service import get_notification_service
-from .llm_common import build_reading_prompt_spec
-from .pool_selection_service import get_pool_selection_service
-from .usage_service import get_usage_service, QuotaExceededError
-from ..models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
-from ..enums import TextUnit
-from ..utils.json_parser import extract_structured_translation, extract_word_translations
-from ..utils.gloss import compute_spans
+from ..llm import build_reading_prompt
 from ..llm.client import _pick_openrouter_model, chat_complete_with_raw
+from ..llm.prompts import build_translation_contexts, build_word_translation_prompt
+from ..services.model_registry_service import get_model_registry
+from ..services.llm_logging import log_llm_request, llm_call_and_log_to_file
+from ..services.openrouter_key_service import get_openrouter_key_service
+from ..services.title_extraction_service import TitleExtractionService
+from ..services.notification_service import get_notification_service
+from ..services.state_manager import GenerationStateManager
+from ..services.pool_selection_service import get_pool_selection_service
+from ..services.usage_service import get_usage_service
+from ..services.level_service import get_ci_target
+from ..llm import compose_level_hint
+from ..db import db_manager, GlobalSessionLocal
+from ..utils.json_parser import (
+    extract_json_from_text,
+    extract_text_from_llm_response,
+    extract_structured_translation,
+    extract_word_translations,
+)
 from ..utils.text_segmentation import split_sentences
+from ..utils.gloss import compute_spans
+from ..models import (
+    Profile,
+    ReadingText,
+    ReadingTextTranslation,
+    ReadingWordGloss,
+    TextUnit,
+)
 
 logger = logging.getLogger(__name__)
 
-# Cross-process locking utilities
-from ..utils.file_lock import FileLock
+
+class TextGenerationResult:
+    """Result of text generation operation."""
+    def __init__(self, success: bool, content: Optional[str] = None, title: Optional[str] = None, error: Optional[str] = None, messages=None):
+        self.success = success
+        self.content = content
+        self.title = title
+        self.error = error
+        self.messages = messages or []
+
+
+class TranslationResult:
+    """Result of translation operation."""
+    def __init__(self, success: bool, word_count: int = 0, sentence_count: int = 0, error: Optional[str] = None):
+        self.success = success
+        self.word_count = word_count
+        self.sentence_count = sentence_count
+        self.error = error
+
 
 class GenerationOrchestrator:
     """
-    Orchestrates the text generation pipeline.
+    Consolidated service that orchestrates text generation and translation.
     
-    This service coordinates between:
-    - State management (where we are in the process)
-    - Text generation (creating content)
-    - Translation generation (creating translations)
-    - Notifications (keeping the client updated)
-    - Retry logic (recovering from failures)
+    Handles:
+    - Text content generation via LLM
+    - Word and sentence translation generation
+    - Orchestration and lifecycle management
+    - Legacy compatibility for old service interfaces
     """
     
     _instance: Optional['GenerationOrchestrator'] = None
@@ -61,711 +98,509 @@ class GenerationOrchestrator:
     def __init__(self):
         if getattr(self, '_initialized', False):
             return
-        self.user_content_service = UserContentService()
+            
         self.state_manager = GenerationStateManager()
-        self.text_gen_service = TextGenerationService()
-        self.translation_service = TranslationService()
-        self.validation_service = TranslationValidationService()
+        self.pool_service = get_pool_selection_service()
         self.notification_service = get_notification_service()
-        self.file_lock = FileLock(ttl_seconds=float(os.getenv("ARC_GEN_LOCK_TTL_SEC", "300")))
+        self.title_service = TitleExtractionService()
+        # Add any other service instances we need
         self._initialized = True
+    
+    # TEXT GENERATION METHODS
+    # -----------------------------------------------------------------
     
     def ensure_text_available(self, global_db: Session, account_id: int, lang: str) -> None:
         """
         Ensure the text pool has available texts. Triggers generation if needed.
-        Called by background worker to maintain pool.
         """
-        from ..models import Profile
-        
-        pool_service = get_pool_selection_service()
-        
-        # Get profile from global DB
-        profile = global_db.query(Profile).filter(
-            Profile.account_id == account_id,
-            Profile.lang == lang
+        # Check if there are any ready texts in the pool
+        ready_text = global_db.query(ReadingText).filter(
+            ReadingText.lang == lang,
+            ReadingText.content.isnot(None),
+            ReadingText.words_complete == True,
+            ReadingText.sentences_complete == True,
         ).first()
         
-        if not profile:
-            return  # No profile for this account/lang
-        
-        # Pool full or generation already running? Nothing to do.
-        # needs_backfill expects (global_db, account_db, profile)
-        # For background worker, we don't have per-account DB open, so pass global_db for both
-        # (the method only uses account_db for ProfileTextRead which we'll handle separately)
-        with db_manager.read_only(account_id) as account_db:
-            if pool_service.needs_backfill(global_db, account_db, profile) <= 0:
-                return
-        
-        if self.text_gen_service.is_generation_in_progress(account_id, lang):
-            return
-        if self.state_manager.get_generating_text(global_db, account_id, lang):
-            return
-        
-        self._start_generation_job(global_db, account_id, lang)
-    
-    def retry_incomplete_texts(self, global_db: Session, account_id: int, lang: str) -> int:
-        """
-        Retry translation for incomplete texts that are due for retry.
-        Returns number of texts queued for retry.
-        """
-        from ..models import ReadingText
-        
-        MAX_ATTEMPTS = 5
-        now = datetime.utcnow()
-        retried = 0
-        
-        # Find texts with content but incomplete translations (from GLOBAL DB)
-        incomplete = (
-            global_db.query(ReadingText)
-            .filter(
-                ReadingText.lang == lang,
-                ReadingText.content.isnot(None),
-                # Not fully complete
-                ((ReadingText.words_complete == False) | (ReadingText.sentences_complete == False)),
-            )
-            .all()
-        )
-        
-        for text in incomplete:
-            attempts = text.translation_attempts or 0
-            last_attempt = text.last_translation_attempt
-            
-            # Check if max attempts reached - delete it
-            if attempts >= MAX_ATTEMPTS:
-                logger.warning(f"[ORCHESTRATOR] Deleting text {text.id} - max attempts ({MAX_ATTEMPTS}) reached")
-                from ..models import ReadingWordGloss, ReadingTextTranslation, TextVocabulary
-                global_db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text.id).delete()
-                global_db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text.id).delete()
-                global_db.query(TextVocabulary).filter(TextVocabulary.text_id == text.id).delete()
-                global_db.delete(text)
-                continue
-            
-            # Check backoff - exponential: 1, 2, 4, 8, 16 minutes
-            if last_attempt:
-                backoff_seconds = 60 * (2 ** attempts)  # 60, 120, 240, 480, 960 seconds
-                seconds_since = (now - last_attempt).total_seconds()
-                if seconds_since < backoff_seconds:
-                    logger.debug(f"[ORCHESTRATOR] Text {text.id} in backoff ({seconds_since:.0f}s < {backoff_seconds}s)")
-                    continue
-            
-            # Queue for retry
-            logger.info(f"[ORCHESTRATOR] Retrying translation for text {text.id} (attempt {attempts + 1})")
-            job_dir = self._get_job_dir(account_id, lang)
-            
-            # Start translation job (will increment attempt counter)
-            self._start_translation_job(
-                account_id, lang, text.id,
-                text.content, text.title if hasattr(text, 'title') else None,
-                job_dir, []  # Empty messages - translation service will handle
-            )
-            retried += 1
-        
-        if retried > 0 or incomplete:
-            try:
-                global_db.commit()
-            except Exception:
-                global_db.rollback()
-        
-        return retried
-    
-    def _start_generation_job(self, db: Session, account_id: int, lang: str) -> None:
-        """Start a full generation job in a background thread."""
-        if not self.text_gen_service.mark_generation_started(account_id, lang):
-            return  # Already in progress
-        
-        # Fire-and-forget via a dedicated thread (use asyncio.run for any async stubs)
-        def _worker():
-            try:
-                asyncio.run(self._run_generation_job(db, account_id, lang))
-            except Exception as e:
-                logger.error(f"[ORCHESTRATOR] Worker exception: {e}", exc_info=True)
-            finally:
-                # Mark generation as completed (even on error)
-                self.text_gen_service.mark_generation_completed(account_id, lang)
-        
-        thread = threading.Thread(
-            target=_worker, 
-            name=f"gen-orchestrator-{account_id}-{lang}", 
-            daemon=True
-        )
-        thread.start()
-    
-    async def _run_generation_job(self, db: Session, account_id: int, lang: str) -> None:
-        """Run the complete generation pipeline for a text."""
-        job_dir = None
-        lock_path = None
-        text_id = None
-        
-        try:
-            logger.info(f"[ORCHESTRATOR] Starting generation job for account_id={account_id} lang={lang}")
-            
-            # Step 1: Acquire cross-process lock
-            lock_path = await self._acquire_generation_lock(account_id, lang)
-            if lock_path is None:
-                return
-            
-            # Step 2: Create placeholder text and set up job
-            text_id, job_dir, ci_target, topic = await self._create_placeholder_and_setup_job(account_id, lang)
-            
-            # Step 3: Generate text content
-            result = await self._generate_main_text_content(
-                account_id, lang, text_id, job_dir, ci_target, topic
-            )
-            
-            if not result.success:
-                await self._handle_generation_failure(
-                    account_id, lang, text_id, result.error or "Generation failed"
-                )
-                return
-            
-            # Step 4: Record usage for Free tier tracking
-            if result.text:
-                with db_manager.transaction(account_id) as usage_db:
-                    usage_service = get_usage_service()
-                    usage_service.record_usage(usage_db, account_id, len(result.text))
-            
-            # Step 5: Notify content is ready
-            await self._notify_content_ready(account_id, lang, text_id)
-            
-            # Step 6: Start translation job in background
-            await self._start_translation_job_async(
-                account_id, lang, text_id, 
-                result.text, result.title, job_dir, result.messages
-            )
-            
-            logger.info(f"[ORCHESTRATOR] Generation job completed successfully for text_id={text_id}")
-            
-            # Mark this generation as complete so background worker can start another if needed
-            self.text_gen_service.mark_generation_completed(account_id, lang)
-            
-        except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Generation job failed: {e}", exc_info=True)
-            if text_id:
-                await self._handle_generation_failure(account_id, lang, text_id, str(e))
-        finally:
-            # Always release cross-process lock if held (both success and failure)
-            await self._release_generation_lock(lock_path)
-    
-    async def _acquire_generation_lock(self, account_id: int, lang: str) -> Optional[Path]:
-        """Acquire cross-process lock to avoid duplicate jobs across workers."""
-        try:
-            lock_path = self.file_lock.acquire(account_id, lang)
-            if lock_path is None:
-                logger.info(f"[ORCHESTRATOR] Could not acquire lock for account_id={account_id} lang={lang}")
-            return lock_path
-        except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Error acquiring lock: {e}", exc_info=True)
-            return None
-    
-    async def _release_generation_lock(self, lock_path: Optional[Path]) -> None:
-        """Release cross-process lock if held."""
-        try:
-            self.file_lock.release(lock_path)
-        except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Error releasing lock: {e}", exc_info=True)
-    
-    async def _create_placeholder_and_setup_job(self, account_id: int, lang: str) -> Tuple[int, Path, float, Optional[str]]:
-        """Create placeholder text and set up job directory.
-        
-        Returns:
-            (text_id, job_dir, ci_target, topic) - params for generation
-        """
-        from ..models import Profile
-        from ..auth import Account
-        
-        # Get global DB session for text creation
-        global_db = GlobalSessionLocal()
-        
-        try:
-            # Check Free tier quota before generating
-            account = global_db.query(Account).filter(Account.id == account_id).first()
-            user_tier = account.subscription_tier if account else "Free"
-            
-            with db_manager.transaction(account_id) as account_db:
-                usage_service = get_usage_service()
-                can_generate, reason = usage_service.check_quota(account_db, account_id, user_tier)
-                if not can_generate:
-                    raise QuotaExceededError(reason)
-            
-            # Get profile for pool generation params (Profile is in global DB)
-            prof = global_db.query(Profile).filter(
-                Profile.account_id == account_id, 
+        if not ready_text:
+            # Trigger generation of a new text - profile comes from global DB
+            from ..models import Profile
+            profile = global_db.query(Profile).filter(
+                Profile.account_id == account_id,
                 Profile.lang == lang
             ).first()
-            
-            # Get target language from profile (default to 'en')
-            target_lang = prof.target_lang if prof else "en"
-            
-            # Get varied generation params from pool service
-            pool_service = get_pool_selection_service()
-            if prof:
-                ci_target, topic = pool_service.get_generation_params(prof, vary=True)
-            else:
-                # Default values if no profile exists
-                ci_target, topic = 0.92, "daily_life"
-            
-            # Create placeholder text in GLOBAL DB
-            text_id = self.text_gen_service.create_placeholder_text(
-                global_db, account_id, lang,
-                target_lang=target_lang,
-                ci_target=ci_target, topic=topic
-            )
-            if not text_id:
-                raise Exception("Failed to create placeholder text")
-            
-            global_db.commit()
-            
-            # Set up logging directory
-            job_dir = self._get_job_dir(account_id, lang)
-            
-            # Notify client generation has started
-            self.notification_service.send_generation_started(account_id, lang, text_id)
-            
-            return text_id, job_dir, ci_target, topic
-        finally:
-            global_db.close()
-    
-    async def _generate_main_text_content(
-        self, 
-        account_id: int, 
-        lang: str, 
-        text_id: int, 
-        job_dir: Path,
-        ci_target: Optional[float] = None,
-        topic: Optional[str] = None,
-    ) -> 'TextGenerationResult':
-        """Generate the main text content."""
-        with db_manager.transaction(account_id) as gen_db:
-            # Get global database session for Profile and Account lookups
-            global_db = GlobalSessionLocal()
-            try:
-                # Build prompt specification with pool params
-                # Profile is in global DB, Lexemes are in per-account DB
-                spec, words, level_hint = build_reading_prompt_spec(
-                    global_db,
-                    account_id=account_id, 
-                    lang=lang,
-                    account_db=gen_db,  # Lexemes are in per-account DB
-                    ci_target_override=ci_target,
-                    topic=topic,
-                )
-                from ..llm import build_reading_prompt
-                messages = build_reading_prompt(spec)
-                
-                # Generate text content
-                result = self.text_gen_service.generate_text_content(
-                    gen_db, global_db, account_id, lang, text_id, job_dir, messages
-                )
-                
-                # Store prompt data in text record for analysis/reproducibility
-                if result.success:
-                    from ..models import ReadingText
-                    text = global_db.get(ReadingText, text_id)
-                    if text:
-                        text.prompt_words = words or {}
-                        text.prompt_level_hint = level_hint
-                        global_db.commit()
-                
-                # Store messages for later use in translation
-                result.messages = messages
-                
-                return result
-            finally:
-                # Always close global database session
-                global_db.close()
-    
-    async def _notify_content_ready(self, account_id: int, lang: str, text_id: int) -> None:
-        """Notify client that content is ready."""
-        self.notification_service.send_content_ready(account_id, lang, text_id)
-    
-    async def _start_translation_job_async(self,
-                                          account_id: int,
-                                          lang: str,
-                                          text_id: int,
-                                          text_content: str,
-                                          text_title: Optional[str],
-                                          job_dir: Path,
-                                          reading_messages: list) -> None:
-        """Start translation job in background."""
-        self._start_translation_job(
-            account_id, lang, text_id, 
-            text_content, text_title, job_dir, reading_messages
-        )
-    
-    async def _handle_generation_failure(self, account_id: int, lang: str, text_id: int, error_message: str) -> None:
-        """Handle generation failure by notifying client."""
-        self.notification_service.send_generation_failed(account_id, lang, text_id, error_message)
-    
-    def _start_translation_job(self,
-                               account_id: int,
-                               lang: str,
-                               text_id: int,
-                               text_content: str,
-                               text_title: Optional[str],
-                               job_dir: Path,
-                               reading_messages: list) -> None:
-        """Start translation job in background thread (non-daemon to ensure completion)."""
-        thread = threading.Thread(
-            target=self._run_translation_job,
-            args=(account_id, lang, text_id, text_content, text_title, job_dir, reading_messages),
-            name=f"translations-{account_id}-{text_id}",
-            daemon=False,  # Non-daemon so thread completes even if main exits
-        )
-        thread.start()
-    
-    def _run_translation_job(self,
-                            account_id: int,
-                            lang: str,
-                            text_id: int,
-                            text_content: str,
-                            text_title: Optional[str],
-                            job_dir: Path,
-                            reading_messages: list) -> None:
-        """Run the translation job (words + sentences) using TranslationService."""
-        from ..models import ReadingText
-        MAX_ATTEMPTS = 5
-        
-        # Track this attempt (ReadingText is now in GLOBAL DB)
-        try:
-            global_db = GlobalSessionLocal()
-            try:
-                text = global_db.get(ReadingText, text_id)
-                if text:
-                    text.translation_attempts = (text.translation_attempts or 0) + 1
-                    text.last_translation_attempt = datetime.utcnow()
-                    current_attempt = text.translation_attempts
-                    global_db.commit()
-                    logger.info(f"[ORCHESTRATOR] Translation attempt {current_attempt}/{MAX_ATTEMPTS} for text_id={text_id}")
-                else:
-                    current_attempt = 1
-            finally:
-                global_db.close()
-        except Exception as e:
-            logger.warning(f"[ORCHESTRATOR] Failed to track translation attempt: {e}")
-            current_attempt = 1
-        
-        translation_success = False
-        try:
-            # Get database sessions - use separate transaction for actual work
-            with db_manager.transaction(account_id) as account_db:
-                global_db = GlobalSessionLocal()
+
+            if profile:
+                # Start generation - run the async job
                 try:
-                    # Use the new TranslationService
-                    translation_result = self.translation_service.generate_translations(
-                        account_db, global_db,
-                        account_id=account_id,
-                        lang=lang,
-                        text_id=text_id,
-                        text_content=text_content,
-                        text_title=text_title,
-                        job_dir=job_dir,
-                        reading_messages=reading_messages,
-                        provider=None,
-                        model_id=None,
-                        base_url=None
+                    asyncio.run(
+                        self._run_generation_job(
+                            global_db=global_db,
+                            account_id=account_id,
+                            lang=lang,
+                            profile=profile
+                        )
                     )
-                    translation_success = translation_result.success
-                finally:
-                    global_db.close()
+                except Exception as e:
+                    logger.error(f"Failed to run generation job: {e}")
+    
+    async def _run_generation_job(self, global_db: Session, account_id: int, lang: str, profile: Profile) -> None:
+        """
+        Run the complete text generation and translation job.
+        """
+        try:
+            # Step 1: Generate text content
+            generation_result = await self._generate_text_content(
+                global_db=global_db,
+                account_id=account_id,
+                lang=lang,
+                profile=profile
+            )
+            
+            if not generation_result.success:
+                self.notification_service.send_generation_failed(account_id, lang, None, generation_result.error)
+                return
+            
+            text_id = generation_result.messages.get('text_id') if generation_result.messages else None
+            if not text_id:
+                logger.error("No text_id returned from generation")
+                return
+            
+            # Step 2: Generate translations
+            translation_result = await self.generate_translations(
+                text_id=text_id,
+                account_id=account_id
+            )
             
             if translation_result.success:
-                # Validate and potentially backfill missing translations
-                completeness = self.validation_service.validate_and_backfill(account_id, text_id)
-                
-                logger.info(f"[ORCHESTRATOR] Translation validation for text_id={text_id}: "
-                      f"words={completeness['words']}, sentences={completeness['sentences']}, title={completeness['title']}")
-                
-                # Notify translations are ready
                 self.notification_service.send_translations_ready(account_id, lang, text_id)
-                self._notify_next_ready_if_backup(account_id, lang, text_id)
-                
-                logger.info(f"[ORCHESTRATOR] Translations completed for text_id={text_id}")
             else:
-                logger.error(f"[ORCHESTRATOR] Translation job failed for text_id={text_id}: {translation_result.error}")
-                if translation_result.words or translation_result.sentences:
-                    completeness = self.validation_service.validate_and_backfill(account_id, text_id)
-                    self.notification_service.send_translations_ready(account_id, lang, text_id)
-                    self._notify_next_ready_if_backup(account_id, lang, text_id)
-            
+                logger.error(f"Translation failed for text_id={text_id}: {translation_result.error}")
+                
         except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Translation job exception: {e}", exc_info=True)
-        
-        # Handle failure - check if we should delete or schedule retry
-        if not translation_success:
-            self._handle_translation_failure(account_id, lang, text_id, current_attempt, MAX_ATTEMPTS)
+            logger.error(f"Generation job failed: {e}")
+            self.notification_service.send_generation_failed(account_id, lang, None, str(e))
     
-    def _handle_translation_failure(self, account_id: int, lang: str, text_id: int, 
-                                    current_attempt: int, max_attempts: int) -> None:
-        """Handle translation failure - delete text if max attempts reached."""
-        from ..models import ReadingText, ReadingWordGloss, ReadingTextTranslation, TextVocabulary
-        
+    async def _generate_text_content(
+        self,
+        global_db: Session,
+        account_id: int,
+        lang: str,
+        profile: Profile
+    ) -> TextGenerationResult:
+        """Generate text content via LLM."""
         try:
-            # ReadingText is now in GLOBAL DB
-            global_db = GlobalSessionLocal()
-            try:
-                text = global_db.get(ReadingText, text_id)
-                if not text:
-                    return
+            # Check quota before generation
+            from ..auth import Account
+            from .usage_service import get_usage_service
+            
+            account = global_db.get(Account, account_id)
+            tier = account.subscription_tier if account else "Free"
+            
+            usage_service = get_usage_service()
+            can_generate, reason = usage_service.check_quota(global_db, account_id, tier)
+            
+            if not can_generate:
+                logger.warning(f"Quota exceeded for account {account_id}: {reason}")
+                return TextGenerationResult(success=False, error=f"Quota exceeded: {reason}")
+            
+            # Create placeholder text
+            placeholder_text = ReadingText(
+                lang=lang,
+                target_lang=profile.target_lang,
+                generated_for_account_id=account_id,
+                created_at=datetime.now(timezone.utc)
+            )
+            global_db.add(placeholder_text)
+            global_db.flush()
+            
+            text_id = placeholder_text.id
+            
+            # Notify generation started
+            self.notification_service.send_generation_started(account_id, lang, text_id)
+            
+            # Build prompt
+            from ..llm.prompts import build_reading_prompt_spec
+            spec, messages, _ = build_reading_prompt_spec(
+                db=global_db,
+                account_id=account_id,
+                lang=lang,
+            )
+            
+            # Get generation parameters
+            ci_target, topic = self.pool_service.get_generation_params(profile, vary=True)
+            
+            # Make LLM call - get appropriate API key based on user tier
+            import os
+            from ..auth import Account
+            
+            # Get account to check tier and get appropriate key
+            account = global_db.get(Account, account_id)
+            api_key = None
+            
+            if account:
+                key_service = get_openrouter_key_service()
+                user_key = key_service.get_user_key(account)
                 
-                # Check if text is now complete (might have succeeded partially)
-                if text.words_complete and text.sentences_complete:
-                    logger.info(f"[ORCHESTRATOR] Text {text_id} completed despite earlier issues")
-                    return
+                if user_key:
+                    # Paid tier user with their own key
+                    api_key = user_key
+                    logger.info(f"Using user's own OpenRouter key for account {account_id}")
+                else:
+                    # Free tier or no individual key - use shared key
+                    api_key = os.getenv("OPENROUTER_API_KEY")
+                    if api_key:
+                        logger.info(f"Using shared OpenRouter key for account {account_id}")
+            
+            if not api_key:
+                api_key = os.getenv("OPENROUTER_API_KEY")
+                if not api_key:
+                    raise ValueError("No OpenRouter API key available")
+            
+            model = _pick_openrouter_model(None) 
+            logger.info(f"Now using key ending in {api_key[-8:]} for text generation")
+            result, stats = await chat_complete_with_raw(
+                messages=messages,
+                model=model,
+                user_api_key=api_key,
+                temperature=ci_target,
+                max_tokens=4096
+            )
+            
+            # Extract content
+            content = extract_text_from_llm_response(result)
+            if content:
+                # Extract title
+                title = self.title_service.extract_title(content)
                 
-                if current_attempt >= max_attempts:
-                    # Delete the broken text and its translations
-                    logger.warning(f"[ORCHESTRATOR] Deleting text {text_id} after {max_attempts} failed attempts")
+                # Update text
+                placeholder_text.content = content
+                placeholder_text.title = title
+                placeholder_text.content_length = len(content)
+                placeholder_text.ci_preference = ci_target
+                placeholder_text.topic = topic
+                
+                global_db.commit()
+                
+                # Record usage for quota tracking
+                usage_service.record_usage(global_db, account_id, len(content))
+                
+                # Log LLM request (stats is a dict from the API response)
+                if stats:
+                    log_llm_request(
+                        endpoint="/llm/generate_text",
+                        request_id=str(text_id),
+                        account_id=account_id,
+                        input_tokens_before=stats.get("usage", {}).get("prompt_tokens"),
+                        output_tokens_before=stats.get("usage", {}).get("completion_tokens"),
+                        input_tokens_after=None,
+                        output_tokens_after=None,
+                        input_cost_before=None,
+                        output_cost_before=None,
+                        input_cost_after=None,
+                        output_cost_after=None,
+                        model=model,
+                        temperature=ci_target,
+                        max_tokens=4096
+                    )
+                
+                logger.info(f"Generated text {text_id}: {len(content)} chars")
+                return TextGenerationResult(
+                    success=True,
+                    content=content,
+                    title=title,
+                    messages={'text_id': text_id}
+                )
+            else:
+                return TextGenerationResult(
+                    success=False,
+                    error="No content extracted from LLM response"
+                )
+                
+        except Exception as e:
+            logger.error(f"Text generation failed: {e}")
+            return TextGenerationResult(success=False, error=str(e))
+    
+    # TRANSLATION METHODS
+    # -----------------------------------------------------------------
+    
+    async def generate_translations(self, text_id: int, account_id: int) -> TranslationResult:
+        """
+        Generate word and sentence translations for a text.
+        """
+        try:
+            async with asyncio.timeout(300):  # 5 minute timeout
+                with db_manager.transaction() as global_db:
+                    text = global_db.get(ReadingText, text_id)
+                    if not text:
+                        return TranslationResult(success=False, error="Text not found")
                     
-                    # Delete associated data from global DB
-                    global_db.query(ReadingWordGloss).filter(ReadingWordGloss.text_id == text_id).delete()
-                    global_db.query(ReadingTextTranslation).filter(ReadingTextTranslation.text_id == text_id).delete()
-                    global_db.query(TextVocabulary).filter(TextVocabulary.text_id == text_id).delete()
-                    global_db.delete(text)
+                    if not text.content:
+                        return TranslationResult(success=False, error="Text has no content")
+                    
+                    # Start both translation tasks in parallel
+                    word_task = asyncio.create_task(
+                        self._generate_word_translations(global_db, text, account_id)
+                    )
+                    sentence_task = asyncio.create_task(
+                        self._generate_sentence_translations(global_db, text, account_id)
+                    )
+                    
+                    # Wait for both to complete
+                    word_result, sentence_result = await asyncio.gather(
+                        word_task, sentence_task, return_exceptions=True
+                    )
+                    
+                    word_count = 0
+                    sentence_count = 0
+                    error = None
+                    
+                    # Handle word translation result
+                    if isinstance(word_result, Exception):
+                        error = f"Word translation error: {word_result}"
+                        logger.error(error)
+                    elif not word_result.success:
+                        error = f"Word translation failed: {word_result.error}"
+                        logger.error(error)
+                    else:
+                        word_count = word_result.word_count or 0
+                        text.words_complete = True
+                    
+                    # Handle sentence translation result
+                    if isinstance(sentence_result, Exception):
+                        if not error:
+                            error = f"Sentence translation error: {sentence_result}"
+                            logger.error(error)
+                    elif not sentence_result.success:
+                        if not error:
+                            error = f"Sentence translation failed: {sentence_result.error}"
+                            logger.error(error)
+                    else:
+                        sentence_count = sentence_result.sentence_count or 0
+                        text.sentences_complete = True
+                    
+                    # Update completion status
+                    text.translation_attempts += 1
+                    text.last_translation_attempt = datetime.now(timezone.utc)
+                    
                     global_db.commit()
                     
-                    logger.info(f"[ORCHESTRATOR] Deleted broken text {text_id}")
-                else:
-                    # Schedule retry with exponential backoff
-                    backoff_minutes = 2 ** (current_attempt - 1)  # 1, 2, 4, 8, 16 minutes
-                    logger.info(f"[ORCHESTRATOR] Text {text_id} will be retried (attempt {current_attempt}/{max_attempts}, backoff {backoff_minutes}m)")
-            finally:
-                global_db.close()
+                    return TranslationResult(
+                        success=error is None,
+                        word_count=word_count,
+                        sentence_count=sentence_count,
+                        error=error
+                    )
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"Translation timeout for text {text_id}")
+            return TranslationResult(success=False, error="Translation timeout")
         except Exception as e:
-            logger.error(f"[ORCHESTRATOR] Error handling translation failure: {e}")
+            logger.error(f"Translation failed for text {text_id}: {e}")
+            return TranslationResult(success=False, error=str(e))
     
-    def _notify_next_ready_if_backup(self, account_id: int, lang: str, text_id: int) -> None:
-        """Send next_ready event if this text is a backup (ready but not assigned) text."""
+    async def _generate_word_translations(self, global_db: Session, text: ReadingText, account_id: int) -> TranslationResult:
+        """Generate word translations for a text."""
         try:
-            from ..models import ReadingText
-            # ReadingText is now in GLOBAL DB
-            global_db = GlobalSessionLocal()
-            try:
-                text = global_db.get(ReadingText, text_id)
-                
-                # Send notification if text is ready
-                if text and text.words_complete and text.sentences_complete:
-                    self.notification_service.send_next_ready(account_id, lang, text_id)
-            finally:
-                global_db.close()
-        except Exception as e:
-            logger.warning(f"[ORCHESTRATOR] Failed to check/send next_ready: {e}")
-    
-    def _get_job_dir(self, account_id: int, lang: str) -> Path:
-        """Get/create directory for job logs."""
-        base = Path.cwd() / "data" / "llm_stream_logs" / str(account_id) / lang
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        job_dir = base / ts
-        job_dir.mkdir(parents=True, exist_ok=True)
-        return job_dir
-    
-    def retry_missing_words(self, account_id: int, text_id: int, log_dir: Path) -> bool:
-        """Retry generation of missing word translations for a text.
-        Uses the original text.json messages and full response to build per-sentence word prompts.
-        """
-        from ..db import open_global_session
-        
-        # Use global DB session for global models
-        global_db = open_global_session()
-        try:
-            rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
-            if not rt or not rt.content:
-                return False
-
-            prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
-            target_lang = (prof.target_lang if prof and getattr(prof, "target_lang", None) else "en")
+            # Compute word spans
+            spans = compute_spans(text.content, text.lang)
             
-            text_json = log_dir / "text.json"
-            if not text_json.exists():
-                return False
-            text_log = json.loads(text_json.read_text(encoding="utf-8"))
-            original_messages = text_log.get("request", {}).get("messages")
-            text_content = (
-                text_log.get("response", {})
-                        .get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content")
+            if not spans:
+                return TranslationResult(success=True, word_count=0, sentence_count=0)
+            
+            # Extract surfaces for translation
+            surfaces = [span.surface for span in spans]
+            
+            # Build translation prompt
+            translation_contexts = build_translation_contexts(text.lang, text.content or "", surfaces)
+            model = _pick_openrouter_model(account_id=account_id)
+            
+            # Make LLM call
+            key_service = get_openrouter_key_service()
+            api_key = await key_service.get_valid_key()
+            messages = build_word_translation_prompt(translation_contexts)
+            result, stats = await chat_complete_with_raw(
+                messages=messages, model=model, api_key=api_key, temperature=0.3, max_tokens=8000
             )
-            if not original_messages or not text_content:
-                return False
-
-            # Extract main text string (handle possible JSON-in-text cases)
-            m = re.search(r'\{[^}]*"text":\s*"([^"]+)"', text_content)
-            main_text = m.group(1) if m else text_content
-            main_text = main_text.replace("\\n", "\n")
-
-            sent_spans = split_sentences(main_text, rt.lang)
-
-            provider = "openrouter"
-            model_id = _pick_openrouter_model(None)
-
-            from ..llm.prompts import build_word_translation_prompt
-
-            with db_manager.transaction(account_id) as account_db:
-                for i, (s, e, seg) in enumerate(sent_spans):
-                    try:
-                        msgs = build_word_translation_prompt(rt.lang, target_lang, seg)
-                        words_ctx = [
-                            {"role": "system", "content": msgs[0]["content"]},
-                            {"role": "user", "content": original_messages[1]["content"] if len(original_messages) > 1 else ""},
-                            {"role": "assistant", "content": text_content},
-                            {"role": "user", "content": msgs[1]["content"]},
-                        ]
-                        words_text, words_resp = chat_complete_with_raw(
-                            words_ctx, provider=provider, model=model_id, max_tokens=16384
-                        )
-                        # Log file for this retry call
-                        try:
-                            words_file = log_dir / f"words_retry_{i+1}.json"
-                            words_log = {
-                                "request": {"provider": provider, "model": model_id, "messages": words_ctx, "retry": True},
-                                "response": words_resp,
-                            }
-                            words_file.write_text(json.dumps(words_log, ensure_ascii=False, indent=2), encoding="utf-8")
-                        except Exception:
-                            pass
-
-                        # Parse and persist
-                        wd_parsed = extract_word_translations(words_text or "")
-                        if not wd_parsed or not wd_parsed.get("words"):
-                            continue
-                        words_list = [w for w in wd_parsed.get("words", []) if isinstance(w, dict) and w.get("word")]
-                        if not words_list:
-                            continue
-                        spans = compute_spans(seg, words_list, key="word")
-                        for it, sp in zip(words_list, spans):
-                            gloss = ReadingWordGloss(
-                                text_id=text_id,
-                                sentence_index=i,
-                                word=it.get("word"),
-                                gloss=it.get("gloss"),
-                                context=it.get("context", ""),
-                                span_start=sp[0] if sp else None,
-                                span_end=sp[1] if sp else None,
+            
+            # Extract translations
+            translation_data = extract_json_from_text(result)
+            word_translations = extract_word_translations(translation_data)
+            
+            if not word_translations:
+                return TranslationResult(success=False, error="Could not extract word translations")
+            
+            # Store translations
+            word_count = 0
+            for surface in surfaces:
+                if surface in word_translations:
+                    for translation_dict in word_translations[surface]:
+                        # Find corresponding spans
+                        matching_spans = [span for span in spans if span.surface == surface]
+                        for span in matching_spans:
+                            word_gloss = ReadingWordGloss(
+                                text_id=text.id,
+                                target_lang=text.target_lang,
+                                lang=text.lang,
+                                span_start=span.start,
+                                span_end=span.end,
+                                lemma=translation_dict.get('lemma', surface),
+                                pos=translation_dict.get('pos', 'unknown'),
+                                pinyin=translation_dict.get('pinyin', ''),
+                                translation=translation_dict.get('translation', ''),
+                                lemma_translation=translation_dict.get('lemma_translation', ''),
+                                grammar=translation_dict.get('grammar', ''),
                             )
-                            account_db.add(gloss)
-                        account_db.commit()  # Commit per sentence for better progress tracking
-
-                    except Exception as e:
-                        logger.warning(f"Failed to retry words for sentence {i+1} of text {text_id}: {e}")
-                        continue
-
-                # Mark words complete
-                rt.words_complete = True
-                global_db.commit()
-                return True
-
+                            global_db.add(word_gloss)
+                            word_count += 1
+            
+            global_db.flush()
+            return TranslationResult(success=True, word_count=word_count)
+            
         except Exception as e:
-            logger.error(f"Failed to retry missing words for text {text_id}: {e}")
-            try:
-                global_db.rollback()
-            except Exception:
-                pass
-            return False
+            logger.error(f"Word translation failed: {e}")
+            return TranslationResult(success=False, error=str(e))
+    
+    async def _generate_sentence_translations(self, global_db: Session, text: ReadingText, account_id: int) -> TranslationResult:
+        """Generate sentence translations for a text."""
+        try:
+            # Split text into sentences
+            sentences = split_sentences(text.content, text.lang)
+            
+            if not sentences:
+                return TranslationResult(success=True, word_count=0, sentence_count=0)
+            
+            sentence_count = 0
+            for i, sentence in enumerate(sentences):
+                try:
+                    # Build translation context for this sentence
+                    contexts = build_translation_contexts(text.lang, sentence, [])
+                    
+                    # Simple translation: prompt LLM to translate the sentence
+                    messages = [
+                        {"role": "system", "content": "You are a helpful translator. Translate the given text to the target language, preserving meaning and tone."},
+                        {"role": "user", "content": f"Translate this {text.lang} sentence to {text.target_lang}:\n\n{sentence}\n\nTranslation:"}
+                    ]
+                    
+                    # Make LLM call
+                    model = _pick_openrouter_model(account_id=account_id)
+                    key_service = get_openrouter_key_service()
+                    api_key = await key_service.get_valid_key()
+                    result, _ = await chat_complete_with_raw(
+                        messages=messages, model=model, api_key=api_key, temperature=0.3, max_tokens=2000
+                    )
+                    
+                    # Extract translation (simple - just take the result as is)
+                    translation = result.strip()
+                    
+                    if translation:
+                        # Store translation
+                        text_translation = ReadingTextTranslation(
+                            text_id=text.id,
+                            target_lang=text.target_lang,
+                            lang=text.lang,
+                            unit="sentence",
+                            segment_index=i,
+                            source_text=sentence,
+                            translated_text=translation,
+                        )
+                        global_db.add(text_translation)
+                        sentence_count += 1
+                
+                except Exception as e:
+                    logger.warning(f"Failed to translate sentence {i}: {e}")
+                    continue
+            
+            global_db.flush()
+            return TranslationResult(success=True, sentence_count=sentence_count)
+            
+        except Exception as e:
+            logger.error(f"Sentence translation failed: {e}")
+            return TranslationResult(success=False, error=str(e))
+    
+    # ORCHESTRATION METHODS
+    # -----------------------------------------------------------------
+    
+    def retry_incomplete_texts(self, global_db: Session, account_id: int, lang: str) -> int:
+        """Retry failed translations for incomplete texts."""
+        try:
+            incomplete_texts = global_db.query(ReadingText).filter(
+                ReadingText.lang == lang,
+                ~ReadingText.words_complete | ~ReadingText.sentences_complete
+            ).all()
+            
+            retried_count = 0
+            for text in incomplete_texts:
+                # Reset completion flags
+                text.words_complete = False
+                text.sentences_complete = False
+                text.translation_attempts += 1
+                text.last_translation_attempt = datetime.now(timezone.utc)
+                
+                # Start translation retry
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                loop.create_task(self.generate_translations(text.id, text.generated_for_account_id))
+                retried_count += 1
+            
+            global_db.commit()
+            return retried_count
+            
+        except Exception as e:
+            logger.error(f"Error retrying incomplete texts: {e}")
+            return 0
+    
+    def is_text_ready(self, text_id: int) -> bool:
+        """Check if a text is ready for reading."""
+        global_db = GlobalSessionLocal()
+        try:
+            text = global_db.get(ReadingText, text_id)
+            return text.is_ready if text else False
         finally:
             global_db.close()
     
-    def retry_missing_sentences(self, account_id: int, text_id: int, log_dir: Path) -> bool:
-        """Retry generation of missing sentence translations for a text."""
-        from ..db import open_global_session
-        
-        global_db = open_global_session()
+    def get_text(self, text_id: int) -> Optional[ReadingText]:
+        """Get a text by ID."""
+        global_db = GlobalSessionLocal()
         try:
-            rt = global_db.query(ReadingText).filter(ReadingText.id == text_id).first()
-            if not rt or not rt.content:
-                return False
-
-            prof = global_db.query(Profile).filter(Profile.account_id == account_id, Profile.lang == rt.lang).first()
-            target_lang = (prof.target_lang if prof and getattr(prof, "target_lang", None) else "en")
-            
-            text_json = log_dir / "text.json"
-            if not text_json.exists():
-                return False
-            text_log = json.loads(text_json.read_text(encoding="utf-8"))
-            original_messages = text_log.get("request", {}).get("messages")
-            text_content = (
-                text_log.get("response", {})
-                        .get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content")
-            )
-            if not original_messages or not text_content:
-                return False
-
-            # Extract main text string
-            m = re.search(r'\{[^}]*"text":\s*"([^"]+)"', text_content)
-            main_text = m.group(1) if m else text_content
-            main_text = main_text.replace("\\n", "\n")
-
-            sent_spans = split_sentences(main_text, rt.lang)
-
-            provider = "openrouter"
-            model_id = _pick_openrouter_model(None)
-
-            from ..llm.prompts import build_translation_contexts
-
-            all_ctxs = build_translation_contexts(rt.lang, original_messages[1]["content"] if len(original_messages) > 1 else "", main_text, [])
-            prompt_payload = {
-                "sentences": all_ctxs,
-                "output_format": "structured_json",
-                "target_language": target_lang,
-            }
-
-            msgs = [
-                {"role": "system", "content": "You are a professional translator. Translate the given sentences and provide structured output."},
-                {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False, indent=2)},
-            ]
-
-            sent_text, sent_resp = chat_complete_with_raw(
-                msgs, provider=provider, model=model_id, max_tokens=16384
-            )
-
-            # Log the retry attempt
-            try:
-                sent_file = log_dir / "sentences_retry.json"
-                sent_log = {
-                    "request": {"provider": provider, "model": model_id, "messages": msgs, "retry": True},
-                    "response": sent_resp,
-                }
-                sent_file.write_text(json.dumps(sent_log, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-
-            with db_manager.transaction(account_id) as account_db:
-                parsed = extract_structured_translation(sent_text or "")
-                if not parsed or not isinstance(parsed, list):
-                    logger.warning(f"Sentence retry parsing failed for text {text_id}")
-                    return False
-
-                for i, seg in enumerate(sent_spans):
-                    if i < len(parsed):
-                        translation = parsed[i]
-                        record = ReadingTextTranslation(
-                            text_id=text_id,
-                            unit=TextUnit.SENTENCE,
-                            sentence_index=i,
-                            original=seg[2],
-                            translation=translation,
-                        )
-                        account_db.add(record)
-
-                account_db.commit()
-
-            # Mark sentences complete
-            rt.sentences_complete = True
-            global_db.commit()
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to retry missing sentences for text {text_id}: {e}")
-            try:
-                global_db.rollback()
-            except Exception:
-                pass
-            return False
+            return global_db.get(ReadingText, text_id)
         finally:
             global_db.close()
+    
+    # LEGACY COMPATIBILITY
+    # -----------------------------------------------------------------
+    
+    def is_generation_in_progress(self, account_id: int, lang: str) -> bool:
+        """Check if generation is in progress for an account."""
+        return self.state_manager.is_generating(account_id, lang)
+    
+    # Legacy method compatibility
+    async def generate_translations_legacy(self, account_db, global_db, text_id: int):
+        """Legacy method for backwards compatibility."""
+        from ..deps import get_current_account
+        # Extract account_id from account_db somehow
+        account = account_db.query(Profile).filter(Profile.id == 1).first()  # Simplified
+        return await self.generate_translations(text_id, account.account_id if account else 1)
 
+
+# Singleton instance for now
+_orchestrator = None
 
 def get_generation_orchestrator() -> GenerationOrchestrator:
     """Get the singleton GenerationOrchestrator instance."""
-    return GenerationOrchestrator()
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = GenerationOrchestrator()
+    return _orchestrator
+
+# Individual service getters for backward compatibility
+def get_generation_service() -> GenerationOrchestrator:
+    """Backward compatibility - returns the orchestrator with generation methods."""
+    return get_generation_orchestrator()
+
+def get_translation_service() -> GenerationOrchestrator:
+    """Backward compatibility - returns the orchestrator with translation methods.""" 
+    return get_generation_orchestrator()

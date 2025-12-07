@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..models import GenerationRetryAttempt, ReadingText
 from ..enums import RetryComponent
-from ..services.user_content_service import UserContentService
+from ..services.text_state_service import get_text_state_service, TextStateService
 
 
 def _job_dir(account_id: int, lang: str) -> Path:
@@ -38,7 +38,7 @@ class RetryService:
     
     def __init__(self):
         self.settings = self._get_settings()
-        self.user_content = UserContentService()
+        self.user_content = get_text_state_service()
     
     def _get_settings(self) -> dict:
         """Load retry-related settings."""
@@ -261,7 +261,7 @@ class RetryService:
         """Main retry entry point - retry all missing components for a text.
         Uses retry_actions to regenerate only the missing parts.
         """
-        from ..utils.session_manager import db_manager
+        from ..db import db_manager
         from .retry_actions import retry_missing_words as _retry_words, retry_missing_sentences as _retry_sents
 
         results = {"words": False, "sentences": False, "error": None}

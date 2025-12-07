@@ -45,12 +45,13 @@ def _get_or_create_system_account(db: Session) -> int:
         return account.id
     
     # Create system account with "system" tier (unlimited access, not for human use)
+    from ..config import SubscriptionTier
     account = Account(
         email=SYSTEM_ACCOUNT_EMAIL,
         password_hash=hash_password("system-no-login"),  # Not used for login
         is_active=True,
         is_verified=True,
-        subscription_tier="system",
+        subscription_tier=SubscriptionTier.ADMIN,
     )
     db.add(account)
     db.commit()
@@ -140,9 +141,9 @@ def _count_ready_texts(db: Session, lang: str, target_lang: str) -> int:
 
 def _trigger_generation(account_id: int, lang: str) -> None:
     """Trigger text generation for the system account."""
-    from .generation_orchestrator import GenerationOrchestrator
+    from .generation_orchestrator import get_generation_orchestrator
     
-    orchestrator = GenerationOrchestrator()
+    orchestrator = get_generation_orchestrator()
     global_db = open_global_session()
     try:
         orchestrator._start_generation_job(global_db, account_id, lang)

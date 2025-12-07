@@ -8,7 +8,7 @@ import time
 from typing import List, Tuple
 
 from ..db import GlobalSessionLocal
-from .generation_orchestrator import GenerationOrchestrator
+from .generation_orchestrator import get_generation_orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class BackgroundWorker:
         self.interval = interval_seconds
         self.running = False
         self.thread = None
-        self.orchestrator = GenerationOrchestrator()
+        self.orchestrator = get_generation_orchestrator()
     
     def start(self):
         """Start the background worker thread."""

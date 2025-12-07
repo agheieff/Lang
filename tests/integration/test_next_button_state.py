@@ -83,8 +83,8 @@ def test_readiness_evaluation_logic(db_session, test_user):
     """
     Directly test the ReadinessService evaluate logic (global model).
     """
-    from server.services.readiness_service import ReadinessService
-    rs = ReadinessService()
+    from server.services.text_state_service import TextStateService, ReadinessStatus
+    rs = TextStateService()
     
     # Global model - no account_id
     rt = ReadingText(lang="es", target_lang="en", content="Hola.")

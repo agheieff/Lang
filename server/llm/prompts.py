@@ -299,3 +299,76 @@ def build_title_translation_prompt(source_lang: str, target_lang: str, title: st
         {"role": "system", "content": system_content},
         {"role": "user", "content": title},
     ]
+
+
+def build_reading_prompt_spec(db, account_id: int, lang: str) -> tuple[PromptSpec, List[Dict[str, str]], str]:
+    """
+    Build reading prompt specification, messages, and level for text generation.
+    
+    Args:
+        db: Database session (should be global_db for Profile query)
+        account_id: Account ID to build prompt for
+        lang: Language to build prompt for
+    
+    Returns:
+        Tuple of (PromptSpec, messages for LLM, level string)
+    """
+    # Use local imports to avoid circular dependencies
+    from ..models import Profile
+    
+    # Get user profile from global database
+    profile = db.query(Profile).filter(
+        Profile.account_id == account_id,
+        Profile.lang == lang
+    ).first()
+    
+    if not profile:
+        # Create default profile if none exists
+        profile = Profile(
+            account_id=account_id,
+            lang=lang,
+            target_lang="en"  # Default target
+        )
+        db.add(profile)
+        db.flush()
+    
+    # Import services locally to avoid circular dependencies
+    from ..services.pool_selection_service import get_pool_selection_service
+    from ..services.level_service import get_ci_target
+    
+    # Get pool selection service
+    pool_service = get_pool_selection_service()
+    
+    # Get generation parameters
+    ci_target, topic = pool_service.get_generation_params(profile, vary=True)
+    
+    # Get ci_target from level service if pool_service didn't provide it
+    if ci_target is None:
+        ci_target = get_ci_target(db, account_id, lang)
+    
+    # Compose level hint
+    level_hint = f"{profile.level_value}:{ci_target}"  # Simplified level hint
+    
+    # Pick words to include - disable for now due to database architecture issues
+    include_words = []  # TODO: Fix word selection once database architecture is clarified
+    
+    # Create prompt specification
+    spec = PromptSpec(
+        lang=lang,
+        unit="sentences", 
+        approx_len=int(profile.text_length or 150),
+        user_level_hint=level_hint,
+        include_words=include_words,
+        script=profile.preferred_script if hasattr(profile, 'preferred_script') else None,
+        ci_target=ci_target,
+        topic=topic,
+        recent_titles=[]  # Could be populated from recent texts
+    )
+    
+    # Build messages
+    messages = build_reading_prompt(spec)
+    
+    # Determine level string (for backward compatibility)
+    level = f"{profile.level_value}:{ci_target}"
+    
+    return spec, messages, level

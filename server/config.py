@@ -2,7 +2,22 @@ from __future__ import annotations
 
 import json
 import os
+from enum import Enum
 from typing import Dict
+
+
+# Enum for subscription tiers
+class SubscriptionTier(str, Enum):
+    """Enum for subscription tiers with string values."""
+    FREE = "Free"
+    STANDARD = "Standard"
+    PRO = "Pro"
+    PRO_PLUS = "Pro+"
+    BYOK = "BYOK"
+    ADMIN = "admin"  # Internal ops/internal tier
+    
+    def __str__(self) -> str:
+        return self.value
 
 
 def _b(name: str, default: bool) -> bool:
@@ -63,27 +78,34 @@ _SYN_NL_COOLDOWN_DAYS: int = _i("ARC_SRS_SYN_NL_COOLDOWN_DAYS", 7)
 
 # Rate limiting (per window per key)
 RATE_WINDOW_SEC: int = _i("ARC_RATE_WINDOW_SEC", 60)
-_DEFAULT_RATE_LIMITS: Dict[str, int] = {
-    # New product tiers
-    "Free": _i("ARC_RATE_FREE", 60),
-    "Standard": _i("ARC_RATE_STANDARD", 300),
-    "Pro": _i("ARC_RATE_PRO", 600),
-    "Pro+": _i("ARC_RATE_PRO_PLUS", 1200),
-    "BYOK": _i("ARC_RATE_BYOK", 100000),
-    # Ops/internal
-    "admin": _i("ARC_RATE_ADMIN", 1000000),  # effectively unlimited; middleware bypasses anyway
-    # Back-compat keys (lowercase legacy)
-    "free": _i("ARC_RATE_FREE", 60),
-    "pro": _i("ARC_RATE_PRO", 600),
-    "premium": _i("ARC_RATE_STANDARD", 300),
+_DEFAULT_RATE_LIMITS: Dict[SubscriptionTier, int] = {
+    SubscriptionTier.FREE: _i("ARC_RATE_FREE", 60),
+    SubscriptionTier.STANDARD: _i("ARC_RATE_STANDARD", 300),
+    SubscriptionTier.PRO: _i("ARC_RATE_PRO", 600),
+    SubscriptionTier.PRO_PLUS: _i("ARC_RATE_PRO_PLUS", 1200),
+    SubscriptionTier.BYOK: _i("ARC_RATE_BYOK", 100000),
+    SubscriptionTier.ADMIN: _i("ARC_RATE_ADMIN", 1000000),  # effectively unlimited
 }
 try:
     _rl_env = os.getenv("ARC_RATE_LIMITS_JSON")
-    RATE_LIMITS: Dict[str, int] = json.loads(_rl_env) if _rl_env else _DEFAULT_RATE_LIMITS
+    if _rl_env:
+        # Convert JSON string keys to enum values
+        parsed_limits = json.loads(_rl_env)
+        RATE_LIMITS: Dict[SubscriptionTier, int] = {}
+        for key, value in parsed_limits.items():
+            try:
+                # Find matching enum value (case-insensitive)
+                enum_key = SubscriptionTier(key)
+                RATE_LIMITS[enum_key] = value
+            except ValueError:
+                # Skip invalid tier names
+                continue
+    else:
+        RATE_LIMITS = _DEFAULT_RATE_LIMITS.copy()
     if not isinstance(RATE_LIMITS, dict):
-        RATE_LIMITS = _DEFAULT_RATE_LIMITS
+        RATE_LIMITS = _DEFAULT_RATE_LIMITS.copy()
 except Exception:
-    RATE_LIMITS = _DEFAULT_RATE_LIMITS
+    RATE_LIMITS = _DEFAULT_RATE_LIMITS.copy()
 
 
 # OpenRouter per-user key management
@@ -92,17 +114,17 @@ OPENROUTER_KEY_ENCRYPTION_SECRET: str = os.getenv("OPENROUTER_KEY_ENCRYPTION_SEC
 
 # Per-tier monthly spending limits (USD) for OpenRouter sub-keys
 # None means no limit (BYOK users bring their own key)
-TIER_SPENDING_LIMITS: Dict[str, float | None] = {
-    "Free": None,  # Free tier uses shared pool, no individual key
-    "Standard": _f("ARC_TIER_LIMIT_STANDARD", 25.0),
-    "Pro": _f("ARC_TIER_LIMIT_PRO", 100.0),
-    "Pro+": _f("ARC_TIER_LIMIT_PRO_PLUS", 250.0),
-    "BYOK": None,  # User provides their own key
-    "admin": None,  # No limit for admins
+TIER_SPENDING_LIMITS: Dict[SubscriptionTier, float | None] = {
+    SubscriptionTier.FREE: None,  # Free tier uses shared pool, no individual key
+    SubscriptionTier.STANDARD: _f("ARC_TIER_LIMIT_STANDARD", 25.0),
+    SubscriptionTier.PRO: _f("ARC_TIER_LIMIT_PRO", 100.0),
+    SubscriptionTier.PRO_PLUS: _f("ARC_TIER_LIMIT_PRO_PLUS", 250.0),
+    SubscriptionTier.BYOK: None,  # User provides their own key
+    SubscriptionTier.ADMIN: None,  # No limit for admins
 }
 
 # Tiers that get their own OpenRouter sub-key
-PAID_TIERS: set[str] = {"Standard", "Pro", "Pro+"}
+PAID_TIERS: set[SubscriptionTier] = {SubscriptionTier.STANDARD, SubscriptionTier.PRO, SubscriptionTier.PRO_PLUS}
 
 
 # Text pool settings

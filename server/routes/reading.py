@@ -6,10 +6,10 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Body, Request
 from sqlalchemy.orm import Session
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
-import json
-import time
 import asyncio
+import json
 import logging
+import time
 
 from server.auth import Account  # type: ignore
 
@@ -27,13 +27,14 @@ from ..models import LLMRequestLog
 from ..utils.json_parser import extract_json_from_text, extract_word_translations
 from ..schemas.reading import LookupEvent, NextPayload
 from ..schemas.session import TextSessionState
-from ..services.user_content_service import UserContentService
+from ..services.text_state_service import get_text_state_service
 from ..services.session_management_service import SessionManagementService
 from ..utils.text_segmentation import split_sentences
 from ..services.notification_service import get_notification_service
 from ..settings import get_settings
 from ..views.reading_renderer import render_reading_block, render_loading_block
-from ..services.text_orchestration_service import get_text_orchestration_service
+from ..services.generation_orchestrator import get_generation_orchestrator
+from ..services.sse_handlers import reading_events_sse, next_ready_sse, wait_until
 
 
 router = APIRouter(tags=["reading"])
@@ -41,33 +42,6 @@ logger = logging.getLogger(__name__)
 
 _SETTINGS = get_settings()
 MAX_WAIT_SEC = float(_SETTINGS.NEXT_READY_MAX_WAIT_SEC)
-# Deprecated manual override memory set removed; persisted overrides used instead
-
-async def _tick(db: Session, interval: float = 0.5) -> None:
-    """Rollback, expire, and sleep to advance long‑poll loops safely."""
-    try:
-        db.rollback()
-    except Exception:
-        logger.debug("rollback failed in _tick", exc_info=True)
-    try:
-        db.expire_all()
-    except Exception:
-        logger.debug("expire_all failed in _tick", exc_info=True)
-    await asyncio.sleep(interval)
-
-
-async def wait_until(pred, timeout: float, db: Session, interval: float = 0.5):
-    """Poll pred() until it returns a truthy value or timeout elapses.
-
-    Returns the last pred() value (truthy or falsy) at timeout.
-    """
-    deadline = time.time() + max(0.0, float(timeout))
-    while time.time() < deadline:
-        val = pred()
-        if val:
-            return val
-        await _tick(db, interval)
-    return pred()
 
 ## View helpers moved to server.views.reading_renderer
 
@@ -161,20 +135,6 @@ async def next_text(
     except Exception as e:
         logger.warning(f"Failed to parse request data: {e}")
     
-    # Save full session JSON for debugging
-    if session_data:
-        try:
-            import os
-            from pathlib import Path
-            debug_dir = Path(__file__).parent.parent.parent / "data" / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            debug_file = debug_dir / f"session_{account.id}_{int(time.time())}.json"
-            with open(debug_file, "w") as f:
-                json.dump(session_data, f, indent=2, default=str)
-            logger.info(f"Saved session JSON to {debug_file}")
-        except Exception as e:
-            logger.warning(f"Failed to save debug session JSON: {e}")
-    
     # Process session data in background (don't block the redirect)
     if session_data:
         import threading
@@ -214,8 +174,8 @@ async def next_text(
             db.commit()
 
     # Use SelectionService for proper text management
-    from ..services.selection_service import SelectionService
-    selection_service = SelectionService()
+    from ..services.text_state_service import get_text_state_service
+    selection_service = get_text_state_service()
     
     # Mark current text as read and clear current_text_id before moving to next
     if prof.current_text_id:
@@ -243,7 +203,7 @@ async def next_text(
 
 
 @router.get("/reading/events/sse")
-async def reading_events_sse(
+def reading_events_sse_route(
     db: Session = Depends(get_global_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -255,16 +215,7 @@ async def reading_events_sse(
     - translations_ready
     - generation_failed
     """
-    prof = db.query(Profile).filter(Profile.account_id == account.id).first()
-    if not prof:
-        return Response(content="data: {\"error\": \"No profile found\"}\n\n", 
-                       media_type="text/event-stream")
-    
-    # Get the global notification service
-    notification_service = get_notification_service()
-    
-    # Create SSE stream for this account
-    return notification_service.create_sse_stream(account.id, prof.lang)
+    return reading_events_sse(account, db)
 
 
 @router.post("/reading/sync")
@@ -535,7 +486,7 @@ async def next_ready(
     account_db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
-    user_content_service = UserContentService()
+    user_content_service = get_text_state_service()
     
     prof = account_db.query(Profile).filter(Profile.account_id == account.id).first()
     if not prof:
@@ -556,90 +507,23 @@ async def next_ready(
         
         # Handle force mode differently in the consolidated approach
         if force:
-            pass  # Force handling would need to be reinvented in UserContentService
+            pass  # Force handling would need to be reinvented in TextStateService
 
         if deadline is None or time.time() >= deadline:
             return {"ready": False, "text_id": status.text_id}
             
-        await _tick(global_db, 0.5)
+        await asyncio.sleep(0.5)
 
 
 @router.get("/reading/next/ready/sse")
-async def next_ready_sse(
-    global_db: Session = Depends(get_global_db),
-    account_db: Session = Depends(get_db),
+def next_ready_sse_route(
+    wait: Optional[int] = None,
     account: Account = Depends(_get_current_account),
+    global_db: Session = Depends(get_global_db),
+    db: Session = Depends(get_db),
 ):
     """Server-Sent Events endpoint for next text readiness notifications."""
-    prof = account_db.query(Profile).filter(Profile.account_id == account.id).first()
-    if not prof:
-        return Response(content="data: {\"ready\": false, \"text_id\": null}\n\n", 
-                       media_type="text/event-stream", 
-                       headers={"Cache-Control": "no-cache", 
-                               "Connection": "keep-alive",
-                               "Access-Control-Allow-Origin": "*"})
-
-    user_content_service = UserContentService()
-    
-    async def event_stream():
-        try:
-            # Send initial status
-            yield "data: {\"ready\": false, \"text_id\": null, \"status\": \"connecting\"}\n\n"
-            
-            last_status = None
-            
-            while True:
-                try:
-                    try:
-                        account_db.rollback()
-                    except Exception:
-                        pass
-                    
-                    status = user_content_service.check_next_ready(global_db, account.id, prof.lang)
-                    
-                    current_status_dict = {
-                        "ready": status.ready,
-                        "text_id": status.text_id,
-                        "ready_reason": status.reason,
-                        "retry_info": status.retry_info,
-                        "status": status.status
-                    }
-
-                    if current_status_dict != last_status:
-                         data = json.dumps(current_status_dict)
-                         yield f"data: {data}\n\n"
-                         last_status = current_status_dict.copy()
-                    
-                    if status.ready:
-                         yield f"data: {{\"ready\": true, \"text_id\": {status.text_id}, \"ready_reason\": \"{status.reason}\", \"status\": \"complete\"}}\n\n"
-                         break
-                    
-                    await asyncio.sleep(2.0)
-                    
-                except Exception as e:
-                    logger.error(f"Error in SSE stream: {e}")
-                    yield f"data: {{\"error\": \"stream_error\", \"message\": \"{str(e)}\"}}\n\n"
-                    break
-        
-        except asyncio.CancelledError:
-            logger.debug("SSE connection cancelled")
-        except Exception as e:
-            logger.error(f"SSE stream error: {e}")
-            yield f"data: {{\"error\": \"stream_error\", \"message\": \"{str(e)}\"}}\n\n"
-        finally:
-            logger.debug("SSE connection closed")
-
-    return StreamingResponse(
-        content=event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Cache-Control",
-            "X-Accel-Buffering": "no"
-        }
-    )
+    return next_ready_sse(wait, account, global_db, db)
 
 
 @router.post("/reading/backfill/{text_id}")
@@ -650,7 +534,7 @@ async def backfill_translations(
 ):
     """Backfill missing translations for a text."""
     try:
-        text_orchestrator = get_text_orchestration_service()
+        text_orchestrator = get_generation_orchestrator()
         # Use the integrated backfill functionality from TextOrchestrationService
         from pathlib import Path
         # Look for logs directory for backfill

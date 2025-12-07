@@ -112,6 +112,35 @@ class GenerationStateManager:
             rt.sentences_complete
         )
     
+    def set_generation_in_progress(
+        self,
+        account_id: int,
+        lang: str,
+        in_progress: bool,
+    ) -> None:
+        """
+        Set generation in progress status.
+        
+        Since we don't have a separate state table, this method doesn't
+        do anything but exists for API compatibility.
+        The actual check is done via is_generation_in_progress which
+        looks for existing texts without content.
+        """
+        pass
+    
+    def is_generation_in_progress(
+        self,
+        global_db: Session,
+        account_id: int,
+        lang: str,
+    ) -> bool:
+        """Check if there's a text currently being generated for this account and language."""
+        return global_db.query(ReadingText).filter(
+            ReadingText.lang == lang,
+            ReadingText.generated_for_account_id == account_id,
+            ReadingText.content.is_(None)
+        ).first() is not None
+    
     def get_unopened_text(
         self,
         global_db: Session,

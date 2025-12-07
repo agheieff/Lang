@@ -106,7 +106,7 @@
             {{ text.created_at.strftime('%m/%d %H:%M') if text.created_at else '-' }}
           </td>
           <td class="px-3 py-2 text-center">
-            {% if text.content and text.words_complete and text.sentences_complete %}
+            {% if text.is_ready %}
               <span class="px-2 py-0.5 bg-green-100 text-green-800 rounded text-xs">Ready</span>
             {% elif text.content and (text.words_complete or text.sentences_complete) %}
               <span class="px-2 py-0.5 bg-yellow-100 text-yellow-800 rounded text-xs">Partial</span>

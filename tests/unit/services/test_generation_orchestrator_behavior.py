@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from server.services.generation_orchestrator import GenerationOrchestrator
-from server.services.text_generation_service import TextGenerationResult
+from server.services.generation_orchestrator import GenerationOrchestrator, TextGenerationResult
 
 
 # Fake implementations for isolation

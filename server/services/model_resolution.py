@@ -10,6 +10,7 @@ from server.models import UserModelConfig, Profile
 from server.auth import Account
 from server.llm_config.llm_models import ModelConfig
 from server.services.user_model_service import get_user_model_service, TaskType
+from server.config import SubscriptionTier
 
 # Map preference keys to task types
 PREFERENCE_TO_TASK: dict[str, TaskType] = {
@@ -46,7 +47,7 @@ def resolve_models_for_task(
     
     # Get user's subscription tier
     account = global_db.query(Account).filter(Account.id == account_id).first()
-    user_tier = account.subscription_tier if account else "Free"
+    user_tier = account.subscription_tier if account and isinstance(account.subscription_tier, SubscriptionTier) else SubscriptionTier.FREE
     
     # Ensure user has models (injects system defaults if needed)
     service.ensure_user_has_models(account_db, account_id, tier=user_tier)
@@ -91,7 +92,7 @@ def resolve_models_for_task(
             api_key_env=None,
             _api_key=resolved.api_key,
             max_tokens=resolved.max_tokens or 32768,
-            allowed_tiers=["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"],
+            allowed_tiers=[tier.value for tier in SubscriptionTier],  # Use enum values
             capabilities=["text"]
         )
         models_to_try.append(mc)
@@ -130,7 +131,7 @@ def _user_model_to_model_config(config: UserModelConfig) -> ModelConfig:
         api_key_env=None,
         _api_key=api_key,
         max_tokens=config.max_tokens or 32768,
-        allowed_tiers=["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"],
+        allowed_tiers=[tier.value for tier in SubscriptionTier],  # Use enum values
         capabilities=config.capabilities or ["text"]
     )
 

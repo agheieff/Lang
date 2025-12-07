@@ -16,6 +16,7 @@ Responsibilities:
 
 import logging
 import time
+from datetime import datetime
 from typing import List, Optional, Dict, Any, Literal
 from dataclasses import dataclass, field
 
@@ -29,11 +30,10 @@ from ..models import (
     ReadingLookup,
     ProfileTextRead,
     Lexeme,
-    ProfileTextRead,
 )
 from ..schemas.session import TextSessionState
 from ..services.srs_service import SrsService
-from ..services.user_content_service import UserContentService
+from ..services.text_state_service import get_text_state_service, ReadinessStatus
 from ..services.title_extraction_service import TitleExtractionService
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class SessionManagementService:
     
     def __init__(self):
         self.srs_service = SrsService()
-        self.user_content_service = UserContentService()
+        self.user_content_service = get_text_state_service()
         self.title_service = TitleExtractionService()
     
     def process_session_data(
@@ -165,7 +165,7 @@ class SessionManagementService:
                 account_db, global_db, account_id, lang
             )
         except Exception as e:
-            logger.error(f"UserContentService failed: {e}")
+            logger.error(f"text_state_service failed: {e}")
             # Note: In the new consolidated approach, we might not have direct access to unopened/generating states
             # For now, return None to trigger generation
             text_obj = None
@@ -191,7 +191,7 @@ class SessionManagementService:
             readiness = self.user_content_service.check_text_ready(global_db, text_id)
         except Exception as e:
             logger.error(f"Readiness check failed for text_id={text_id}: {e}")
-            readiness = UserContentService.ReadinessStatus(ready=False, text_id=text_id, reason="check_failed")
+            readiness = ReadinessStatus(ready=False, text_id=text_id, reason="check_failed")
 
         if not readiness.ready:
             # Text not ready yet
@@ -313,8 +313,8 @@ class SessionManagementService:
                 lookup = ReadingLookup(
                     account_id=account_id,
                     text_id=text_id,
-                    word=word,
-                    action="lookup",
+                    surface=word,  # Changed from 'word' to 'surface' to match model
+                    context_hash=lookup_data.get("context_hash"),
                     created_at=timestamp,
                 )
                 db.add(lookup)
@@ -375,16 +375,13 @@ class SessionManagementService:
                 ).first()
                 
                 if ptr:
-                    ptr.read_at = datetime.utcnow()
-                    ptr.time_spent_seconds = session_data.get("time_spent", 0)
-                    ptr.lookup_count = len(session_data.get("lookups", []))
+                    ptr.last_read_at = datetime.utcnow()
+                    ptr.read_count += 1
                 else:
                     ptr = ProfileTextRead(
                         profile_id=profile.id,
                         text_id=text_id,
-                        read_at=datetime.utcnow(),
-                        time_spent_seconds=session_data.get("time_spent", 0),
-                        lookup_count=len(session_data.get("lookups", [])),
+                        last_read_at=datetime.utcnow(),
                     )
                     db.add(ptr)
 

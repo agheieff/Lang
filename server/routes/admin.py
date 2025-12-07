@@ -55,7 +55,7 @@ def admin_texts_page(
     
     # Calculate summary stats
     total_count = len(texts)
-    ready_count = sum(1 for t in texts if t.content and t.words_complete and t.sentences_complete)
+    ready_count = sum(1 for t in texts if t.is_ready)
     failed_count = sum(1 for t in texts if t.translation_attempts >= 3)
     pending_count = total_count - ready_count - failed_count
     
@@ -63,7 +63,7 @@ def admin_texts_page(
     by_lang = defaultdict(lambda: {"total": 0, "ready": 0})
     for text in texts:
         by_lang[text.lang]["total"] += 1
-        if text.content and text.words_complete and text.sentences_complete:
+        if text.is_ready:
             by_lang[text.lang]["ready"] += 1
     
     context = {
