@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import os
 
-from server.llm_config.llm_models import ModelConfig
+from server.llm.models import ModelConfig
 from server.services.model_registry_service import get_model_registry
 
 logger = logging.getLogger(__name__)

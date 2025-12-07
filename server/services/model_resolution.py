@@ -8,7 +8,7 @@ from typing import List, Optional, Literal
 from sqlalchemy.orm import Session
 from server.models import UserModelConfig, Profile
 from server.auth import Account
-from server.llm_config.llm_models import ModelConfig
+from server.llm.models import ModelConfig
 from server.services.user_model_service import get_user_model_service, TaskType
 from server.config import SubscriptionTier
 

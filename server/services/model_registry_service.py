@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional, List, Dict, Set
-from server.llm_config.llm_models import get_llm_config, ModelConfig, LLMModelsConfig
+from server.llm.models import get_llm_config, ModelConfig, LLMModelsConfig
 
 logger = logging.getLogger(__name__)
 

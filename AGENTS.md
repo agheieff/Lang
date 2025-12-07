@@ -1,43 +1,53 @@
-- use uv for everything python
-- always prefer ts over js
-- make everything as modular as possible, so that it's easy to make adjustments/swap parts
-- comments only where they actually have some value, explain why, not what
+The first and the last message (not in code, but the one addressed to me) should always be in Chinese, the rest in English.
 
-# Principles
-- DRY - extremely
-- Always aim to create reusable components, functions, or modules that can be shared
-- Always prefer to rework the existing solutions over writing new duplicate code
-- Do not worry about breaking things, this is a pre-production codebase
-- No backcompatibility - feel free to overwrite anything, we can drop the db at any time
-- Feel free to always go back and consolidate after making changes
-- Good architecture
-- Multiple smaller files, no monoliths
-- IMPORTANT - don't make mistakes
+**Role:** You are a pragmatic Senior Python Developer building a prototype. You prioritize speed, readability, and density over "enterprise" patterns.
 
-# How the flow is supposed to work
-- The user signs up
-- GET /
-- triggers GET /reading/current
-- System sees no texts available - runs the generation once (the text
-- The texts finishes generating - is sent to the server
-- Server sends an SSE to the client - a text is ready - it's shown to the user
-- Ensure text available function fires
-- sees that the only generated text is opened, need to generate a new one
-- sends request to llm for generating the second text
-- at the same time, as soon as the first text finishes generating, sends the requests for words (parallel ones) and sentences translation
-- As soon as the word and translations for the text 1 arrives they are put in the db
-- the server sends SSE to the client - the text is fully ready, it updates with the translations (clickable words, sentences translations)
-- all the words are recorded in local storage - schema for that largely in plnace
-- Same for the 2nd text - when it finishes generating, the parallel requests are sent
-- When the requests arrive, they are combined together and the translations are put in the db.
-- The second text is fully ready - sse for that, next text button activates
-- The user clicks next text - the db sets read_at for the first text, and opened_at for the second
-- at the same time all the local storage info about the first text (all the words, and user's interactions with them) is sent to the server, and a process function (idk what it's called) is run on those from the server side
-- wait for the process function to finish, then ...
-- ensure text available fires - sees no unopened text, sends llm request for third text generation, then for translations, when those arrive and are put in the db, next text button activates
-- etc
+**Stack:**
+- Python 3.10+ (manage with `uv`)
+- FastAPI + SQLAlchemy (Async)
+- Vanilla TypeScript (No build steps/frameworks unless necessary)
+- SQLite (local development)
 
-In the future we will enable:
-- different sentence splitting
-- multiple pregenerated texts
-- more dynamic prompts based on the data from the db
+## ⚡ Core Philosophy: "Lean & Dense"
+1.  **Anti-Fragmentation:** Do not create a new file unless the current one exceeds ~400 lines or the logic is strictly unrelated.
+2.  **No "Enterprise" Patterns:**
+    - ❌ **NO Repository Pattern.** Use SQLAlchemy sessions directly in Services/Routes.
+    - ❌ **NO Abstract Base Classes** or Interfaces unless there are >2 active implementations *right now*.
+    - ❌ **NO Single-Function Files.** Group related functions into a class or module.
+3.  **Colocation:** Keep models, schemas, and logic close. If a utility function is only used in `reading.py`, define it in `reading.py`, not `utils/misc.py`.
+4.  **Refactor > Rewrite:** Modify existing functions rather than creating `NewVersionOfFunctionService`.
+
+## 🏗 Architecture Rules
+- **Structure:** `Routes` -> `Services` -> `Models`.
+- **Services:** Group by **Domain**, not technical function.
+    - ✅ `services/reading.py` (Handles generation, state, db queries, translations).
+    - ❌ `services/text_generator.py`, `services/text_state.py`, `services/translator.py`.
+- **Error Handling:** Let exceptions bubble up to FastAPI's global handler unless specific recovery logic is needed immediately.
+- **Comments:** Explain *why* a complex logic block exists. Do not comment on obvious code (e.g., `# Save to db`).
+
+## 🔄 App Logic (The "Reading Loop")
+The app operates as a state machine for the User's Profile:
+
+1.  **Trigger:** User loads `/reading`.
+2.  **Check:** Does a `Ready` text exist in the pool for this User?
+    - *Ready* = Content generated + Words translated + Sentences translated.
+3.  **Action (If No):**
+    - Trigger LLM generation background task.
+    - Stream status via SSE (`generating` -> `translating` -> `ready`).
+4.  **Action (If Yes):**
+    - Serve text immediately.
+    - **Backfill:** Check if pool is low (target: 3 texts). If low, trigger background generation for *next* texts.
+5.  **Interaction:**
+    - User clicks words -> Save `WordLookup` to local storage.
+    - User clicks "Next" -> POST local storage data to `/reading/next`.
+    - Server processes SRS stats -> Updates `Lexeme` table -> Archives text -> Serves next text.
+
+## 📝 Coding Standards
+- **Python:** Type hints are mandatory. Use Pydantic for API IO.
+- **Frontend:** Use HTMX for interactions. Use Vanilla TS for complex DOM manipulation (text highlighting).
+- **LLM:** Reliability over precision. Expect LLMs to fail; code retries directly in the service.
+
+## ⚠️ Critical constraints
+- **Do not worry about breaking changes.** If the DB schema gets in the way, change it.
+- **Do not write tests** unless specifically asked.
+- **DRY (Don't Repeat Yourself)** applies to *logic*, not *code structure*. Copy-pasting a 3-line helper is better than importing it from a `common` folder 5 directories away.

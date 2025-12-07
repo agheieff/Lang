@@ -10,8 +10,8 @@ from fastapi.responses import RedirectResponse
 from fastapi import HTTPException
 
 from .db import DB_PATH, init_db
-from .api.profile import router as profile_router
-from .api.tiers import router as tiers_router
+from .routes.profile import router as profile_router
+from .routes.tiers import router as tiers_router
 # from .api.wordlists import router as wordlists_router  # Disabled - word lists are generated dynamically
 from .config import MSP_ENABLE
 from .middleware.auth import install_auth
@@ -21,7 +21,7 @@ from .routes.reading import router as reading_router
 from .routes.srs import router as srs_router
 from .routes.ui import router as ui_router
 from .routes.settings import router as settings_router
-from .routes.user_models import router as user_models_router, htmx_router as user_models_htmx_router
+from .routes.settings import htmx_router as settings_htmx_router
 from .routes.admin import router as admin_router
 from .services.background_worker import get_background_worker
 
@@ -93,8 +93,7 @@ app.include_router(reading_router)
 app.include_router(srs_router)
 app.include_router(ui_router)
 app.include_router(settings_router)
-app.include_router(user_models_router)
-app.include_router(user_models_htmx_router)
+app.include_router(settings_htmx_router)
 app.include_router(admin_router)
 
 # Optional module stream processing API

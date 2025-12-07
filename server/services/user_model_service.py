@@ -14,7 +14,7 @@ from typing import Optional, List, Literal
 from sqlalchemy.orm import Session
 
 from ..models import UserModelConfig
-from ..llm_config.llm_models import get_llm_config
+from ..llm.models import get_llm_config
 
 logger = logging.getLogger(__name__)
 

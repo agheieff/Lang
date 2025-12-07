@@ -16,14 +16,14 @@ from server.auth import Account  # type: ignore
 from ..account_db import get_db
 from ..db import get_global_db
 from ..deps import get_current_account as _get_current_account
-from ..models import (
+from server.models import (
     Profile,
     ReadingLookup,
     ReadingText,
     ReadingTextTranslation,
     ReadingWordGloss,
+    LLMRequestLog,
 )
-from ..models import LLMRequestLog
 from ..utils.json_parser import extract_json_from_text, extract_word_translations
 from ..schemas.reading import LookupEvent, NextPayload
 from ..schemas.session import TextSessionState
@@ -32,7 +32,7 @@ from ..services.session_management_service import SessionManagementService
 from ..utils.text_segmentation import split_sentences
 from ..services.notification_service import get_notification_service
 from ..settings import get_settings
-from ..views.reading_renderer import render_reading_block, render_loading_block
+# from ..views.reading_renderer import render_reading_block, render_loading_block
 from ..services.generation_orchestrator import get_generation_orchestrator
 from ..services.sse_handlers import reading_events_sse, next_ready_sse, wait_until
 
