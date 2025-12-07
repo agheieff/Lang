@@ -1,8 +1,132 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+PROMPTS = {
+    "zh": {
+        "system": "You're a language tutor, creating texts for learners to practice comprehensible input.",
+        "text": """Please generate a text in Chinese for the comprehensible input training.
+Write it in {script} characters.
+The learner is around {level} level, please try to make the text correspond to that.
+Please try to make the text around {length} characters long.
+Try to include at least some of the following words in the text: {include_words}. Gently reinforce the target words in context and keep the language natural and engaging.
+Separate paragraphs with double newlines (\\n\\n).
+{topic_line}
+Please put the title and the text itself in json, here's an example of how to structure that:
+{"title":"去公园散步","text":"今天天气很好，阳光明媚。微风轻轻吹过脸庞。\\n\\n我们一起去公园散步吧。"}""",
+        "translation": """Now please translate this text into English. Please output valid json, with this schema (include title too):
+
+{
+    "title": "去公园散步",
+    "title_translation": "A walk in the park",
+    "text": [
+        {
+            "paragraph": [
+                {
+                    "sentence": {
+                        "text": "今天天气很好，阳光明媚。",
+                        "translation": "The weather is great today, with bright sunshine."
+                    }
+                },
+                {
+                    "sentence": {
+                        "text": "微风轻轻吹过脸庞。",
+                        "translation": "A gentle breeze brushes across the face."
+                    }
+                }
+            ]
+        },
+        {
+            "paragraph": [
+                {
+                    "sentence": {
+                        "text": "我们一起去公园散步吧。",
+                        "translation": "Let's go for a walk in the park together."
+                    }
+                }
+            ]
+        }
+    ]
+}""",
+        "words": """Now please translate the following sentence from the text into English: {sentence}. Go over all the words from the sentence in order, not skipping anything, and return valid json - a single array of all the words. Each word should be an object with the following four keys:
+- word – the original Chinese character(s)
+- pinyin – the pinyin with diacritics (e.g. "tiānqì")
+- translation – the most context-appropriate English gloss for this word
+- pos – the part-of-speech label (e.g. "NOUN", "VERB", "ADJ", "PART", etc.)
+
+Tokenize the text into the smallest meaningful units (words, not individual characters unless they are single-character words).
+Choose the forms that can be found in a dictionary, for example "一个" should be tokenized as two, not as one, but something like "吃饭" should be tokenized as one word.
+Preserve the original order; the array must map one-to-one with the token sequence. Skip any punctuation you encounter.
+If you encounter the same word twice in the sentence, please put it twice in the response as well, the response should cover all the words in the sentence in their order, including duplicated ones.
+
+Here's an example for how the first sentence from the text from before would be done:
+
+[
+    {
+        "word": "今天",
+        "pinyin": "jīntiān",
+        "translation": "today",
+        "pos": "NOUN"
+    },
+    {
+        "word": "天气",
+        "pinyin": "tiānqì",
+        "translation": "weather",
+        "pos": "NOUN"
+    },
+    {
+        "word": "很",
+        "pinyin": "hěn",
+        "translation": "very",
+        "pos": "ADV"
+    },
+    {
+        "word": "好",
+        "pinyin": "hǎo",
+        "translation": "good",
+        "pos": "ADJ"
+    },
+    {
+        "word": "阳光",
+        "pinyin": "yáng guāng",
+        "translation": "sunshine",
+        "pos": "NOUN"
+    },
+    {
+        "word": "明媚",
+        "pinyin": "míng mèi",
+        "translation": "bright and beautiful",
+        "pos": "ADJ"
+    },
+]"""
+    },
+    "es": {
+        "system": "You're a language tutor, creating texts for learners to practice comprehensible input.",
+        "text": """Please generate a text in Spanish for the comprehensible input training.
+The learner is around {level} level; please write accordingly.
+Please try to make the text around {length} words long.
+Try to include at least some of the following words in the text: {include_words}. Gently reinforce the target words in context and keep the language natural and engaging.
+Separate paragraphs with double newlines (\\n\\n).
+{topic_line}
+Please put the title and the text itself in json, here's an example of how to structure that:
+{"title":"Un paseo en el parque","text":"Hoy hace buen tiempo.\\n\\nVamos juntos a pasear por el parque."}""",
+        "translation": """You are a professional translator. Please translate the provided text sentence-by-sentence, preserving paragraph structure.
+Return a JSON object with 'text' (original), and a 'paragraphs' array containing 'sentences' arrays with 'text' and 'translation'.
+
+Translate this text from {source_lang} to {target_lang}:
+
+{text}""",
+        "words": """You are a professional linguist and translator. Please analyze the provided text and provide detailed word-by-word translations.
+Return a JSON object with 'text' (original) and 'words' array containing word objects with translations, lemmas, and grammatical information.
+
+Analyze and translate each word in this {source_lang} text:
+
+{text}"""
+    }
+}
+
+
 def _safe_format(s: str, mapping: Dict[str, str]) -> str:
     """Replace only known {keys} using a safe formatter, leaving all other braces intact.
 
@@ -13,26 +137,6 @@ def _safe_format(s: str, mapping: Dict[str, str]) -> str:
         key = m.group(1)
         return str(mapping.get(key, m.group(0)))
     return re.sub(r"\{([a-zA-Z0-9_]+)\}", repl, s)
-
-
-def _load_prompt(name: str, lang_code: Optional[str] = None) -> str:
-    base = Path(__file__).resolve().parent / "prompts"
-    # Strict language-based lookup only: exact code, then base code. No inline defaults.
-    candidates: List[Path] = []
-    if lang_code:
-        code = str(lang_code).strip()
-        if code:
-            candidates.append(base / code / name)
-            base_code = code.split("-", 1)[0].split("_", 1)[0]
-            if base_code and base_code != code:
-                candidates.append(base / base_code / name)
-    for p in candidates:
-        try:
-            if p.exists():
-                return p.read_text(encoding="utf-8")
-        except Exception:
-            continue
-    raise FileNotFoundError(f"Prompt file not found for lang={lang_code!r}, name={name!r}")
 
 
 @dataclass
@@ -48,48 +152,29 @@ class PromptSpec:
     topic: Optional[str] = None  # Topic category: fiction, news, science, history, daily_life, culture
 
 
+def get_prompt(lang: str, key: str, **kwargs) -> str:
+    """Get a prompt template for a given language and key, with formatting."""
+    base_lang = lang.split("-", 1)[0].split("_", 1)[0]  # Get base language code
+    template = PROMPTS.get(lang, {}).get(key) or PROMPTS.get(base_lang, {}).get(key)
+    
+    if not template:
+        raise ValueError(f"Prompt not found for lang={lang}, key={key}")
+    
+    return _safe_format(template, kwargs)
+
+
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
-    def _lang_display(code: str) -> str:
-        if code.startswith("zh"):
-            return "Chinese"
-        if code.startswith("es"):
-            return "Spanish"
-        return code
-
-    # Use new file names (system.md, text.md)
-    sys_tpl = _load_prompt("system.md", spec.lang)
-    user_tpl = _load_prompt("text.md", spec.lang)
-
-    lang_display = _lang_display(spec.lang)
-    script_line = ""
-    if spec.script and spec.lang.startswith("zh"):
-        if spec.script == "Hans":
-            script_line = "Use simplified Chinese characters.\n"
-        elif spec.script == "Hant":
-            script_line = "Use traditional Chinese characters.\n"
-    level_line = f"The student is around {spec.user_level_hint}; please use appropriate language for this level.\n" if spec.user_level_hint else ""
-    length_line = (
-        f"The text should be around {spec.approx_len} characters long.\n" if spec.unit == "chars" else f"The text should be around {spec.approx_len} words long.\n"
-    )
-    include_words_line = ""
-    if spec.include_words:
-        words = ", ".join(spec.include_words)
-        include_words_line = f"Please include these words naturally: {words}.\n"
-    ci_line = ""
-    if isinstance(spec.ci_target, (int, float)) and spec.ci_target:
-        pct = int(round(float(spec.ci_target) * 100))
-        ci_line = f"Aim for about {pct}% of tokens to be familiar for the learner; limit new vocabulary.\n"
+    """Build reading prompt messages for LLM."""
+    # Simplified prompt building
+    script = "simplified" if spec.script == "Hans" else "traditional" if spec.script == "Hant" else ""
+    level = spec.user_level_hint.split(":")[0] if spec.user_level_hint and ":" in spec.user_level_hint else spec.user_level_hint or ""
     
-    recent_titles_line = ""
-    if spec.recent_titles:
-        titles_str = ", ".join(f'"{t}"' for t in spec.recent_titles)
-        recent_titles_line = f"Here are the titles of the last {len(spec.recent_titles)} texts the user read: {titles_str}. Please generate something different/new.\n"
-    
+    # Format topic
     topic_line = ""
     if spec.topic:
         topic_display_map = {
             "fiction": "fiction/creative writing",
-            "news": "news/current events",
+            "news": "news/current events", 
             "science": "science",
             "technology": "technology",
             "history": "history",
@@ -98,7 +183,6 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
             "sports": "sports",
             "business": "business/economics",
         }
-        # Handle multiple comma-separated topics
         topics = [t.strip() for t in spec.topic.split(',') if t.strip()]
         if len(topics) == 1:
             topic_display = topic_display_map.get(topics[0], topics[0])
@@ -110,130 +194,54 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
             displays = [topic_display_map.get(t, t) for t in topics]
             topic_line = f"The text should touch on {', '.join(displays[:-1])}, and {displays[-1]}.\n"
 
-    # Build mapping for both legacy "*_line" placeholders and simplified {level}/{length}/{include_words}/{script}
-    # Prefer a concise level code (e.g., HSK2, A2) before any description
-    if spec.user_level_hint and ":" in spec.user_level_hint:
-        simple_level = spec.user_level_hint.split(":", 1)[0].strip()
-    else:
-        simple_level = spec.user_level_hint or ""
-    simple_length = str(spec.approx_len)
-    simple_include = ", ".join(spec.include_words or [])
-    script_label = ""
-    if spec.script and spec.lang.startswith("zh"):
-        if spec.script == "Hans":
-            script_label = "simplified"
-        elif spec.script == "Hant":
-            script_label = "traditional"
-    mapping = {
-        "lang_display": lang_display,
-        # legacy multi-line placeholders
-        "script_line": script_line,
-        "level_line": level_line,
-        "length_line": length_line,
-        "include_words_line": include_words_line,
-        "ci_line": ci_line,
-        "recent_titles_line": recent_titles_line,
-        "topic_line": topic_line,
-        # simplified single-value placeholders
-        "level": simple_level,
-        "length": simple_length,
-        "include_words": simple_include,
-        "script": script_label,
-        "recent_titles": (", ".join(spec.recent_titles) if spec.recent_titles else ""),
-        "topic": (spec.topic or ""),
-    }
-
-    sys_content = _safe_format(sys_tpl, mapping)
-    user_content = _safe_format(user_tpl, mapping)
+    system_content = get_prompt(spec.lang, "system")
+    user_content = get_prompt(spec.lang, "text", 
+        script=script,
+        level=level,
+        length=str(spec.approx_len),
+        include_words=", ".join(spec.include_words or []),
+        topic_line=topic_line
+    )
+    
     return [
-        {"role": "system", "content": sys_content},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
 
 
-@dataclass
-class TranslationSpec:
-    lang: str
-    target_lang: str
-    unit: str  # "sentence" | "paragraph" | "text"
-    content: Union[str, List[str]]
-    continue_with_reading: bool = False
-    script: Optional[str] = None  # for zh source formatting
-
-
-def build_translation_prompt(spec: TranslationSpec, prev_messages: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
-    def _lang_display(code: str) -> str:
-        if code.startswith("zh"):
-            return "Chinese"
-        if code.startswith("es"):
-            return "Spanish"
-        return code
-
-    # Map to the new structured translation template for consistency
-    tpl = _load_prompt("translation.md", spec.lang)
-    src_lang = _lang_display(spec.lang)
-    tgt_lang = _lang_display(spec.target_lang)
-    text = spec.content if isinstance(spec.content, str) else "\n".join(spec.content)
-    user_content = _safe_format(tpl, {"source_lang": src_lang, "target_lang": tgt_lang, "text": text})
-
-    msgs: List[Dict[str, str]] = []
-    if prev_messages:
-        msgs.extend(prev_messages)
-    msgs.append({"role": "system", "content": ""})
-    msgs.append({"role": "user", "content": user_content})
-    return msgs
-
-
 def build_structured_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
     """Build prompt for structured sentence-by-sentence translation."""
-    def _lang_display(code: str) -> str:
-        if code.startswith("zh"):
-            return "Chinese"
-        if code.startswith("es"):
-            return "Spanish"
-        return code
-
-    # Use single-file translation.md (structured by parts)
-    tpl = _load_prompt("translation.md", source_lang)
-    user_content = _safe_format(
-        tpl,
-        {
-            "source_lang": _lang_display(source_lang),
-            "target_lang": _lang_display(target_lang),
-            "text": text,
-        },
+    lang_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(source_lang, source_lang)
+    target_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(target_lang, target_lang)
+    
+    system_content = ""
+    user_content = get_prompt(source_lang, "translation", 
+        source_lang=lang_display,
+        target_lang=target_display,
+        text=text
     )
+    
     return [
-        {"role": "system", "content": ""},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
 
 
 def build_word_translation_prompt(source_lang: str, target_lang: str, text: str) -> List[Dict[str, str]]:
     """Build prompt for word-by-word translation with linguistic analysis."""
-    def _lang_display(code: str) -> str:
-        if code.startswith("zh"):
-            return "Chinese"
-        if code.startswith("es"):
-            return "Spanish"
-        if code.startswith("fr"):
-            return "French"
-        return code
-
-    # Use single-file words.md (word-by-word)
-    tpl = _load_prompt("words.md", source_lang)
-    # Support both {text} and {sentence} placeholders in templates
-    user_content = _safe_format(
-        tpl,
-        {
-            "source_lang": _lang_display(source_lang),
-            "target_lang": _lang_display(target_lang),
-            "text": text,
-            "sentence": text,
-        },
+    lang_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(source_lang, source_lang)
+    target_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(target_lang, target_lang)
+    
+    system_content = ""
+    user_content = get_prompt(source_lang, "words",
+        source_lang=lang_display,
+        target_lang=target_display,
+        text=text,
+        sentence=text
     )
+    
     return [
-        {"role": "system", "content": ""},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
 
@@ -245,16 +253,7 @@ def build_translation_contexts(
     target_lang: str,
     text: str,
 ) -> Dict[str, List[Dict[str, str]]]:
-    """Return canonical 4-message contexts for structured and word translations.
-
-    Messages shape (both kinds):
-      [
-        {system: translation_system},
-        {user: reading_user_content},
-        {assistant: generated_text},
-        {user: task_user_prompt}
-      ]
-    """
+    """Return canonical 4-message contexts for structured and word translations."""
     reading_user_content = reading_messages[1]["content"] if (reading_messages and len(reading_messages) > 1) else ""
 
     # Structured
@@ -281,94 +280,16 @@ def build_translation_contexts(
 
     return {"structured": structured, "words": words}
 
+
 def build_title_translation_prompt(source_lang: str, target_lang: str, title: str) -> List[Dict[str, str]]:
     """Build prompt for title translation."""
-    def _lang_display(code: str) -> str:
-        if code.startswith("zh"):
-            return "Chinese"
-        if code.startswith("es"):
-            return "Spanish"
-        if code.startswith("fr"):
-            return "French"
-        return code
+    lang_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(source_lang, source_lang)
+    target_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(target_lang, target_lang)
     
-    # Simple prompt for title translation
-    system_content = f"You are a professional translator. Translate the following {_lang_display(source_lang)} title to {_lang_display(target_lang)}. Provide only the translated title without any additional text or explanations."
+    system_content = f"You are a professional translator. Translate the following {lang_display} title to {target_display}. Provide only the translated title without any additional text or explanations."
     
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": title},
     ]
 
-
-def build_reading_prompt_spec(db, account_id: int, lang: str) -> tuple[PromptSpec, List[Dict[str, str]], str]:
-    """
-    Build reading prompt specification, messages, and level for text generation.
-    
-    Args:
-        db: Database session (should be global_db for Profile query)
-        account_id: Account ID to build prompt for
-        lang: Language to build prompt for
-    
-    Returns:
-        Tuple of (PromptSpec, messages for LLM, level string)
-    """
-    # Use local imports to avoid circular dependencies
-    from ..models import Profile
-    
-    # Get user profile from global database
-    profile = db.query(Profile).filter(
-        Profile.account_id == account_id,
-        Profile.lang == lang
-    ).first()
-    
-    if not profile:
-        # Create default profile if none exists
-        profile = Profile(
-            account_id=account_id,
-            lang=lang,
-            target_lang="en"  # Default target
-        )
-        db.add(profile)
-        db.flush()
-    
-    # Import services locally to avoid circular dependencies
-    from ..services.pool_selection_service import get_pool_selection_service
-    from ..services.level_service import get_ci_target
-    
-    # Get pool selection service
-    pool_service = get_pool_selection_service()
-    
-    # Get generation parameters
-    ci_target, topic = pool_service.get_generation_params(profile, vary=True)
-    
-    # Get ci_target from level service if pool_service didn't provide it
-    if ci_target is None:
-        ci_target = get_ci_target(db, account_id, lang)
-    
-    # Compose level hint
-    level_hint = f"{profile.level_value}:{ci_target}"  # Simplified level hint
-    
-    # Pick words to include - disable for now due to database architecture issues
-    include_words = []  # TODO: Fix word selection once database architecture is clarified
-    
-    # Create prompt specification
-    spec = PromptSpec(
-        lang=lang,
-        unit="sentences", 
-        approx_len=int(profile.text_length or 150),
-        user_level_hint=level_hint,
-        include_words=include_words,
-        script=profile.preferred_script if hasattr(profile, 'preferred_script') else None,
-        ci_target=ci_target,
-        topic=topic,
-        recent_titles=[]  # Could be populated from recent texts
-    )
-    
-    # Build messages
-    messages = build_reading_prompt(spec)
-    
-    # Determine level string (for backward compatibility)
-    level = f"{profile.level_value}:{ci_target}"
-    
-    return spec, messages, level

@@ -4,26 +4,55 @@ import json
 import time
 import random
 import logging
-from contextlib import nullcontext
-from typing import Any, Dict, List, Optional, Union, Callable
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Callable
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
-import os
 
-from server.llm.models import ModelConfig
-from server.services.model_registry_service import get_model_registry
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 logger = logging.getLogger(__name__)
 
-try:
-    # Local OpenRouter client from server/llm/openrouter/
-    from server.llm.openrouter import complete as _or_complete, with_api_key as _or_with_api_key  # type: ignore
-except Exception:  # pragma: no cover - optional during dev
-    _or_complete = None  # type: ignore
-    _or_with_api_key = None  # type: ignore
 
-# Global counter for LLM requests
-_llm_request_counter = 0
+@dataclass
+class ModelConfig:
+    """Configuration for a single LLM model."""
+    id: str
+    display_name: str
+    model: str
+    base_url: str
+    api_key_env: Optional[str] = None
+    max_tokens: Optional[int] = None
+    allowed_tiers: Optional[List[str]] = None
+
+
+def get_llm_config() -> Dict[str, Any]:
+    """Load LLM configuration from models.json file."""
+    models_file = Path(__file__).parent / "models.json"
+    
+    try:
+        with open(models_file, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {
+            "models": [
+                {
+                    "id": "grok-fast-free",
+                    "display_name": "Grok 4.1 Fast (Free)",
+                    "model": "x-ai/grok-4.1-fast:free",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "max_tokens": 32768,
+                    "allowed_tiers": ["Free", "Standard", "Pro", "Pro+", "BYOK", "admin"],
+                }
+            ],
+            "default_model": "grok-fast-free",
+        }
 
 
 def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, timeout: int = 60) -> Any:
@@ -39,14 +68,7 @@ def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = N
 
 
 def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -> Any:
-    """
-    Execute a function with exponential backoff for rate limits and transient errors.
-    
-    Handles:
-    - HTTP 429 (Too Many Requests)
-    - HTTP 5xx (Server Errors)
-    - Network errors (URLError)
-    """
+    """Execute a function with exponential backoff for rate limits and transient errors."""
     last_exception = None
     
     for attempt in range(max_retries + 1):
@@ -55,7 +77,6 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
         except (HTTPError, URLError, RuntimeError) as e:
             last_exception = e
             
-            # Check if we should retry
             should_retry = False
             status_code = None
             retry_after = None
@@ -63,33 +84,26 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
             if isinstance(e, HTTPError):
                 status_code = e.code
                 retry_after = e.headers.get("Retry-After")
-            elif hasattr(e, "status_code"):  # Some libs attach this
+            elif hasattr(e, "status_code"):
                 status_code = getattr(e, "status_code")
             
-            # Retry on 429 or 5xx
             if status_code and (status_code == 429 or 500 <= status_code < 600):
                 should_retry = True
-            # Retry on network errors
             elif isinstance(e, URLError):
                 should_retry = True
-            # Retry on generic RuntimeErrors that might be OpenRouter issues
             elif isinstance(e, RuntimeError) and "openrouter" in str(e).lower():
                 should_retry = True
                 
             if not should_retry or attempt >= max_retries:
                 raise e
             
-            # Calculate delay
-            delay = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8...
-            
-            # Respect Retry-After header if present
+            delay = 2 ** attempt
             if retry_after:
                 try:
                     delay = float(retry_after)
                 except (ValueError, TypeError):
                     pass
             
-            # Add jitter
             jitter = random.uniform(0, 0.5 * delay)
             sleep_time = delay + jitter
             
@@ -99,28 +113,8 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
     raise last_exception
 
 
-def resolve_model(base_url: str, prefer: Optional[str] = None) -> str:
-    if prefer:
-        return prefer
-    try:
-        data = _http_json(base_url.rstrip("/") + "/models")
-        arr = data.get("data") or []
-        if arr:
-            return arr[0].get("id") or "local"
-    except Exception:
-        pass
-    return "local"
-
-
 def _pick_openrouter_model(requested: Optional[str]) -> str:
-    """Prefer non-thinking model variants by default.
-
-    Order:
-    1) explicit requested model
-    2) env OPENROUTER_MODEL_NONREASONING (preferred override)
-    3) env OPENROUTER_MODEL
-    4) fallback 'x-ai/grok-4.1-fast:free'
-    """
+    """Prefer non-thinking model variants by default."""
     if requested:
         return requested
     m = os.getenv("OPENROUTER_MODEL_NONREASONING")
@@ -133,19 +127,15 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
 def _strip_thinking_blocks(text: str) -> str:
     import re
     original = text or ""
-    # Remove <think>...</think> (and common variants), case-insensitive, multiline
     cleaned = re.sub(r"<\s*(think|thinking|analysis)[^>]*>.*?<\s*/\s*\1\s*>", "", original, flags=re.IGNORECASE | re.DOTALL)
-    # Drop leading lines that look like reasoning headers
     cleaned = re.sub(r"^(?:\s*(?:Thoughts?|Thinking|Reasoning)\s*:?\s*\n)+", "", cleaned, flags=re.IGNORECASE)
-    # If the model wrapped the whole passage in a fenced block, unwrap and keep the inner content
-    # Support optional fence label like ```xml
+    
     fenced_full = re.compile(r"^\s*```[^\n]*\n([\s\S]*?)\n?```\s*$", flags=re.DOTALL)
     m = fenced_full.match(cleaned.strip())
     if m:
         cleaned = m.group(1)
-    # Final trim
+    
     cleaned = cleaned.strip()
-    # Last-resort: if stripping produced empty but original wasn't empty, preserve original
     if not cleaned and original.strip():
         return original.strip()
     return cleaned
@@ -154,35 +144,19 @@ def _strip_thinking_blocks(text: str) -> str:
 def chat_complete(
     messages: List[Dict[str, str]],
     *,
-    provider: Optional[str] = None,
     model: Optional[str] = None,
-    model_config: Optional[ModelConfig] = None,
     base_url: Optional[str] = None,
     temperature: Optional[float] = None,
+    max_tokens: int = 16384,
     user_api_key: Optional[str] = None,
 ) -> str:
-    """Call LLM API and return text response.
-
-    Args:
-        messages: List of message dicts with 'role' and 'content'
-        provider: Provider name (legacy, use model_config instead)
-        model: Model name (legacy, use model_config instead)
-        model_config: ModelConfig object with full model configuration
-        base_url: Override base URL (for legacy compatibility)
-        temperature: Sampling temperature
-        user_api_key: Per-user API key (overrides default key for paid users)
-
-    Returns:
-        str: The model's text response
-    """
+    """Call LLM API and return text response."""
     text, _ = chat_complete_with_raw(
         messages,
-        provider=provider,
         model=model,
-        model_config=model_config,
         base_url=base_url,
         temperature=temperature,
-        max_tokens=16384,
+        max_tokens=max_tokens,
         user_api_key=user_api_key,
     )
     return text
@@ -191,134 +165,124 @@ def chat_complete(
 def chat_complete_with_raw(
     messages: List[Dict[str, str]],
     *,
-    provider: Optional[str] = None,
     model: Optional[str] = None,
-    model_config: Optional[ModelConfig] = None,
     base_url: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: int = 16384,
     user_api_key: Optional[str] = None,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
-    """Call LLM API and return (cleaned_text, provider_response_dict_or_none).
-
-    Args:
-        messages: List of message dicts with 'role' and 'content'
-        provider: Provider name (legacy, use model_config instead)
-        model: Model name (legacy, use model_config instead)
-        model_config: ModelConfig object with full model configuration
-        base_url: Override base URL (for legacy compatibility)
-        temperature: Sampling temperature
-        max_tokens: Maximum tokens to generate
-        user_api_key: Per-user API key (overrides default key for paid users)
-
-    Returns:
-        tuple[str, Optional[Dict]]: (text_response, raw_provider_response)
-    """
-    global _llm_request_counter
+    """Call LLM API and return (cleaned_text, provider_response_dict_or_none)."""
+    # Resolve configuration
+    api_key = user_api_key or os.getenv("OPENROUTER_API_KEY")
     
-    # Resolve configuration: prioritize model_config, then legacy parameters
-    if model_config:
-        # Use provided ModelConfig
-        resolved_provider = "openrouter" if "openrouter" in model_config.base_url else "local"
-        resolved_model = model_config.model
-        resolved_base_url = model_config.base_url
-        resolved_max_tokens = min(max_tokens, model_config.max_tokens)
-        api_key = model_config.get_api_key()
+    if not api_key and (not base_url or "openrouter" in (base_url or "")):
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+    
+    # Use OpenRouter if no base_url specified or if explicitly set to OpenRouter
+    if not base_url or "openrouter.ai" in base_url:
+        return _call_openrouter(messages, model, temperature, max_tokens, api_key)
     else:
-        # Legacy mode: use provided parameters
-        resolved_provider = provider or "openrouter"
-        resolved_model = model
-        resolved_base_url = base_url or "http://localhost:1234/v1"
-        resolved_max_tokens = max_tokens
-        api_key = None
-        
-        # Try to get model config from registry if no provider/model specified
-        if not provider and not model:
-            try:
-                registry = get_model_registry()
-                fallback_model = registry.get_default_model("Free")  # Use Free tier as fallback
-                model_config = fallback_model
-                resolved_provider = "openrouter" if "openrouter" in model_config.base_url else "local"
-                resolved_model = model_config.model
-                resolved_base_url = model_config.base_url
-                resolved_max_tokens = min(max_tokens, model_config.max_tokens)
-                api_key = model_config.get_api_key()
-            except Exception:
-                pass  # Fall back to legacy defaults
+        return _call_local_api(messages, model, base_url, temperature, max_tokens, api_key)
+
+
+def _call_openrouter(
+    messages: List[Dict[str, str]],
+    model: Optional[str],
+    temperature: Optional[float],
+    max_tokens: int,
+    api_key: str,
+) -> tuple[str, Optional[Dict[str, Any]]]:
+    """Make OpenRouter API call using httpx or urllib fallback."""
+    model_id = _pick_openrouter_model(model)
     
-    # Resolve temperature from env when not provided
-    if temperature is None:
-        try:
-            temperature = float(os.getenv("ARC_LLM_TEMPERATURE", "0.7"))
-        except Exception:
-            temperature = 0.7
-
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    data = {
+        "model": model_id,
+        "messages": messages,
+        "temperature": temperature or float(os.getenv("ARC_LLM_TEMPERATURE", "0.7")),
+        "max_tokens": max_tokens,
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Arcadia AI Chat"),
+    }
+    
+    if ref := os.getenv("OPENROUTER_REFERER"):
+        headers["HTTP-Referer"] = ref
+    
     def _execute_call():
-        if resolved_provider == "openrouter":
-            if _or_complete is None:
-                raise RuntimeError("openrouter client not available")
-            model_id = _pick_openrouter_model(resolved_model)
-            
-            # Prefer user_api_key (paid users) over model_config api_key
-            effective_api_key = user_api_key or api_key
-            
-            # Note: _or_complete needs to handle its own retries or raise exceptions we catch
-            resp = _or_complete(
-                messages,
-                model=model_id,
-                temperature=temperature,
-                max_tokens=resolved_max_tokens,
-                api_key=effective_api_key,
-            )
-            if isinstance(resp, dict):
-                try:
-                    choices = resp.get("choices")
-                    if choices and isinstance(choices, list) and len(choices) > 0:
-                        msg = choices[0].get("message")
-                        if isinstance(msg, dict):
-                            content = msg.get("content")
-                            if isinstance(content, str):
-                                return _strip_thinking_blocks(content), resp
-                except Exception:
-                    pass
-                # Check for error response from provider
-                if "error" in resp:
-                    raise RuntimeError(f"OpenRouter error: {resp['error']}")
-                raise RuntimeError("invalid openrouter response")
-            raise RuntimeError("invalid openrouter response")
-
-        # Local OpenAI-compatible API
-        model_id = resolve_model(resolved_base_url, resolved_model)
+        if httpx:
+            # Use httpx if available (better connection reuse)
+            client = httpx.Client(timeout=60.0)
+            try:
+                resp = client.post(url, json=data, headers=headers)
+                resp.raise_for_status()
+                resp_dict = resp.json()
+            finally:
+                client.close()
+        else:
+            # Fallback to urllib
+            resp_dict = _http_json(url, "POST", data, headers)
         
-        data = {
-            "model": model_id,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": resolved_max_tokens,
-        }
-        
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        try:
-            resp = _http_json(resolved_base_url.rstrip("/") + "/chat/completions", "POST", data, headers=headers)
-        except (URLError, HTTPError) as e:
-            raise e  # Let retry wrapper handle it
-            
-        choices = resp.get("choices")
+        choices = resp_dict.get("choices")
         if not isinstance(choices, list) or len(choices) == 0:
             raise RuntimeError("no choices in response")
+        
         msg = choices[0].get("message")
         if not isinstance(msg, dict):
             raise RuntimeError("no message in choice")
+        
         content = msg.get("content")
         if not isinstance(content, str):
             raise RuntimeError("no content in message")
-        return _strip_thinking_blocks(content), resp
+        
+        return _strip_thinking_blocks(content), resp_dict
+    
+    return _retry_with_backoff(_execute_call, max_retries=3)
 
-    # Execute with retry
-    global _llm_request_counter
-    _llm_request_counter += 1
+
+def _call_local_api(
+    messages: List[Dict[str, str]],
+    model: Optional[str],
+    base_url: str,
+    temperature: Optional[float],
+    max_tokens: int,
+    api_key: Optional[str],
+) -> tuple[str, Optional[Dict[str, Any]]]:
+    """Make local OpenAI-compatible API call."""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    
+    data = {
+        "model": model or "local",
+        "messages": messages,
+        "temperature": temperature or float(os.getenv("ARC_LLM_TEMPERATURE", "0.7")),
+        "max_tokens": max_tokens,
+    }
+    
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    
+    def _execute_call():
+        try:
+            resp_dict = _http_json(url, "POST", data, headers=headers)
+        except (URLError, HTTPError) as e:
+            raise e
+        
+        choices = resp_dict.get("choices")
+        if not isinstance(choices, list) or len(choices) == 0:
+            raise RuntimeError("no choices in response")
+        
+        msg = choices[0].get("message")
+        if not isinstance(msg, dict):
+            raise RuntimeError("no message in choice")
+        
+        content = msg.get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("no content in message")
+        
+        return _strip_thinking_blocks(content), resp_dict
     
     return _retry_with_backoff(_execute_call, max_retries=3)

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from server.auth import Account  # type: ignore
 
-from ..account_db import get_db
+from ..db import get_db
 from ..db import get_global_db
 from ..deps import get_current_account as _get_current_account, require_tier
 from ..level import get_level_summary, update_level_if_stale

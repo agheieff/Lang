@@ -1,1 +1,1 @@
-"""Test package for Arcadia Lang."""
+"""Integration tests for Arcadia Lang."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -9,17 +10,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from fastapi import HTTPException
 
-from .db import DB_PATH, init_db
+from .db import DB_PATH, init_db, SessionLocal
 from .routes.profile import router as profile_router
-from .routes.tiers import router as tiers_router
 # from .api.wordlists import router as wordlists_router  # Disabled - word lists are generated dynamically
 from .config import MSP_ENABLE
-from .middleware.auth import install_auth
+from .auth import CookieUserMiddleware, Account
 from .middleware.rate_limit import install_rate_limit
 from .routes.health import router as health_router
 from .routes.reading import router as reading_router
 from .routes.srs import router as srs_router
-from .routes.ui import router as ui_router
+from .routes.pages import router as pages_router
 from .routes.settings import router as settings_router
 from .routes.settings import htmx_router as settings_htmx_router
 from .routes.admin import router as admin_router
@@ -60,7 +60,19 @@ app.add_middleware(
 )
 
 # Lightweight auth context via cookie
-install_auth(app)
+try:
+    secret = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
+    app.add_middleware(
+        CookieUserMiddleware,
+        session_factory=SessionLocal,
+        UserModel=Account,
+        secret_key=secret,
+        algorithm="HS256",
+        cookie_name="access_token",
+    )
+except Exception:
+    # Non-fatal during dev
+    pass
 
 # Optional auth API (best-effort)
 try:
@@ -86,12 +98,11 @@ except Exception:
 app.include_router(health_router)
 app.include_router(profile_router)
 # app.include_router(wordlists_router, prefix="/api")  # Disabled - word lists are generated dynamically
-app.include_router(tiers_router)
 
 # Feature routers
 app.include_router(reading_router)
 app.include_router(srs_router)
-app.include_router(ui_router)
+app.include_router(pages_router)
 app.include_router(settings_router)
 app.include_router(settings_htmx_router)
 app.include_router(admin_router)

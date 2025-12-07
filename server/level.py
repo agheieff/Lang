@@ -11,7 +11,7 @@ from .services.level_service import (
     get_level_summary,
     HL_DAYS,
 )
-from .utils.math_utils import gaussian_kernel_weights as _gaussian_kernel_weights, decay_factor as _decay_factor_impl
+from .utils.common import gaussian_kernel_weights as _gaussian_kernel_weights, decay_factor as _decay_factor_impl
 
 # Re-export types for callers
 __all__ = [

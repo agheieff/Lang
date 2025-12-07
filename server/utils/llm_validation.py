@@ -195,7 +195,7 @@ class ResponseValidator:
             logger.warning(f"Failed to parse word translation as JSON: {e}")
             
             # Fallback to structured extraction
-            from ..utils.json_parser import extract_word_translations
+            from ..nlp import extract_word_translations
             words = extract_word_translations(text)
             
             return WordTranslationResponse(
@@ -224,7 +224,7 @@ class ResponseValidator:
             logger.warning(f"Failed to parse sentence translation as JSON: {e}")
             
             # Fallback to structured extraction
-            from ..utils.json_parser import extract_structured_translation
+            from ..nlp import extract_structured_translation
             translation = extract_structured_translation(text)
             
             return SentenceTranslationResponse(
@@ -248,7 +248,7 @@ class ResponseValidator:
             logger.warning(f"Failed to parse text generation as JSON: {e}")
             
             # Fallback to plain text
-            from ..utils.json_parser import extract_text_from_llm_response
+            from ..nlp import extract_text_from_llm_response
             content = extract_text_from_llm_response(text)
             
             return TextGenerationResponse(

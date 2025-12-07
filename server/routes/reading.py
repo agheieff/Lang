@@ -13,8 +13,7 @@ import time
 
 from server.auth import Account  # type: ignore
 
-from ..account_db import get_db
-from ..db import get_global_db
+from ..db import get_db
 from ..deps import get_current_account as _get_current_account
 from server.models import (
     Profile,
@@ -24,18 +23,14 @@ from server.models import (
     ReadingWordGloss,
     LLMRequestLog,
 )
-from ..utils.json_parser import extract_json_from_text, extract_word_translations
-from ..schemas.reading import LookupEvent, NextPayload
-from ..schemas.session import TextSessionState
-from ..services.text_state_service import get_text_state_service
-from ..services.session_management_service import SessionManagementService
-from ..utils.text_segmentation import split_sentences
-from ..services.notification_service import get_notification_service
-from ..settings import get_settings
-# from ..views.reading_renderer import render_reading_block, render_loading_block
-from ..services.generation_orchestrator import get_generation_orchestrator
-from ..services.sse_handlers import reading_events_sse, next_ready_sse, wait_until
+# from ..services.notification_service import get_notification_service
+# from ..services.generation_orchestrator import get_generation_orchestrator
+# from ..services.sse_handlers import reading_events_sse, next_ready_sse, wait_until
 
+
+from pathlib import Path
+from fastapi.templating import Jinja2Templates
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 router = APIRouter(tags=["reading"])
 logger = logging.getLogger(__name__)
@@ -43,16 +38,109 @@ logger = logging.getLogger(__name__)
 _SETTINGS = get_settings()
 MAX_WAIT_SEC = float(_SETTINGS.NEXT_READY_MAX_WAIT_SEC)
 
-## View helpers moved to server.views.reading_renderer
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+_templates_env: Optional[Jinja2Templates] = None
+
+def _templates() -> Jinja2Templates:
+    global _templates_env
+    if _templates_env is None:
+        try:
+            env = Environment(
+                loader=FileSystemLoader([str(TEMPLATES_DIR)]),
+                autoescape=select_autoescape(["html", "xml"]),
+            )
+            _templates_env = Jinja2Templates(env=env)
+        except Exception:
+            _templates_env = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    return _templates_env
 
 
  
 
 
+@router.get("/reading", response_class=HTMLResponse)
+def reading_page(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Reading practice page with text display."""
+    t = _templates()
+    
+    account_id: Optional[int] = None
+    try:
+        u = getattr(request.state, "user", None)
+        if u is not None:
+            if isinstance(u, dict) and "id" in u:
+                account_id = int(u["id"])
+            elif hasattr(u, "id"):
+                account_id = int(getattr(u, "id"))
+    except Exception:
+        account_id = None
+
+    # Redirect to login if not authenticated
+    if account_id is None:
+        return RedirectResponse(url="/login", status_code=302)
+
+    profile = None
+    if account_id is not None:
+        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+
+    # Redirect to profile creation if no profile
+    if profile is None:
+        return RedirectResponse(url="/profile", status_code=302)
+
+    # Check if there are any ready texts for this language
+    ready_count = db.query(ReadingText).filter(
+        ReadingText.lang == profile.lang,
+        ReadingText.target_lang == profile.target_lang,
+        ReadingText.content.isnot(None),
+        ReadingText.words_complete == True,
+        ReadingText.sentences_complete == True,
+    ).count()
+
+    # If no texts ready, redirect to dashboard with message
+    if ready_count == 0:
+        return RedirectResponse(url="/?no_texts=1", status_code=302)
+
+    context = {
+        "title": "Reading Practice",
+        "has_profile": profile is not None,
+        "profile_lang": (profile.lang if profile is not None else None),
+        "is_authenticated": account_id is not None,
+    }
+
+    return t.TemplateResponse(request, "pages/home.html", context)
+
+
+@router.get("/words", response_class=HTMLResponse)
+def words_page(
+    request: Request,
+    lang: Optional[str] = None,
+    account: Account = Depends(_get_current_account),
+    db: Session = Depends(get_db),
+):
+    t = _templates()
+    # Default to the user's first profile language if not provided
+    eff_lang: Optional[str] = None
+    if lang:
+        eff_lang = lang
+    else:
+        try:
+            from ..models import Profile
+            prof = db.query(Profile).filter(Profile.account_id == account.id).first()
+            eff_lang = prof.lang if prof else None
+        except Exception:
+            eff_lang = None
+    return t.TemplateResponse(
+        request,
+        "pages/words.html",
+        {"title": "My Words", "lang": eff_lang or "es"},
+    )
+
+
 @router.get("/reading/current", response_class=HTMLResponse)
 async def current_reading_block(
-    global_db: Session = Depends(get_global_db),
-    account_db: Session = Depends(get_db),
+    global_db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
     """Return the Current Reading block HTML."""
@@ -105,7 +193,7 @@ async def current_reading_block(
 @router.post("/reading/next")
 async def next_text(
     request: Request,
-    db: Session = Depends(get_global_db),
+    db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
     prof = db.query(Profile).filter(Profile.account_id == account.id).first()
@@ -204,7 +292,7 @@ async def next_text(
 
 @router.get("/reading/events/sse")
 def reading_events_sse_route(
-    db: Session = Depends(get_global_db),
+    db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
     """
@@ -220,7 +308,7 @@ def reading_events_sse_route(
 
 @router.post("/reading/sync")
 async def sync_session_state(
-    state: TextSessionState,
+    state: dict,
     db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
@@ -482,13 +570,12 @@ def get_reading_meta(
 async def next_ready(
     wait: Optional[float] = None,
     force: Optional[bool] = None,
-    global_db: Session = Depends(get_global_db),
-    account_db: Session = Depends(get_db),
+    global_db: Session = Depends(get_db),
     account: Account = Depends(_get_current_account),
 ):
     user_content_service = get_text_state_service()
     
-    prof = account_db.query(Profile).filter(Profile.account_id == account.id).first()
+    prof = global_db.query(Profile).filter(Profile.account_id == account.id).first()
     if not prof:
         return {"ready": False, "text_id": None}
 
@@ -496,7 +583,7 @@ async def next_ready(
 
     while True:
         try:
-            account_db.rollback()
+            global_db.rollback()
         except Exception:
             logger.debug("rollback failed in next_ready", exc_info=True)
             
@@ -519,11 +606,10 @@ async def next_ready(
 def next_ready_sse_route(
     wait: Optional[int] = None,
     account: Account = Depends(_get_current_account),
-    global_db: Session = Depends(get_global_db),
-    db: Session = Depends(get_db),
+    global_db: Session = Depends(get_db),
 ):
     """Server-Sent Events endpoint for next text readiness notifications."""
-    return next_ready_sse(wait, account, global_db, db)
+    return next_ready_sse(wait, account, global_db)
 
 
 @router.post("/reading/backfill/{text_id}")
