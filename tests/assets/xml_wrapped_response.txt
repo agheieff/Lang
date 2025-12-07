@@ -1,0 +1,5 @@
+<response>
+{"result": "success", "data": {"message": "Hello world", "count": 42}}
+</response>
+
+Additional context here.

@@ -1,0 +1,9 @@
+{
+    "translations": [
+        {"surface": "casa", "translation": "house", "pos": "NOUN"},
+        {"surface": "perro", "translation": "dog", "pos": "NOUN"},
+        {"surface": "correr", "translation": "run", "pos": "VERB"}
+    ]
+}
+
+// Additional text that breaks the JSON but might be included by LLM

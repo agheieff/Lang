@@ -1,0 +1,7 @@
+Sure, here is your JSON:
+
+```json
+{"text": "Hola mundo. ¿Cómo estás hoy?", "words": ["hola", "mundo", "cómo", "estas", "hoy"], "level": "A2"}
+```
+
+Hope this helps! Let me know if you need any adjustments.
