@@ -10,6 +10,23 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 
+def strip_thinking_blocks(text: str) -> str:
+    """Remove thinking blocks from LLM responses."""
+    original = text or ""
+    cleaned = re.sub(r"<\s*(think|thinking|analysis)[^>]*>.*?<\s*/\s*\1\s*>", "", original, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^(?:\s*(?:Thoughts?|Thinking|Reasoning)\s*:?\s*\n)+", "", cleaned, flags=re.IGNORECASE)
+    
+    fenced_full = re.compile(r"^\s*```[^\n]*\n([\s\S]*?)\n?```\s*$", flags=re.DOTALL)
+    m = fenced_full.match(cleaned.strip())
+    if m:
+        cleaned = m.group(1)
+    
+    cleaned = cleaned.strip()
+    if not cleaned and original.strip():
+        return original.strip()
+    return cleaned
+
+
 # Text Segmentation Functions
 def split_sentences(text: str, lang: str) -> List[Tuple[int, int, str]]:
     """Split text into sentences, returning (start, end, segment) tuples."""

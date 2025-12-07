@@ -8,13 +8,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 
-try:
-    import httpx
-except ImportError:
-    httpx = None
+import httpx
+from server.utils.nlp import strip_thinking_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +51,6 @@ def get_llm_config() -> Dict[str, Any]:
         }
 
 
-def _http_json(url: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, timeout: int = 60) -> Any:
-    body = None
-    hdrs = {"Content-Type": "application/json"}
-    if headers:
-        hdrs.update(headers)
-    if data is not None:
-        body = json.dumps(data).encode("utf-8")
-    req = Request(url, data=body, headers=hdrs, method=method)
-    with urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-
 def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -> Any:
     """Execute a function with exponential backoff for rate limits and transient errors."""
     last_exception = None
@@ -74,24 +58,14 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
     for attempt in range(max_retries + 1):
         try:
             return func(*args, **kwargs)
-        except (HTTPError, URLError, RuntimeError) as e:
+        except httpx.HTTPStatusError as e:
             last_exception = e
             
             should_retry = False
-            status_code = None
-            retry_after = None
-            
-            if isinstance(e, HTTPError):
-                status_code = e.code
-                retry_after = e.headers.get("Retry-After")
-            elif hasattr(e, "status_code"):
-                status_code = getattr(e, "status_code")
+            status_code = e.response.status_code
+            retry_after = e.response.headers.get("Retry-After")
             
             if status_code and (status_code == 429 or 500 <= status_code < 600):
-                should_retry = True
-            elif isinstance(e, URLError):
-                should_retry = True
-            elif isinstance(e, RuntimeError) and "openrouter" in str(e).lower():
                 should_retry = True
                 
             if not should_retry or attempt >= max_retries:
@@ -122,23 +96,6 @@ def _pick_openrouter_model(requested: Optional[str]) -> str:
         return m
     m2 = os.getenv("OPENROUTER_MODEL")
     return m2 or "x-ai/grok-4.1-fast:free"
-
-
-def _strip_thinking_blocks(text: str) -> str:
-    import re
-    original = text or ""
-    cleaned = re.sub(r"<\s*(think|thinking|analysis)[^>]*>.*?<\s*/\s*\1\s*>", "", original, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"^(?:\s*(?:Thoughts?|Thinking|Reasoning)\s*:?\s*\n)+", "", cleaned, flags=re.IGNORECASE)
-    
-    fenced_full = re.compile(r"^\s*```[^\n]*\n([\s\S]*?)\n?```\s*$", flags=re.DOTALL)
-    m = fenced_full.match(cleaned.strip())
-    if m:
-        cleaned = m.group(1)
-    
-    cleaned = cleaned.strip()
-    if not cleaned and original.strip():
-        return original.strip()
-    return cleaned
 
 
 def chat_complete(
@@ -192,7 +149,7 @@ def _call_openrouter(
     max_tokens: int,
     api_key: str,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
-    """Make OpenRouter API call using httpx or urllib fallback."""
+    """Make OpenRouter API call using httpx."""
     model_id = _pick_openrouter_model(model)
     
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -213,18 +170,10 @@ def _call_openrouter(
         headers["HTTP-Referer"] = ref
     
     def _execute_call():
-        if httpx:
-            # Use httpx if available (better connection reuse)
-            client = httpx.Client(timeout=60.0)
-            try:
-                resp = client.post(url, json=data, headers=headers)
-                resp.raise_for_status()
-                resp_dict = resp.json()
-            finally:
-                client.close()
-        else:
-            # Fallback to urllib
-            resp_dict = _http_json(url, "POST", data, headers)
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(url, json=data, headers=headers)
+            resp.raise_for_status()
+            resp_dict = resp.json()
         
         choices = resp_dict.get("choices")
         if not isinstance(choices, list) or len(choices) == 0:
@@ -238,7 +187,7 @@ def _call_openrouter(
         if not isinstance(content, str):
             raise RuntimeError("no content in message")
         
-        return _strip_thinking_blocks(content), resp_dict
+        return strip_thinking_blocks(content), resp_dict
     
     return _retry_with_backoff(_execute_call, max_retries=3)
 
@@ -251,7 +200,7 @@ def _call_local_api(
     max_tokens: int,
     api_key: Optional[str],
 ) -> tuple[str, Optional[Dict[str, Any]]]:
-    """Make local OpenAI-compatible API call."""
+    """Make local OpenAI-compatible API call using httpx."""
     url = f"{base_url.rstrip('/')}/chat/completions"
     
     data = {
@@ -266,10 +215,10 @@ def _call_local_api(
         headers["Authorization"] = f"Bearer {api_key}"
     
     def _execute_call():
-        try:
-            resp_dict = _http_json(url, "POST", data, headers=headers)
-        except (URLError, HTTPError) as e:
-            raise e
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(url, json=data, headers=headers)
+            resp.raise_for_status()
+            resp_dict = resp.json()
         
         choices = resp_dict.get("choices")
         if not isinstance(choices, list) or len(choices) == 0:
@@ -283,6 +232,6 @@ def _call_local_api(
         if not isinstance(content, str):
             raise RuntimeError("no content in message")
         
-        return _strip_thinking_blocks(content), resp_dict
+        return strip_thinking_blocks(content), resp_dict
     
     return _retry_with_backoff(_execute_call, max_retries=3)

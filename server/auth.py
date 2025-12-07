@@ -11,8 +11,7 @@ from typing import Optional, Dict, Any, Union, Sequence, Type
 from dataclasses import dataclass
 import re
 
-from sqlalchemy import Column, Integer, String, Boolean, Text, JSON, DateTime, create_engine
-from sqlalchemy.orm import declarative_base
+from sqlalchemy import Column, Integer, String, Boolean, Text, JSON, DateTime
 from sqlalchemy.sql import func
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Header, status, Request, Cookie
@@ -21,62 +20,10 @@ from passlib.context import CryptContext
 
 
 # =============================================================================
-# Database Models
+# Database Models - Import from central models
 # =============================================================================
 
-Base = declarative_base()
-
-
-class Account(Base):
-    __tablename__ = "accounts"
-
-    id = Column(Integer, primary_key=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
-    password_hash = Column(String(255), nullable=False)
-    
-    # Core fields from original schema
-    is_active = Column(Boolean, default=True, nullable=False)
-    is_verified = Column(Boolean, default=True, nullable=False) 
-    # Unified tier for both access control and features: Free|Standard|Pro|Pro+|BYOK|admin|system
-    subscription_tier = Column(String(50), default="Free", nullable=False)
-    
-    # OpenRouter per-user key management (for paid tiers)
-    openrouter_key_encrypted = Column(Text, nullable=True)  # Fernet-encrypted API key
-    openrouter_key_id = Column(String(128), nullable=True)  # OpenRouter key hash/identifier for management
-    
-    # Extended fields - apps can add their own here
-    # Note: Profile fields (name, timezone, avatar_url) have been removed
-    # Applications should implement their own profile systems
-    
-    # Metadata with JSON fallback for truly flexible data
-    extras = Column(JSON, nullable=True)
-    
-    # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict format expected by AuthRepository interface"""
-        return {
-            "id": self.id,
-            "email": self.email,
-            "is_active": self.is_active,
-            "is_verified": self.is_verified,
-            "subscription_tier": self.subscription_tier,
-            "extras": self.extras,
-            "has_openrouter_key": self.openrouter_key_id is not None,
-        }
-
-
-def create_sqlite_engine(database_url: str = "sqlite:///arcadia_auth.db", echo: bool = False):
-    """Create SQLite engine with proper configuration"""
-    engine = create_engine(database_url, echo=echo, connect_args={"check_same_thread": False})
-    return engine
-
-
-def create_tables(engine):
-    """Create all tables"""
-    Base.metadata.create_all(bind=engine)
+from server.models import Account, Base
 
 
 # =============================================================================

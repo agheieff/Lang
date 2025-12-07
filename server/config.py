@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict
+
+
+@dataclass
+class _Settings:
+    NEXT_READY_MAX_WAIT_SEC: float = float(os.getenv("ARC_NEXT_READY_MAX_WAIT_SEC", "8"))
+    NEXT_READY_GRACE_SEC: float = float(os.getenv("ARC_NEXT_READY_GRACE_SEC", "60"))
+    CONTENT_ONLY_GRACE_SEC: float = float(os.getenv("ARC_CONTENT_ONLY_GRACE_SEC", "120"))
 
 
 # Enum for subscription tiers
@@ -159,3 +167,10 @@ STARTUP_TEXTS_PER_LANG: int = _i("ARC_STARTUP_TEXTS_PER_LANG", 1)  # 0 to disabl
 STARTUP_LANGS: str = os.getenv("ARC_STARTUP_LANGS", "es,zh")  # Comma-separated language codes
 STARTUP_TARGET_LANG: str = os.getenv("ARC_STARTUP_TARGET_LANG", "en")
 STARTUP_TIMEOUT_SEC: int = _i("ARC_STARTUP_TIMEOUT_SEC", 300)  # Max wait time for texts
+
+
+_SETTINGS = _Settings()
+
+
+def get_settings() -> _Settings:
+    return _Settings()

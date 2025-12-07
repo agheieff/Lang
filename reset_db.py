@@ -15,7 +15,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from server.db import recreate_db, get_db_info, DB_PATH, global_engine
-from server.account_db import _ACCOUNTS_DIR
 
 # LLM generation logs directory
 LOG_DIR = Path(os.getenv("ARC_OR_LOG_DIR") or (Path.cwd() / "data" / "llm_stream_logs"))
@@ -92,24 +91,8 @@ def clear_user_tables():
 
 
 def delete_account_dbs():
-    """Delete all per-account database files."""
-    if not _ACCOUNTS_DIR.exists():
-        print("(no accounts directory)")
-        return
-    
-    patterns = ["*.db", "*.db-wal", "*.db-shm"]
-    removed = 0
-    for pat in patterns:
-        for f in _ACCOUNTS_DIR.glob(pat):
-            try:
-                f.unlink()
-                removed += 1
-                print(f"✓ Deleted account DB file: {f.name}")
-            except Exception as e:
-                print(f"! Failed to delete {f}: {e}")
-    
-    if removed == 0:
-        print("(no account DB files found)")
+    """Legacy function - now no-op since we use a single database."""
+    print("(skipping account DB deletion - using single database mode)")
 
 
 def delete_logs():
@@ -179,10 +162,7 @@ def show_db_info():
     print(f"  Size: {info['size_mb']:.2f} MB")
     print(f"  Tables: {', '.join(info['tables'])}")
 
-    account_dbs = list(_ACCOUNTS_DIR.glob("*.db")) if _ACCOUNTS_DIR.exists() else []
-    print(f"  Account databases: {len(account_dbs)}")
-    for db_file in account_dbs:
-        print(f"    - {db_file.name} ({db_file.stat().st_size / 1024:.1f} KB)")
+    print("  Account databases: 0 (using single database mode)")
 
     print(f"  LLM logs dir: {LOG_DIR} {'(exists)' if LOG_DIR.exists() else '(missing)'}")
     print(f"  Session logs dir: {SESSION_LOG_DIR} {'(exists)' if SESSION_LOG_DIR.exists() else '(missing)'}")

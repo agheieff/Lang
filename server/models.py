@@ -131,34 +131,6 @@ class UserModelConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
-class UserProviderConfig(Base):
-    """DEPRECATED: Use UserModelConfig instead. Kept for migration compatibility."""
-    __tablename__ = "user_provider_configs"
-    __table_args__ = (
-        UniqueConstraint("account_id", "provider_name", name="uq_upc_account_provider"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(Integer, index=True)
-    
-    # e.g., "OpenRouter", "Local", "My Custom OpenAI"
-    provider_name: Mapped[str] = mapped_column(String(64))
-    # e.g., "openrouter", "openai_compatible"
-    provider_type: Mapped[str] = mapped_column(String(32))
-    
-    base_url: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    api_key: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    
-    # Optional: Default model ID to use with this provider
-    default_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    
-    # Optional metadata
-    app_title: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    referer: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
 class NextReadyOverride(Base):
     """Override next text ready status for testing/debugging."""
     __tablename__ = "next_ready_overrides"
