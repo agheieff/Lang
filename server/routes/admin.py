@@ -184,7 +184,7 @@ def update_account_tier(
     if not target_account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    target_account.subscription_tier = tier
+    setattr(target_account, "subscription_tier", tier)
     db.commit()
 
     return RedirectResponse(url="/admin/accounts", status_code=303)

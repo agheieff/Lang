@@ -73,7 +73,7 @@ def reading_page(
         .filter(
             ReadingText.lang == profile.lang,
             ReadingText.target_lang == profile.target_lang,
-            ReadingText.status == "ready",
+            *ReadingText.ready_filter(),
         )
         .first()
     )
@@ -156,10 +156,10 @@ def get_text_translations(
 
     items = [
         {
-            "index": t.index,
+            "index": t.segment_index,
             "unit": t.unit,
-            "source": t.source,
-            "translation": t.translation,
+            "source": t.source_text,
+            "translation": t.translated_text,
         }
         for t in translations
     ]
@@ -178,24 +178,76 @@ def get_text_status(
         return {"status": "not_found", "next_ready": False}
 
     return {
-        "status": text.status,
-        "next_ready": text.status == "ready",
+        "status": "ready" if text.is_ready else "not_ready",
+        "next_ready": text.is_ready,
     }
 
 
 @router.post("/reading/word-click")
 def word_click(
     data: dict,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Track word clicks (for now just log)."""
-    return {"status": "ok"}
+    """Track word clicks for SRS."""
+    from server.services.learning import track_word_click
+
+    try:
+        account_id = getattr(request.state, "user_id", None)
+        if not account_id:
+            return {"status": "error", "message": "Not authenticated"}
+
+        text_id = data.get("text_id")
+        word_info = data.get("word_info")
+
+        if not text_id or not word_info:
+            return {"status": "error", "message": "Missing data"}
+
+        # Get profile from account_id
+        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        if not profile:
+            return {"status": "error", "message": "Profile not found"}
+
+        track_word_click(
+            db=db,
+            account_id=account_id,
+            profile_id=profile.id,
+            text_id=text_id,
+            word_info=word_info,
+        )
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @router.post("/reading/save-session")
 def save_session(
     data: dict,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Save reading session (for now just log)."""
-    return {"status": "ok"}
+    """Save reading session and update user level."""
+    from server.services.learning import update_level_from_text
+
+    try:
+        account_id = getattr(request.state, "user_id", None)
+        if not account_id:
+            return {"status": "error", "message": "Not authenticated"}
+
+        text_id = data.get("text_id")
+        interactions = data.get("interactions", [])
+
+        if not text_id:
+            return {"status": "error", "message": "Missing text_id"}
+
+        # Get profile from account_id
+        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        if not profile:
+            return {"status": "error", "message": "Profile not found"}
+
+        new_level, new_var = update_level_from_text(
+            db=db, profile=profile, text_id=text_id, interactions=interactions
+        )
+        return {"status": "ok", "level_value": new_level, "level_var": new_var}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

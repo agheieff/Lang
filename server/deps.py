@@ -43,7 +43,12 @@ def get_current_account(
             logger.warning("Authentication failed: Invalid token payload")
             raise HTTPException(401, "Invalid token payload")
 
-        account_id = int(data.get("sub"))
+        sub = data.get("sub")
+        if not sub:
+            logger.warning("Authentication failed: Missing subject in token payload")
+            raise HTTPException(401, "Invalid token payload")
+
+        account_id = int(sub)
         if account_id <= 0:
             logger.warning(f"Authentication failed: Invalid account ID: {account_id}")
             raise HTTPException(401, "Invalid account ID")
@@ -68,12 +73,15 @@ def get_current_account(
 
     # Ensure a default tier is assigned for newly registered users
     # We do it here because registration happens in a shared router we don't control.
-    if account.subscription_tier is None:
+    tier_value = getattr(account, "subscription_tier", None)
+    if not tier_value:
         try:
-            account.subscription_tier = "Free"
+            setattr(account, "subscription_tier", "Free")
             db.commit()
         except Exception as e:
-            logger.warning(f"Could not assign default tier to account {account_id}: {e}")
+            logger.warning(
+                f"Could not assign default tier to account {account_id}: {e}"
+            )
 
     return account
 
@@ -84,16 +92,20 @@ def require_tier(allowed: set[str]) -> Callable[[Account], Account]:
             logger.error("Authorization misconfiguration: No allowed tiers specified")
             raise HTTPException(500, "Authorization configuration error")
 
-        if not hasattr(account, "subscription_tier") or not account.subscription_tier:
-            logger.warning(f"Authorization failed: Account {account.id} has no subscription tier")
+        tier_value = getattr(account, "subscription_tier", None)
+        if not tier_value:
+            logger.warning(
+                f"Authorization failed: Account {account.id} has no subscription tier"
+            )
             raise HTTPException(403, "No subscription tier assigned")
 
-        if account.subscription_tier not in allowed:
+        if tier_value not in allowed:
             logger.warning(
-                f"Authorization failed: Account {account.id} with tier '{account.subscription_tier}' "
+                f"Authorization failed: Account {account.id} with tier '{tier_value}' "
                 f"not in allowed tiers: {allowed}"
             )
             raise HTTPException(403, "Insufficient subscription tier")
 
         return account
+
     return dep

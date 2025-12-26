@@ -98,7 +98,7 @@ def get_me_profile(
     db: Session = Depends(get_db),
 ):
     """Get current user profile (alias for compatibility with templates)."""
-    return _get_profile_data(account, db)
+    return _profile_data_to_dict(account, db)
 
 
 @router.post("/me/profile")
@@ -122,25 +122,16 @@ def post_me_profile(
         db.commit()
         db.refresh(profile)
 
-    return _get_profile_data(account, db)
+    return _profile_data_to_dict(account, db)
 
 
 @router.get("/profile/api")
-def get_profile(
+def get_profile_endpoint(
     account: Account = Depends(_get_current_account),
     db: Session = Depends(get_db),
 ):
     """Get current user profile."""
-    return _get_profile_data(account, db)
-
-
-@router.get("/profile/api")
-def get_profile(
-    account: Account = Depends(_get_current_account),
-    db: Session = Depends(get_db),
-):
-    """Get current user profile."""
-    return _get_profile_data(account, db)
+    return _profile_data_to_dict(account, db)
 
 
 @router.get("/languages")
@@ -155,7 +146,7 @@ def get_languages():
     }
 
 
-def _get_profile_data(account: Account, db: Session) -> dict:
+def _profile_data_to_dict(account: Account, db: Session) -> dict:
     """Shared function to get profile data."""
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not profile:
@@ -196,7 +187,7 @@ def create_or_update_profile(
         db.commit()
         db.refresh(profile)
 
-    return _get_profile_data(account, db)
+    return _profile_data_to_dict(account, db)
 
 
 @router.put("/profile/api")
@@ -217,4 +208,4 @@ def update_profile(
     db.commit()
     db.refresh(profile)
 
-    return _get_profile_data(account, db)
+    return _profile_data_to_dict(account, db)
