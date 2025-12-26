@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from ..db import get_global_db
+from ..db import get_db
 
 router = APIRouter(tags=["ui"])
 
@@ -47,7 +47,7 @@ def signup_page(request: Request):
 def dashboard_page(
     request: Request,
     no_texts: Optional[str] = None,
-    db: Session = Depends(get_global_db),
+    db: Session = Depends(get_db),
 ):
     """Dashboard/home page - simple landing with links to reading and other features."""
     t = _templates()
@@ -81,7 +81,9 @@ def dashboard_page(
         "title": "Arcadia Lang",
         "has_profile": profile is not None,
         "profile_lang": (profile.lang if profile is not None else None),
-        "profile_lang_name": lang_names.get(profile.lang, profile.lang) if profile else None,
+        "profile_lang_name": lang_names.get(profile.lang, profile.lang)
+        if profile
+        else None,
         "is_authenticated": account_id is not None,
         "no_texts": no_texts == "1",
     }

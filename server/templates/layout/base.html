@@ -14,30 +14,8 @@
     <!-- HTMX JSON extension -->
     <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/json-enc.js"></script>
 
-    <!-- Context menu styles -->
-    <link rel="stylesheet" href="/static/context-menu.css" />
-
-    <!-- Context menu module -->
-    <script src="/static/context-menu.js"></script>
-    <!-- Shared reading helpers -->
-    <script src="/static/reading-utils.js"></script>
-    <!-- Reading context actions -->
-    <script src="/static/reading-context.js"></script>
-    <!-- Reading orchestration controller -->
-    <script src="/static/reading-controller.js"></script>
-    <!-- SSE connection manager for real-time updates -->
-    <script src="/static/reading-sse.js"></script>
-
-    <!-- Minimal initialization -->
-    <script>
-    // Enable htmx boost for SPA-like navigation
-    document.addEventListener('DOMContentLoaded', function() {
-        document.body.setAttribute('hx-boost', 'true');
-        document.body.setAttribute('hx-target', '#content');
-        document.body.setAttribute('hx-select', '#content');
-        document.body.setAttribute('hx-swap', 'innerHTML');
-    });
-    </script>
+    <!-- Consolidated application script -->
+    <script src="/static/app.js"></script>
 </head>
 <body>
     {% include "layout/header.html" %}

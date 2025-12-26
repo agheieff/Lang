@@ -16,21 +16,26 @@ DATA_DIR = Path.cwd() / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "app.db"
 
+
 # ---- SQLite Optimization ----
 def _configure_sqlite_engine(engine: Engine) -> None:
     """Configure SQLite for optimal performance and safety"""
+
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         try:
-            cursor.execute("PRAGMA journal_mode=WAL")      # Better concurrency
-            cursor.execute("PRAGMA synchronous=NORMAL")    # Balance durability/performance
-            cursor.execute("PRAGMA foreign_keys=ON")       # Enforce relationships
-            cursor.execute("PRAGMA busy_timeout=30000")    # 30s timeout
+            cursor.execute("PRAGMA journal_mode=WAL")  # Better concurrency
+            cursor.execute(
+                "PRAGMA synchronous=NORMAL"
+            )  # Balance durability/performance
+            cursor.execute("PRAGMA foreign_keys=ON")  # Enforce relationships
+            cursor.execute("PRAGMA busy_timeout=30000")  # 30s timeout
         except Exception as e:
             logger.warning(f"Failed to set SQLite pragmas: {e}")
         finally:
             cursor.close()
+
 
 # ---- Single Engine & Session Setup ----
 engine = create_engine(
@@ -45,7 +50,12 @@ engine = create_engine(
 _configure_sqlite_engine(engine)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+
+# Base is imported from models to ensure all models are registered
+from .models import Base as ModelBase
+
+Base = ModelBase
+
 
 # ---- Dependency Injection ----
 def get_db() -> Generator[Session, None, None]:
@@ -55,6 +65,7 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
 
 # ---- Database Initialization ----
 def init_db() -> None:
@@ -75,14 +86,15 @@ def init_db() -> None:
 def drop_all_tables() -> None:
     """Drop all tables - useful for development resets"""
     logger.warning("Dropping all database tables!")
-    from . import models  # noqa: F401
     with engine.begin() as conn:
         Base.metadata.drop_all(bind=conn, checkfirst=True)
+
 
 def recreate_db() -> None:
     """Drop and recreate all tables - development only"""
     drop_all_tables()
     init_db()
+
 
 def get_db_info() -> dict:
     """Get database information for debugging"""
@@ -95,6 +107,7 @@ def get_db_info() -> dict:
         "size_mb": DB_PATH.stat().st_size / (1024 * 1024) if DB_PATH.exists() else 0,
         "tables": inspector.get_table_names(),
     }
+
 
 def check_db_health() -> bool:
     """Verify database connectivity"""

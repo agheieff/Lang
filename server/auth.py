@@ -30,6 +30,7 @@ from server.models import Account, Base
 # Pydantic Schemas
 # =============================================================================
 
+
 class AccountCreate(BaseModel):
     email: str
     password: str
@@ -58,6 +59,7 @@ class AccountOut(BaseModel):
 # Password & JWT Security
 # =============================================================================
 
+
 def _argon2_available() -> bool:
     try:
         # Prefer passlib's detection; returns False if backend missing
@@ -74,9 +76,13 @@ def _argon2_available() -> bool:
 def _build_pwd_context() -> CryptContext:
     if _argon2_available():
         # Use argon2 when the backend is present; PBKDF2 for legacy hashes
-        return CryptContext(schemes=["argon2", "pbkdf2_sha256"], default="argon2", deprecated="auto")
+        return CryptContext(
+            schemes=["argon2", "pbkdf2_sha256"], default="argon2", deprecated="auto"
+        )
     # Fallback: only PBKDF2 to avoid runtime MissingBackendError
-    return CryptContext(schemes=["pbkdf2_sha256"], default="pbkdf2_sha256", deprecated="auto")
+    return CryptContext(
+        schemes=["pbkdf2_sha256"], default="pbkdf2_sha256", deprecated="auto"
+    )
 
 
 # Password hashing context: prefer argon2id when available, fallback to PBKDF2
@@ -100,14 +106,25 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(subject: str | int, secret_key: str, algorithm: str = "HS256", expires_minutes: int = 60 * 24 * 7) -> str:
+def create_access_token(
+    subject: str | int,
+    secret_key: str,
+    algorithm: str = "HS256",
+    expires_minutes: int = 60 * 24 * 7,
+) -> str:
     now = datetime.now(timezone.utc)
     exp = now + timedelta(minutes=expires_minutes)
-    payload = {"sub": str(subject), "iat": int(now.timestamp()), "exp": int(exp.timestamp())}
+    payload = {
+        "sub": str(subject),
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+    }
     return jwt.encode(payload, secret_key, algorithm=algorithm)
 
 
-def decode_token(token: str, secret_key: str, algorithms: list[str] = ["HS256"]) -> Optional[dict]:
+def decode_token(
+    token: str, secret_key: str, algorithms: list[str] = ["HS256"]
+) -> Optional[dict]:
     try:
         return jwt.decode(token, secret_key, algorithms=algorithms)
     except JWTError:
@@ -117,6 +134,7 @@ def decode_token(token: str, secret_key: str, algorithms: list[str] = ["HS256"])
 # =============================================================================
 # Auth Utilities & Policy
 # =============================================================================
+
 
 def parse_bearer_token(authorization: Optional[str]) -> Optional[str]:
     """Extract raw token from an Authorization header value.
@@ -132,7 +150,9 @@ def parse_bearer_token(authorization: Optional[str]) -> Optional[str]:
     return val.split(" ", 1)[1]
 
 
-def extract_subject(token: Optional[str], secret_key: str, algorithms: Sequence[str]) -> Optional[Any]:
+def extract_subject(
+    token: Optional[str], secret_key: str, algorithms: Sequence[str]
+) -> Optional[Any]:
     """Decode the token and return the subject claim (sub) when valid.
 
     Returns None if token is missing or invalid.
@@ -140,7 +160,7 @@ def extract_subject(token: Optional[str], secret_key: str, algorithms: Sequence[
     if not token:
         return None
     data = decode_token(token, secret_key, list(algorithms))
-    return (data.get("sub") if data else None)
+    return data.get("sub") if data else None
 
 
 def validate_password(password: str, settings: Any) -> Optional[str]:
@@ -185,6 +205,7 @@ def validate_password(password: str, settings: Any) -> Optional[str]:
 # Auth Repository
 # =============================================================================
 
+
 class AuthRepository(ABC):
     """Abstract repository to be implemented per project/DB.
 
@@ -198,7 +219,9 @@ class AuthRepository(ABC):
     def get_account_credentials(self, email: str) -> Optional[Dict[str, Any]]: ...
 
     @abstractmethod
-    def create_account(self, email: str, password_hash: str, subscription_tier: str = "Free") -> Dict[str, Any]: ...
+    def create_account(
+        self, email: str, password_hash: str, subscription_tier: str = "Free"
+    ) -> Dict[str, Any]: ...
 
     @abstractmethod
     def get_account_by_id(self, account_id: str | int) -> Optional[Dict[str, Any]]: ...
@@ -212,7 +235,9 @@ class MutableAuthRepository(AuthRepository, ABC):
     """
 
     @abstractmethod
-    def update_account(self, account_id: str | int, **updates) -> Optional[Dict[str, Any]]: ...
+    def update_account(
+        self, account_id: str | int, **updates
+    ) -> Optional[Dict[str, Any]]: ...
 
 
 class InMemoryRepo(AuthRepository):
@@ -239,7 +264,7 @@ class InMemoryRepo(AuthRepository):
         key = email.strip().lower()
         acc_id = self.accounts_by_email.get(key)
         acc = self.accounts.get(acc_id) if acc_id else None
-        return (self._public_acc(acc) if acc else None)
+        return self._public_acc(acc) if acc else None
 
     def get_account_credentials(self, email: str) -> Optional[Dict[str, Any]]:
         key = email.strip().lower()
@@ -254,7 +279,9 @@ class InMemoryRepo(AuthRepository):
             "is_verified": bool(acc.get("is_verified", True)),
         }
 
-    def create_account(self, email: str, password_hash: str, subscription_tier: str = "Free") -> Dict[str, Any]:
+    def create_account(
+        self, email: str, password_hash: str, subscription_tier: str = "Free"
+    ) -> Dict[str, Any]:
         if self.find_account_by_email(email):
             raise ValueError("email already registered")
         aid = self._next_acc()
@@ -272,14 +299,98 @@ class InMemoryRepo(AuthRepository):
         self.accounts_by_email[acc["email"]] = aid
         return self._public_acc(acc)
 
-    def get_account_by_id(self, account_id: int) -> Optional[Dict[str, Any]]:
+    def get_account_by_id(self, account_id: str | int) -> Optional[Dict[str, Any]]:
         acc = self.accounts.get(int(account_id))
-        return (self._public_acc(acc) if acc else None)
+        return self._public_acc(acc) if acc else None
+
+
+class SQLAlchemyRepo(AuthRepository):
+    """SQLAlchemy-based auth repository using Account model."""
+
+    def __init__(self, session_factory) -> None:
+        self.session_factory = session_factory
+
+    def _to_dict(self, account: Account) -> Dict[str, Any]:
+        return {
+            "id": account.id,
+            "email": account.email,
+            "password_hash": account.password_hash,
+            "is_active": getattr(account, "is_active", True),
+            "is_verified": getattr(account, "is_verified", True),
+            "subscription_tier": getattr(account, "subscription_tier", "Free"),
+            "extras": getattr(account, "extras", None),
+        }
+
+    def _public_dict(self, account: Account) -> Dict[str, Any]:
+        d = self._to_dict(account)
+        return {k: v for k, v in d.items() if k != "password_hash"}
+
+    def find_account_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        with self.session_factory() as session:
+            account = (
+                session.query(Account)
+                .filter(Account.email == email.strip().lower())
+                .first()
+            )
+            return self._public_dict(account) if account else None
+
+    def get_account_credentials(self, email: str) -> Optional[Dict[str, Any]]:
+        with self.session_factory() as session:
+            account = (
+                session.query(Account)
+                .filter(Account.email == email.strip().lower())
+                .first()
+            )
+            if not account:
+                return None
+            return {
+                "id": account.id,
+                "password_hash": account.password_hash,
+                "is_active": getattr(account, "is_active", True),
+                "is_verified": getattr(account, "is_verified", True),
+            }
+
+    def create_account(
+        self, email: str, password_hash: str, subscription_tier: str = "Free"
+    ) -> Dict[str, Any]:
+        with self.session_factory() as session:
+            if (
+                session.query(Account)
+                .filter(Account.email == email.strip().lower())
+                .first()
+            ):
+                raise ValueError("email already registered")
+            account = Account(
+                email=email.strip().lower(),
+                password_hash=password_hash,
+                is_active=True,
+                is_verified=True,
+                subscription_tier=subscription_tier,
+            )
+            session.add(account)
+            session.commit()
+            session.refresh(account)
+            return self._public_dict(account)
+
+    def get_account_by_id(self, account_id: str | int) -> Optional[Dict[str, Any]]:
+        with self.session_factory() as session:
+            account = (
+                session.query(Account).filter(Account.id == int(account_id)).first()
+            )
+            return self._public_dict(account) if account else None
+
+
+def create_sqlite_repo(db_path: str) -> SQLAlchemyRepo:
+    """Create a SQLAlchemy auth repository for SQLite."""
+    from server.db import SessionLocal
+
+    return SQLAlchemyRepo(SessionLocal)
 
 
 # =============================================================================
 # FastAPI Router
 # =============================================================================
+
 
 @dataclass
 class AuthSettings:
@@ -324,14 +435,16 @@ def create_auth_router(
     r = APIRouter(prefix="/auth", tags=["auth"])
 
     def _to_account_out(acc: dict[str, Any]) -> AccountOut:
-        return AccountPublic.model_validate({
-            "id": acc.get("id"),
-            "email": acc.get("email"),
-            "is_active": bool(acc.get("is_active", True)),
-            "is_verified": bool(acc.get("is_verified", True)),
-            "subscription_tier": acc.get("subscription_tier", "Free"),
-            "extras": acc.get("extras"),
-        })
+        return AccountPublic.model_validate(
+            {
+                "id": acc.get("id"),
+                "email": acc.get("email"),
+                "is_active": bool(acc.get("is_active", True)),
+                "is_verified": bool(acc.get("is_verified", True)),
+                "subscription_tier": acc.get("subscription_tier", "Free"),
+                "extras": acc.get("extras"),
+            }
+        )
 
     @r.post("/register", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
     def register(payload: AccountCreate):
@@ -345,7 +458,7 @@ def create_auth_router(
         # Default all new accounts to admin for development
         # TODO: Change to "Free" in production
         acc = repo.create_account(
-            email, 
+            email,
             hash_password(payload.password),
             subscription_tier="admin",
         )
@@ -355,16 +468,24 @@ def create_auth_router(
     def login(payload: LoginIn):
         email = payload.email.strip().lower()
         creds = repo.get_account_credentials(email)
-        if not creds or not verify_password(payload.password, creds.get("password_hash", "")):
+        if not creds or not verify_password(
+            payload.password, creds.get("password_hash", "")
+        ):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         if not creds.get("is_active", True):
             raise HTTPException(status_code=403, detail="Inactive account")
-        token = create_access_token(creds["id"], settings.secret_key, settings.algorithm, settings.access_expire_minutes)
+        token = create_access_token(
+            creds["id"],
+            settings.secret_key,
+            settings.algorithm,
+            settings.access_expire_minutes,
+        )
         return TokenOut(access_token=token)
 
     @r.get("/logout")
     def logout():
         from fastapi.responses import RedirectResponse
+
         resp = RedirectResponse(url="/", status_code=302)
         try:
             resp.delete_cookie("access_token", path="/")
@@ -382,7 +503,9 @@ def create_auth_router(
         acc = repo.get_account_by_id(sub)  # type: ignore[arg-type]
         if not acc:
             raise HTTPException(status_code=401, detail="User not found")
-        return r
+        return _to_account_out(acc)
+
+    return r
 
 
 # =============================================================================
@@ -398,7 +521,7 @@ from fastapi import HTTPException
 
 class CookieUserMiddleware(BaseHTTPMiddleware):
     """Middleware that loads user from JWT cookie and adds to request state."""
-    
+
     def __init__(
         self,
         app,
@@ -414,40 +537,46 @@ class CookieUserMiddleware(BaseHTTPMiddleware):
         self.secret_key = secret_key
         self.algorithm = algorithm
         self.cookie_name = cookie_name
-    
+
     async def dispatch(self, request: Request, call_next):
         # Try to get token from cookie
         token = request.cookies.get(self.cookie_name)
-        
+
         if token:
             try:
                 # Decode token
                 data = decode_token(token, self.secret_key, [self.algorithm])
                 if data and "sub" in data:
                     user_id = data["sub"]
-                    
+
                     # Load user from database
                     with self.session_factory() as session:
-                        user = session.query(self.UserModel).filter(
-                            self.UserModel.id == user_id
-                        ).first()
-                        
+                        user = (
+                            session.query(self.UserModel)
+                            .filter(self.UserModel.id == user_id)
+                            .first()
+                        )
+
                         if user:
                             # Add user to request state
                             request.state.user = user
                             # Support both dict and attribute access
-                            request.state.user_id = getattr(user, 'id', user.get('id') if isinstance(user, dict) else None)
+                            request.state.user_id = getattr(
+                                user,
+                                "id",
+                                user.get("id") if isinstance(user, dict) else None,
+                            )
                             request.state.account_id = request.state.user_id
                         else:
                             # Invalid user - clear cookie
                             response = await call_next(request)
                             response.delete_cookie(self.cookie_name, path="/")
                             return response
-                            
+
             except Exception as e:
                 # Invalid token - continue without user
                 pass
-        
+
         # Continue processing
         response = await call_next(request)
         return response
