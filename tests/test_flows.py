@@ -21,6 +21,7 @@ def test_user_registration_flow(client, db):
     # Account.to_dict() doesn't include access_token, just account info
     assert "id" in result
     assert result["email"] == unique_email
+    account_id = result["id"]
 
     token = create_access_token(
         subject=str(result["id"]), secret_key="dev-secret-change"
@@ -37,7 +38,12 @@ def test_user_registration_flow(client, db):
     # 3. Verify profile was created in database
     from server.models import Profile
 
-    profile = db.query(Profile).filter(Profile.account_id > 0).first()
+    profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+    print(f"Debug: account_id={account_id}, found profile={profile}")
+    if profile:
+        print(
+            f"Debug: profile.lang={profile.lang}, profile.target_lang={profile.target_lang}"
+        )
     assert profile is not None
     assert profile.lang == "es"
     assert profile.target_lang == "en"
@@ -45,7 +51,7 @@ def test_user_registration_flow(client, db):
 
 @patch("server.services.content.chat_complete_with_raw")
 def test_reading_flow(
-    mock_chat_complete_with_raw, client, test_user, mock_llm_response
+    mock_chat_complete_with_raw, client, db, test_user, mock_llm_response
 ):
     """Test the complete reading flow from generation to interaction."""
     account, profile = test_user

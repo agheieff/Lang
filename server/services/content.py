@@ -23,10 +23,11 @@ from server.llm.prompts import (
 )
 from server.utils.nlp import (
     extract_text_from_llm_response,
-    extract_word_translations,
-    extract_structured_translation,
+    parse_csv_word_translations,
+    parse_csv_translation,
+    parse_csv_title_translation,
     split_sentences,
-    compute_spans,
+    compute_word_spans,
 )
 from server.models import (
     Profile,
@@ -75,7 +76,34 @@ async def generate_text_content(
             model=model,
         )
 
-        content = extract_text_from_llm_response(response[0] if response else "")
+        raw_content = response[0] if response else ""
+
+        # Parse CSV response: title|text
+        title = None
+        content = ""
+
+        lines = raw_content.strip().split("\n")
+        for line in lines:
+            line = line.strip()
+            if "|" in line and not line.startswith("#"):
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    header = parts[0].strip().lower()
+                    if header == "title":
+                        continue  # Skip header
+                    # Check if this looks like title|text format
+                    first_part = parts[0].strip()
+                    if not title and len(first_part) < 100:  # Likely a title
+                        title = first_part
+                        content = parts[1].strip() if len(parts) > 1 else ""
+                    elif content and len(parts) > 1:  # Append to content
+                        content += "\n" + parts[1].strip()
+                    elif not content:  # Just text content
+                        content = parts[0].strip()
+
+        # Fallback: treat entire response as content
+        if not content:
+            content = extract_text_from_llm_response(raw_content)
 
         if not content:
             logger.error(f"Failed to extract content from LLM response: {response}")
@@ -87,6 +115,7 @@ async def generate_text_content(
                 lang=lang,
                 target_lang=target_lang,
                 content=content,
+                title=title,
                 source="llm",
                 ci_target=ci_target,
                 request_sent_at=datetime.now(timezone.utc),
@@ -102,11 +131,12 @@ async def generate_text_content(
             db.commit()
             db.refresh(rt)
 
-            # Extract title
-            title = _extract_title(content, lang)
-            if title:
-                rt.title = title
-                db.commit()
+            # Fallback title extraction if not in CSV
+            if not title:
+                title = _extract_title(content, lang)
+                if title:
+                    rt.title = title
+                    db.commit()
 
             logger.info(f"Generated text content {rt.id} for account {account_id}")
             return rt
@@ -164,71 +194,58 @@ async def _generate_word_translations(
         if not content_str:
             return True
 
-        spans = compute_spans(content_str, [{"word": w} for w in content_str.split()])
+        prompt = build_word_translation_prompt(
+            source_lang=lang,
+            target_lang=target_lang,
+            text=content_str,
+        )
 
-        if not spans:
+        model = _pick_openrouter_model()
+        response = chat_complete_with_raw(
+            messages=prompt,
+            model=model,
+        )
+
+        word_data = parse_csv_word_translations(response[0] if response else "")
+
+        if not word_data:
+            logger.warning(f"No word data parsed from LLM response")
             return True
 
-        batch_size = 10
-        for i in range(0, len(spans), batch_size):
-            batch = spans[i : i + batch_size]
+        # Compute spans for all words
+        all_spans = compute_word_spans(content_str, word_data)
 
-            word_list = []
-            for j, span in enumerate(batch):
-                if span and len(span) == 2:
-                    word_list.append(
-                        {
-                            "surface": content_str[span[0] : span[1]],
-                            "span_start": span[0],
-                            "span_end": span[1],
-                        }
-                    )
-
-            if not word_list:
+        for word, spans in zip(word_data, all_spans):
+            if not spans:
                 continue
 
-            prompt = build_word_translation_prompt(
-                source_lang=lang,
+            surface = word["surface"]
+            lemma = word.get("lemma") or surface
+            pos = word.get("pos") or "UNKNOWN"
+            pinyin = word.get("pinyin")
+            translation = word.get("translation")
+
+            # For non-continuous words, use the first span for span_start/end
+            # Store full spans in grammar field for frontend use
+            span_start, span_end = spans[0]
+
+            gloss = ReadingWordGloss(
+                text_id=rt.id,
+                lang=lang,
                 target_lang=target_lang,
-                text=content_str,
+                surface=surface,
+                lemma=lemma,
+                pos=pos,
+                pinyin=pinyin,
+                translation=translation,
+                grammar={"spans": spans} if len(spans) > 1 else {},
+                span_start=span_start,
+                span_end=span_end,
             )
 
-            model = _pick_openrouter_model()
-            response = chat_complete_with_raw(
-                messages=prompt,
-                model=model,
-            )
+            db.add(gloss)
 
-            translations = extract_word_translations(response[0] if response else "")
-
-            for word_data in word_list:
-                surface = word_data["surface"]
-                start = word_data["span_start"]
-                end = word_data["span_end"]
-
-                translation = None
-                for trans in translations:
-                    if trans.get("surface") == surface:
-                        translation = trans.get("translation")
-                        break
-
-                gloss = ReadingWordGloss(
-                    text_id=rt.id,
-                    lang=lang,
-                    target_lang=target_lang,
-                    surface=surface,
-                    lemma=surface,
-                    pos="UNKNOWN",
-                    pinyin=None,
-                    translation=translation,
-                    grammar={},
-                    span_start=start,
-                    span_end=end,
-                )
-
-                db.add(gloss)
-
-            db.commit()
+        db.commit()
 
         return True
 
@@ -270,20 +287,21 @@ async def _generate_sentence_translations(
             model=model,
         )
 
-        translations = extract_structured_translation(response[0] if response else "")
+        translations = parse_csv_translation(response[0] if response else "")
+
+        # Create mapping from source text to translation
+        trans_map = {t["source"]: t["translation"] for t in translations}
 
         for i, (start, end, seg) in enumerate(sentences):
+            trans_text = trans_map.get(seg, seg)
+
             trans = ReadingTextTranslation(
                 text_id=rt.id,
                 target_lang=target_lang,
                 unit="sentence",
                 segment_index=i,
-                span_start=start,
-                span_end=end,
                 source_text=seg,
-                translated_text=str(translations.get(str(i), seg))
-                if isinstance(translations, dict)
-                else seg,
+                translated_text=trans_text,
                 provider="llm",
                 model=model,
             )
@@ -432,8 +450,20 @@ def _get_word_list_from_profile(profile: Profile) -> List[Dict]:
 
 
 def _extract_title(content: str, lang: str) -> Optional[str]:
-    """Extract title from generated text content."""
-    # Simple title extraction - first sentence or first 50 chars
+    """Extract title from generated text content (CSV format)."""
+    # Try CSV format first: title|text
+    lines = content.strip().split("\n")
+    for line in lines:
+        if "|" in line and not line.startswith("#"):
+            parts = line.split("|")
+            if len(parts) >= 2 and parts[0].strip().lower() == "title":
+                # Header row, get next line
+                continue
+            if len(parts) >= 2 and parts[0].strip():
+                # This is the title line
+                return parts[0].strip()
+
+    # Fallback to simple extraction
     sentences = content.split(".")
     if sentences and len(sentences[0].strip()) > 10:
         return sentences[0].strip()

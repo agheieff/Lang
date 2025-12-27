@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -24,6 +25,29 @@ from .routes.admin import router as admin_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+
+    # Start background worker
+    try:
+        from .services.background_worker import (
+            start_background_worker,
+            startup_generation,
+        )
+
+        # Run startup pre-generation
+        startup_langs = os.getenv("ARC_STARTUP_LANGS", "").split(",")
+        startup_langs = [l.strip() for l in startup_langs if l.strip()]
+        texts_per_lang = int(os.getenv("ARC_STARTUP_TEXTS_PER_LANG", "2"))
+
+        if startup_langs:
+            asyncio.create_task(startup_generation(startup_langs, texts_per_lang))
+
+        # Start background worker loop
+        start_background_worker()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).error(f"Failed to start background worker: {e}")
+
     yield
 
 

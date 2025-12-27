@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -9,7 +10,13 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy.orm import Session
 
 from server.db import get_db
-from server.models import Profile, ReadingText, ReadingTextTranslation, ReadingWordGloss
+from server.models import (
+    Profile,
+    ReadingText,
+    ReadingTextTranslation,
+    ReadingWordGloss,
+    ProfileTextRead,
+)
 from server.deps import get_current_account
 
 router = APIRouter(tags=["reading"])
@@ -67,16 +74,10 @@ def reading_page(
             "<div><h1>No profile</h1><p><a href='/profile'>Create a profile</a></p></div>"
         )
 
-    # Check if there are any ready texts
-    ready_text = (
-        db.query(ReadingText)
-        .filter(
-            ReadingText.lang == profile.lang,
-            ReadingText.target_lang == profile.target_lang,
-            *ReadingText.ready_filter(),
-        )
-        .first()
-    )
+    # Use recommendation engine to select best text
+    from server.services.recommendation import select_best_text
+
+    ready_text = select_best_text(db, profile)
 
     if not ready_text:
         # Use demo text
@@ -88,6 +89,10 @@ def reading_page(
             "text_id": None,
         }
     else:
+        # Mark text as current
+        profile.current_text_id = ready_text.id
+        db.commit()
+
         # Load the ready text
         word_glosses = (
             db.query(ReadingWordGloss)
@@ -108,7 +113,7 @@ def reading_page(
         ]
 
         context = {
-            "title": "Reading Practice",
+            "title": ready_text.title or "Reading Practice",
             "profile": profile,
             "text_content": ready_text.content,
             "is_demo": False,
@@ -134,8 +139,66 @@ def reading_next(
     db: Session = Depends(get_db),
 ):
     """Mark current text as read and move to next."""
-    # For now, just return a success
-    return JSONResponse({"status": "ok", "message": "Moving to next text"})
+    from server.services.recommendation import select_best_text
+    from server.models import ProfileTextRead
+
+    try:
+        # Get current user
+        account_id = None
+        try:
+            u = getattr(request.state, "user", None)
+            if u is not None:
+                account_id = getattr(u, "id", None)
+        except Exception:
+            pass
+
+        if not account_id:
+            return JSONResponse({"status": "error", "message": "Not authenticated"})
+
+        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        if not profile or not profile.current_text_id:
+            return JSONResponse({"status": "error", "message": "No current text"})
+
+        # Mark current text as read
+        existing = (
+            db.query(ProfileTextRead)
+            .filter(
+                ProfileTextRead.profile_id == profile.id,
+                ProfileTextRead.text_id == profile.current_text_id,
+            )
+            .first()
+        )
+
+        if existing:
+            existing.read_count += 1
+            existing.last_read_at = datetime.now(timezone.utc)
+        else:
+            read_entry = ProfileTextRead(
+                profile_id=profile.id,
+                text_id=profile.current_text_id,
+                read_count=1,
+            )
+            db.add(read_entry)
+
+        # Select next text
+        next_text = select_best_text(db, profile)
+
+        if next_text:
+            profile.current_text_id = next_text.id
+
+        db.commit()
+
+        return JSONResponse(
+            {
+                "status": "ok",
+                "message": "Moving to next text",
+                "next_text_id": next_text.id if next_text else None,
+            }
+        )
+
+    except Exception as e:
+        db.rollback()
+        return JSONResponse({"status": "error", "message": str(e)})
 
 
 @router.get("/reading/{text_id}/translations")

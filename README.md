@@ -72,10 +72,14 @@ Visit `http://localhost:8000`, create an account, set up a profile with your tar
 - `ARC_OR_WORDS_ATTEMPTS` - Retry count for OpenRouter word requests
 
 ### Startup Pre-generation
-- `ARC_SYSTEM_API_KEY` - API key for system account to run startup generation
-- `ARC_STARTUP_LANGS` - Languages to pre-generate on startup (e.g., `"zh,es"`)
-- `ARC_STARTUP_TARGET_LANG` - Target language for translations (default: `"en"`)
+- `ARC_STARTUP_LANGS` - Comma-separated languages to pre-generate on startup (e.g., `"es,zh"`)
 - `ARC_STARTUP_TEXTS_PER_LANG` - Texts to generate per language on startup (default: 2)
+
+Example:
+```bash
+export ARC_STARTUP_LANGS="es,zh"
+export ARC_STARTUP_TEXTS_PER_LANG="3"
+```
 
 ## Development
 

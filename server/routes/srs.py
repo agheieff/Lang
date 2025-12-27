@@ -18,9 +18,60 @@ def srs_urgent():
 
 
 @router.get("/srs/stats")
-def get_srs_stats():
-    """Get SRS statistics - placeholder for now."""
-    return {"total": 0, "by_p": {}, "by_S": {}, "by_D": {}}
+def get_srs_stats(
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Get SRS statistics."""
+    from server.models import Profile, Lexeme, ProfileTextRead, ReadingText
+
+    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not profile:
+        return {
+            "level_value": 0.0,
+            "level_var": 1.0,
+            "level_code": None,
+            "total_words": 0,
+            "words_by_level": {},
+            "texts_read": 0,
+        }
+
+    # Word statistics
+    lexemes = (
+        db.query(Lexeme)
+        .filter(
+            Lexeme.account_id == account.id,
+            Lexeme.profile_id == profile.id,
+        )
+        .all()
+    )
+
+    total_words = len(lexemes)
+
+    words_by_level = {}
+    for lex in lexemes:
+        level = lex.level_code or "Unknown"
+        words_by_level[level] = words_by_level.get(level, 0) + 1
+
+    # Texts read
+    texts_read = (
+        db.query(ProfileTextRead)
+        .filter(ProfileTextRead.profile_id == profile.id)
+        .count()
+    )
+
+    # Words per text average
+    words_per_text = round(total_words / texts_read, 1) if texts_read > 0 else 0
+
+    return {
+        "level_value": profile.level_value,
+        "level_var": profile.level_var,
+        "level_code": profile.level_code,
+        "total_words": total_words,
+        "words_by_level": words_by_level,
+        "texts_read": texts_read,
+        "words_per_text": words_per_text,
+    }
 
 
 @router.get("/srs/level")
@@ -43,10 +94,44 @@ def get_srs_words(
     account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
-    """Get SRS words for the current user."""
+    """Get SRS words for current user."""
+    from server.models import Lexeme
+
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
     if not profile:
         return []
+
+    query = db.query(Lexeme).filter(
+        Lexeme.account_id == account.id,
+        Lexeme.profile_id == profile.id,
+    )
+
+    if lang:
+        query = query.filter(Lexeme.lang == lang)
+
+    if min_S is not None:
+        query = query.filter(Lexeme.stability >= min_S)
+
+    lexemes = query.order_by(Lexeme.next_due_at.asc()).limit(100).all()
+
+    items = []
+    for lex in lexemes:
+        items.append(
+            {
+                "id": lex.id,
+                "lemma": lex.lemma,
+                "surface": lex.surface,
+                "pos": lex.pos,
+                "n": lex.exposures,
+                "p_click": lex.clicks,
+                "stability": lex.stability,
+                "level_code": lex.level_code,
+                "freq_rank": lex.freq_rank,
+                "next_due_at": lex.next_due_at.isoformat() if lex.next_due_at else None,
+            }
+        )
+
+    return items
 
     # For now, return empty list - SRS implementation pending
     return []
