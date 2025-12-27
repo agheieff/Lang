@@ -180,7 +180,6 @@
     async function toggleTranslation() {
         const panel = $('translation-panel');
         if (!panel) return;
-
         const show = panel.classList.contains('hidden');
         panel.hidden = !show;
         panel.classList.toggle('hidden', !show);
@@ -190,6 +189,58 @@
         if (toggleBtn) {
             toggleBtn.setAttribute('aria-expanded', String(show));
         }
+
+        // When opening, fetch translation if missing
+        if (show) {
+            // Track full translation view
+            trackTranslationView('full');
+
+            const textEl = $('translation-text');
+            if (textEl && !textEl.textContent.trim()) {
+                textEl.textContent = 'Loading translation...';
+
+                // Fetch full text translation
+                const mainTextEl = $('reading-text');
+                const textId = mainTextEl ? mainTextEl.dataset.textId : null;
+
+                if (textId) {
+                    try {
+                        const res = await fetchWithTimeout(`/reading/${textId}/translations?unit=text`, {
+                            headers: { 'Accept': 'application/json' }
+                        });
+
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data.items && data.items.length > 0) {
+                                // Find longest translation (likely body, not title)
+                                const items = data.items.sort((a, b) =>
+                                    (b.translation?.length || 0) - (a.translation?.length || 0)
+                                );
+                                const best = items[0];
+
+                                if (best && best.translation) {
+                                    textEl.textContent = best.translation;
+
+                                    // Cache it in session data for persistence
+                                    const sessionKey = `arc_current_session_${textId}`;
+                                    const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
+                                    sessionData.full_translation = best.translation;
+                                    localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+                                    return;
+                                }
+                            }
+                        }
+                        textEl.textContent = 'Translation is not ready yet.';
+                    } catch (error) {
+                        console.error('Error fetching translation:', error);
+                        textEl.textContent = 'Error loading translation.';
+                    }
+                } else {
+                    textEl.textContent = 'No text available.';
+                }
+            }
+        }
+    }
 
         // When opening the panel, fetch translation if missing
         if (show) {
@@ -648,12 +699,39 @@
         _handleWordHover(event, element) {
             const wordData = this._extractWordData(element);
             if (!wordData || !wordData.translation) return;
-            
+
+            // Track translation view on hover
+            trackTranslationView('word', wordData);
+
             showTooltip(
                 `<div class="font-medium">${wordData.surface}</div><div class="text-gray-600">${wordData.translation}</div>`,
                 event.pageX,
                 event.pageY
             );
+        }
+
+        _handleWordClick(event, element) {
+            const wordData = this._extractWordData(element);
+            if (!wordData) return;
+
+            // Track word click
+            trackWordClick(wordData);
+            trackTranslationView('word', wordData);
+
+            // Show translation in tooltip
+            if (wordData.translation) {
+                showTooltip(
+                    `<div class="font-medium">${wordData.surface}</div><div class="text-gray-600">${wordData.translation}</div>`,
+                    event.pageX,
+                    event.pageY
+                );
+            } else {
+                showTooltip(
+                    `<div class="font-medium">${wordData.surface}</div><div class="text-gray-500">Translation not available</div>`,
+                    event.pageX,
+                    event.pageY
+                );
+            }
         }
         
         _handleWordClick(event, element) {
@@ -703,19 +781,125 @@
     // Data Tracking and Persistence
     // =============================================================================
     
+    function initializeSessionData() {
+        if (!AppState.textId) return null;
+        
+        const sessionKey = `arc_current_session_${AppState.textId}`;
+        let sessionData = localStorage.getItem(sessionKey);
+        
+        if (!sessionData) {
+            sessionData = {
+                text_id: AppState.textId,
+                exposed_at: Date.now(),
+                words: [],
+                sentences: [],
+                full_translation_views: []
+            };
+            localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+            console.log('[Session] Initialized new session with exposed_at:', sessionData.exposed_at);
+        } else {
+            sessionData = JSON.parse(sessionData);
+            console.log('[Session] Loaded existing session:', sessionData);
+        }
+        
+        return sessionKey;
+    }
+    
     function trackWordClick(wordData) {
         if (!AppState.textId || !AppState.accountId) return;
         
         try {
-            const sessionKey = localStorage.getItem(`arc_current_session_${AppState.textId}`);
-            if (!sessionKey) return;
+            const sessionKey = `arc_current_session_${AppState.textId}`;
+            initializeSessionData();
             
             const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
             
-            // Initialize word tracking if not present
-            if (!sessionData.wordInteractions) {
-                sessionData.wordInteractions = [];
+            // Initialize arrays if not present
+            if (!sessionData.words) {
+                sessionData.words = [];
             }
+            if (!sessionData.sentences) {
+                sessionData.sentences = [];
+            }
+            if (!sessionData.full_translation_views) {
+                sessionData.full_translation_views = [];
+            }
+            
+            // Add or update word interaction
+            const existingWord = sessionData.words.find(
+                w => w.surface === wordData.surface && w.span_start === wordData.span_start
+            );
+            
+            if (existingWord) {
+                existingWord.clicked = true;
+                existingWord.click_count = (existingWord.click_count || 0) + 1;
+            } else {
+                sessionData.words.push({
+                    surface: wordData.surface,
+                    lemma: wordData.lemma,
+                    pos: wordData.pos,
+                    span_start: wordData.span_start,
+                    span_end: wordData.span_end,
+                    clicked: true,
+                    click_count: 1,
+                    timestamp: Date.now()
+                });
+            }
+            
+            // Save updated session data
+            localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+            
+            // Send to server (in background)
+            navigator.sendBeacon('/reading/word-click', JSON.stringify({
+                text_id: AppState.textId,
+                word_data: wordData,
+                session_data: sessionData
+            }));
+            
+        } catch (error) {
+            console.error('Error tracking word click:', error);
+        }
+    }
+    
+    function trackTranslationView(type = 'full', wordData = null) {
+        if (!AppState.textId) return;
+
+        try {
+            const sessionKey = `arc_current_session_${AppState.textId}`;
+            initializeSessionData();
+            const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
+
+            if (type === 'full') {
+                // Track full text translation view
+                if (!sessionData.full_translation_views) {
+                    sessionData.full_translation_views = [];
+                }
+                sessionData.full_translation_views.push({
+                    timestamp: Date.now()
+                });
+            } else if (type === 'word' && wordData) {
+                // Track word translation view
+                if (!sessionData.words) {
+                    sessionData.words = [];
+                }
+
+                // Find and update word with translation_viewed
+                const word = sessionData.words.find(
+                    w => w.surface === wordData.surface && w.span_start === wordData.span_start
+                );
+
+                if (word) {
+                    word.translation_viewed = true;
+                    word.translation_viewed_at = Date.now();
+                }
+            }
+
+            localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+            console.log(`[Session] Tracked ${type} translation view`);
+        } catch (error) {
+            console.error('Error tracking translation view:', error);
+        }
+    }
             
             // Add or update word interaction
             const existingInteraction = sessionData.wordInteractions.find(

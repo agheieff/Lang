@@ -162,6 +162,192 @@ def track_word_exposure(
         db.rollback()
 
 
+def track_interactions_from_session(
+    db: Session,
+    account_id: int,
+    profile_id: int,
+    text_id: int,
+    interactions: List[Dict],
+) -> None:
+    """Track all interactions from a reading session."""
+    try:
+        for interaction in interactions:
+            surface = interaction.get("surface", "")
+            lemma = interaction.get("lemma", surface)
+            pos = interaction.get("pos", "NOUN")
+            span_start = interaction.get("span_start", 0)
+            span_end = interaction.get("span_end", 0)
+            clicked = interaction.get("clicked", False)
+            click_count = interaction.get("click_count", 0)
+            translation_viewed = interaction.get("translation_viewed", False)
+
+            # Get or create lexeme
+            lexeme = (
+                db.query(Lexeme)
+                .filter(
+                    Lexeme.account_id == account_id,
+                    Lexeme.profile_id == profile_id,
+                    Lexeme.lang == "es",  # TODO: Get from text
+                    Lexeme.lemma == lemma,
+                    Lexeme.pos == pos,
+                )
+                .first()
+            )
+
+            if not lexeme:
+                lexeme = Lexeme(
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    lang="es",  # TODO: Get from text
+                    lemma=lemma,
+                    pos=pos,
+                    surface=surface,
+                    first_seen_at=datetime.now(timezone.utc),
+                    last_seen_at=datetime.now(timezone.utc),
+                    exposures=1,
+                    clicks=click_count,
+                    distinct_texts=1,
+                )
+                db.add(lexeme)
+            else:
+                # Update existing lexeme
+                if translation_viewed:
+                    # Word was looked up for translation
+                    if (
+                        not lexeme.last_clicked_at
+                        or (
+                            datetime.now(timezone.utc) - lexeme.last_clicked_at
+                        ).total_seconds()
+                        > 3600
+                    ):
+                        # Only count if more than 1 hour since last click
+                        lexeme.last_clicked_at = datetime.now(timezone.utc)
+                        lexeme.importance = min(1.0, lexeme.importance + 0.1)
+
+                if clicked:
+                    lexeme.clicks += click_count
+
+            # Update SRS parameters
+            _update_srs_parameters(lexeme, clicked=clicked)
+
+            # Create word event for each click
+            if clicked:
+                event = WordEvent(
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    event_type="click",
+                    surface=surface,
+                    span_start=span_start,
+                    span_end=span_end,
+                    text_id=text_id,
+                    meta={
+                        "lemma": lemma,
+                        "pos": pos,
+                        "translation_viewed": translation_viewed,
+                    },
+                )
+                db.add(event)
+
+        db.commit()
+
+    except Exception as e:
+        logger.error(f"Error tracking interactions: {e}")
+        db.rollback()
+
+
+def track_interactions_from_session(
+    db: Session,
+    account_id: int,
+    profile_id: int,
+    text_id: int,
+    interactions: List[Dict],
+) -> None:
+    """Track all interactions from a reading session."""
+    try:
+        for interaction in interactions:
+            surface = interaction.get("surface", "")
+            lemma = interaction.get("lemma", surface)
+            pos = interaction.get("pos", "NOUN")
+            span_start = interaction.get("span_start", 0)
+            span_end = interaction.get("span_end", 0)
+            clicked = interaction.get("clicked", False)
+            click_count = interaction.get("click_count", 0)
+            translation_viewed = interaction.get("translation_viewed", False)
+
+            # Get or create lexeme
+            lexeme = (
+                db.query(Lexeme)
+                .filter(
+                    Lexeme.account_id == account_id,
+                    Lexeme.profile_id == profile_id,
+                    Lexeme.lang == "es",  # TODO: Get from text
+                    Lexeme.lemma == lemma,
+                    Lexeme.pos == pos,
+                )
+                .first()
+            )
+
+            if not lexeme:
+                lexeme = Lexeme(
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    lang="es",  # TODO: Get from text
+                    lemma=lemma,
+                    pos=pos,
+                    surface=surface,
+                    first_seen_at=datetime.now(timezone.utc),
+                    last_seen_at=datetime.now(timezone.utc),
+                    exposures=1,
+                    clicks=click_count,
+                    distinct_texts=1,
+                )
+                db.add(lexeme)
+            else:
+                # Update existing lexeme
+                if translation_viewed:
+                    # Word was looked up for translation
+                    if (
+                        not lexeme.last_clicked_at
+                        or (
+                            datetime.now(timezone.utc) - lexeme.last_clicked_at
+                        ).total_seconds()
+                        > 3600
+                    ):
+                        # Only count if more than 1 hour since last click
+                        lexeme.last_clicked_at = datetime.now(timezone.utc)
+                        lexeme.importance = min(1.0, lexeme.importance + 0.1)
+
+                if clicked:
+                    lexeme.clicks += click_count
+
+            # Update SRS parameters
+            _update_srs_parameters(lexeme, clicked=clicked)
+
+            # Create word event for each click
+            if clicked:
+                event = WordEvent(
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    event_type="click",
+                    surface=surface,
+                    span_start=span_start,
+                    span_end=span_end,
+                    text_id=text_id,
+                    meta={
+                        "lemma": lemma,
+                        "pos": pos,
+                        "translation_viewed": translation_viewed,
+                    },
+                )
+                db.add(event)
+
+        db.commit()
+
+    except Exception as e:
+        logger.error(f"Error tracking interactions: {e}")
+        db.rollback()
+
+
 def track_word_click(
     db: Session,
     account_id: int,

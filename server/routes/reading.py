@@ -253,12 +253,53 @@ def word_click(
     db: Session = Depends(get_db),
 ):
     """Track word clicks for SRS."""
-    from server.services.learning import track_word_click
+    from server.services.learning import (
+        track_word_click,
+        track_interactions_from_session,
+    )
 
     try:
         account_id = getattr(request.state, "user_id", None)
         if not account_id:
             return {"status": "error", "message": "Not authenticated"}
+
+        text_id = data.get("text_id")
+        word_data = data.get("word_data", {})
+        session_data = data.get("session_data", {})
+
+        if not text_id:
+            return {"status": "error", "message": "Missing text_id"}
+
+        # Get profile from account_id
+        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        if not profile:
+            return {"status": "error", "message": "Profile not found"}
+
+        # Track individual word click (for immediate feedback)
+        track_word_click(
+            db=db,
+            account_id=account_id,
+            profile_id=profile.id,
+            text_id=text_id,
+            word_info=word_data,
+        )
+
+        # Track all interactions from session data
+        if session_data.get("words"):
+            track_interactions_from_session(
+                db=db,
+                account_id=account_id,
+                profile_id=profile.id,
+                text_id=text_id,
+                interactions=session_data.get("words", []),
+            )
+
+        return {"status": "ok"}
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
 
         text_id = data.get("text_id")
         word_info = data.get("word_info")
@@ -291,6 +332,8 @@ def save_session(
 ):
     """Save reading session and update user level."""
     from server.services.learning import update_level_from_text
+    from datetime import datetime, timezone
+    from server.models import ProfileTextRead
 
     try:
         account_id = getattr(request.state, "user_id", None)
@@ -298,7 +341,7 @@ def save_session(
             return {"status": "error", "message": "Not authenticated"}
 
         text_id = data.get("text_id")
-        interactions = data.get("interactions", [])
+        session_data = data.get("session_data", {})
 
         if not text_id:
             return {"status": "error", "message": "Missing text_id"}
@@ -308,9 +351,70 @@ def save_session(
         if not profile:
             return {"status": "error", "message": "Profile not found"}
 
+        # Process session data
+        exposed_at = session_data.get("exposed_at")
+        words = session_data.get("words", [])
+        sentences = session_data.get("sentences", [])
+        full_translation_views = session_data.get("full_translation_views", [])
+
+        # Track text exposure (when user first saw the full text)
+        if exposed_at:
+            # Convert JS timestamp to datetime
+            exposed_dt = datetime.fromtimestamp(exposed_at / 1000.0, tz=timezone.utc)
+
+            # Check if this text was already tracked as read
+            existing_read = (
+                db.query(ProfileTextRead)
+                .filter(
+                    ProfileTextRead.profile_id == profile.id,
+                    ProfileTextRead.text_id == text_id,
+                )
+                .first()
+            )
+
+            if not existing_read:
+                # Create read entry when session is saved
+                read_entry = ProfileTextRead(
+                    profile_id=profile.id,
+                    text_id=text_id,
+                    read_count=1,
+                    first_read_at=exposed_dt,
+                    last_read_at=exposed_dt,
+                )
+                db.add(read_entry)
+                db.commit()
+
+        # Process word interactions
+        word_interactions = []
+        for word in words:
+            interaction = {
+                "surface": word.get("surface"),
+                "lemma": word.get("lemma"),
+                "pos": word.get("pos"),
+                "span_start": word.get("span_start"),
+                "span_end": word.get("span_end"),
+                "clicked": word.get("clicked", False),
+                "click_count": word.get("click_count", 0),
+                "translation_viewed": word.get("translation_viewed", False),
+                "translation_viewed_at": word.get("translation_viewed_at"),
+                "timestamp": word.get("timestamp"),
+            }
+            word_interactions.append(interaction)
+
+        # Update user level based on all interactions
         new_level, new_var = update_level_from_text(
-            db=db, profile=profile, text_id=text_id, interactions=interactions
+            db=db, profile=profile, text_id=text_id, interactions=word_interactions
         )
-        return {"status": "ok", "level_value": new_level, "level_var": new_var}
+
+        return {
+            "status": "ok",
+            "level_value": new_level,
+            "level_var": new_var,
+            "processed_words": len(word_interactions),
+            "processed_sentences": len(sentences),
+        }
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         return {"status": "error", "message": str(e)}
