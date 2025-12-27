@@ -132,6 +132,3 @@ def get_srs_words(
         )
 
     return items
-
-    # For now, return empty list - SRS implementation pending
-    return []
