@@ -7,7 +7,7 @@ import os
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from .db import SessionLocal, get_db
+from .db import get_db
 from server.auth import Account, decode_token
 
 _JWT_SECRET = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")

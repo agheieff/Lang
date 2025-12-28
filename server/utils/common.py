@@ -5,6 +5,7 @@ Common utility functions merged from math_utils.py, file_lock.py, and other misc
 """
 
 import math
+import json
 import fcntl
 import os
 from pathlib import Path
@@ -31,13 +32,15 @@ def gaussian_kernel_weights(center: float, sigma: float, bins: int = 6) -> List[
         sigma = 1.0
     out: List[float] = []
     for i in range(1, bins + 1):
-        d = (i - center)
+        d = i - center
         out.append(math.exp(-0.5 * (d / sigma) ** 2))
     s = sum(out) or 1.0
     return [v / s for v in out]
 
 
-def estimate_level(mu: List[float], var: List[float], p_target: float) -> Tuple[float, float]:
+def estimate_level(
+    mu: List[float], var: List[float], p_target: float
+) -> Tuple[float, float]:
     """Estimate user level from probability distributions."""
     jstar = 0
     for j in range(6):
@@ -57,11 +60,13 @@ def estimate_level(mu: List[float], var: List[float], p_target: float) -> Tuple[
     lvl = jstar + frac
     sigma_p = (max(0.0, var[j1]) + max(0.0, var[j2])) ** 0.5
     slope = denom
-    level_var = (sigma_p / max(1e-6, slope)) ** 2
-    return (max(0.0, min(6.0, lvl)), max(0.0, level_var))
+    v = (sigma_p / max(1e-6, slope)) ** 2
+    return (max(0.0, min(6.0, lvl)), max(0.0, v))
 
 
-def compute_level_from_counts(a: List[float], b: List[float], prior_a: float, prior_b: float, p_target: float) -> Tuple[float, float]:
+def compute_level_from_counts(
+    a: List[float], b: List[float], prior_a: float, prior_b: float, p_target: float
+) -> Tuple[float, float]:
     """Compute level from success/failure counts using Bayesian estimation."""
     mu: List[float] = []
     vr: List[float] = []
@@ -77,33 +82,36 @@ def compute_level_from_counts(a: List[float], b: List[float], prior_a: float, pr
 # File lock utilities
 class FileLock:
     """Simple file-based lock using fcntl."""
-    
+
     def __init__(self, path: Path, timeout: float = 30.0):
         self.path = path
         self.lock_file = Path(str(path) + ".lock")
         self.timeout = timeout
         self.fd: Optional[int] = None
-    
+
     def __enter__(self):
         import time
+
         start_time = time.time()
-        
+
         while True:
             try:
-                self.fd = os.open(str(self.lock_file), os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+                self.fd = os.open(
+                    str(self.lock_file), os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                )
                 fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return self
             except (OSError, IOError):
                 if self.fd:
                     os.close(self.fd)
                     self.fd = None
-                
+
                 if time.time() - start_time > self.timeout:
                     raise TimeoutError(f"Could not acquire lock on {self.path}")
-                
+
                 # Sleep and retry
                 time.sleep(0.1)
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.fd:
             try:
@@ -111,14 +119,14 @@ class FileLock:
                 os.close(self.fd)
             except OSError:
                 pass
-            
+
             try:
                 os.unlink(str(self.lock_file))
             except OSError:
                 pass
 
 
-# Misc utilities  
+# Misc utilities
 def safe_json_loads(text: str, default: Any = None) -> Any:
     """Safely parse JSON, returning default on failure."""
     try:

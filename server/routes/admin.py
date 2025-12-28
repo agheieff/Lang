@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional, List
 from collections import defaultdict
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from fastapi import APIRouter, Depends, Request, HTTPException, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -18,20 +20,18 @@ from ..models import ReadingText, Profile
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
-def _get_templates():
-    from pathlib import Path
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+def _templates() -> Jinja2Templates:
     try:
         env = Environment(
-            loader=FileSystemLoader([str(templates_dir)]),
+            loader=FileSystemLoader([str(TEMPLATES_DIR)]),
             autoescape=select_autoescape(["html", "xml"]),
         )
         return Jinja2Templates(env=env)
     except Exception:
-        return Jinja2Templates(directory=str(templates_dir))
+        return Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def _require_admin(account: Account) -> None:
@@ -49,7 +49,7 @@ def admin_texts_page(
     """Admin page showing all texts and their states."""
     _require_admin(account)
 
-    t = _get_templates()
+    t = _templates()
 
     # Get all texts ordered by created_at desc
     texts = db.query(ReadingText).order_by(ReadingText.created_at.desc()).all()
@@ -109,7 +109,7 @@ def admin_text_detail(
         .count()
     )
 
-    t = _get_templates()
+    t = _templates()
     context = {
         "title": f"Text #{text_id}",
         "text": text,
@@ -133,7 +133,7 @@ def admin_accounts_page(
     """Admin page showing all accounts."""
     _require_admin(account)
 
-    t = _get_templates()
+    t = _templates()
 
     # Get all accounts
     accounts = db.query(Account).order_by(Account.created_at.desc()).all()
@@ -206,7 +206,7 @@ def admin_account_detail(
 
     profiles = db.query(Profile).filter(Profile.account_id == account_id).all()
 
-    t = _get_templates()
+    t = _templates()
     context = {
         "title": f"Account #{account_id}",
         "target": target,

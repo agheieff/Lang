@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -21,15 +22,23 @@ from .routes.pages import router as pages_router
 from .routes.user import router as user_router
 from .routes.admin import router as admin_router
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
 
+    # Validate required environment variables
+    _validate_environment()
+
+    # Background task references (to prevent garbage collection)
+    background_tasks = []
+
     # Start background worker
     try:
         from .services.background_worker import (
-            start_background_worker,
+            background_worker,
             startup_generation,
         )
 
@@ -39,16 +48,55 @@ async def lifespan(app: FastAPI):
         texts_per_lang = int(os.getenv("ARC_STARTUP_TEXTS_PER_LANG", "2"))
 
         if startup_langs:
-            asyncio.create_task(startup_generation(startup_langs, texts_per_lang))
+            startup_task = asyncio.create_task(
+                startup_generation(startup_langs, texts_per_lang)
+            )
+            background_tasks.append(startup_task)
 
         # Start background worker loop
-        start_background_worker()
+        worker_task = asyncio.create_task(background_worker())
+        background_tasks.append(worker_task)
+        logger.info("Background worker started")
     except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).error(f"Failed to start background worker: {e}")
+        logger.error(f"Failed to start background worker: {e}", exc_info=True)
 
     yield
+
+    # Cleanup: cancel all background tasks
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    logger.info("Background tasks cleaned up")
+
+
+def _validate_environment():
+    """Validate critical environment variables on startup."""
+    if os.getenv("ENV") == "production":
+        # Critical production checks
+        required_vars = [
+            "ARC_LANG_JWT_SECRET",
+        ]
+        missing = [v for v in required_vars if not os.getenv(v)]
+        if missing:
+            raise ValueError(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
+    else:
+        # Development mode warnings
+        if not os.getenv("OPENROUTER_API_KEY"):
+            logger.warning(
+                "OPENROUTER_API_KEY not set - LLM features will be limited. "
+                "Set this environment variable for full functionality."
+            )
+        if not os.getenv("ARC_LANG_JWT_SECRET"):
+            logger.warning(
+                "ARC_LANG_JWT_SECRET not set - using insecure development secret. "
+                "Set this environment variable in production."
+            )
 
 
 app = FastAPI(lifespan=lifespan, title="Arcadia Lang", version="0.1.0")
@@ -59,9 +107,14 @@ async def not_found_exception_handler(request, exc):
     return RedirectResponse(url="/", status_code=302)
 
 
+# Configure CORS - restrict in production
+allowed_origins = os.getenv(
+    "ARC_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,7 +122,15 @@ app.add_middleware(
 
 # Lightweight auth context via cookie
 try:
-    secret = os.getenv("ARC_LANG_JWT_SECRET", "dev-secret-change")
+    secret = os.getenv("ARC_LANG_JWT_SECRET")
+    if not secret:
+        if os.getenv("ENV") != "dev":
+            raise ValueError(
+                "ARC_LANG_JWT_SECRET environment variable is required in production"
+            )
+        secret = "dev-secret-change"
+        logger.warning("Using development JWT secret")
+
     app.add_middleware(
         CookieUserMiddleware,
         session_factory=SessionLocal,
@@ -78,30 +139,27 @@ try:
         algorithm="HS256",
         cookie_name="access_token",
     )
-except Exception:
+except Exception as e:
     # Non-fatal during dev
-    pass
+    logger.error(f"Failed to setup auth middleware: {e}")
 
 # Optional auth API (best-effort)
 try:
-    from server.auth import AuthSettings, create_auth_router, create_sqlite_repo  # type: ignore
+    from .auth import AuthSettings, create_auth_router, create_sqlite_repo
+
+    # Ensure JWT secret is set
+    jwt_secret = os.getenv("ARC_LANG_JWT_SECRET")
+    if not jwt_secret and os.getenv("ENV") != "dev":
+        logger.warning("ARC_LANG_JWT_SECRET not set, using development key")
 
     app.include_router(
         create_auth_router(
             create_sqlite_repo(f"sqlite:///{DB_PATH}"),
-            AuthSettings(secret_key="dev-secret-change"),
+            AuthSettings(secret_key=jwt_secret or "dev-secret-change"),
         )
     )
-except Exception:
-    pass
-
-# Seed OpenRouter models (best-effort)
-try:
-    from openrouter import get_default_catalog, seed_sqlite  # type: ignore
-
-    seed_sqlite(str(DB_PATH), table="models", cat=get_default_catalog())
-except Exception:
-    pass
+except Exception as e:
+    logger.warning(f"Auth router not available: {e}")
 
 # Built-in routers
 app.include_router(health_router)

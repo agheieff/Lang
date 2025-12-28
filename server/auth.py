@@ -11,19 +11,20 @@ from typing import Optional, Dict, Any, Union, Sequence, Type
 from dataclasses import dataclass
 import re
 
-from sqlalchemy import Column, Integer, String, Boolean, Text, JSON, DateTime
-from sqlalchemy.sql import func
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Header, status, Request, Cookie
 from jose import jwt, JWTError
 from passlib.context import CryptContext
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 
 
 # =============================================================================
 # Database Models - Import from central models
 # =============================================================================
 
-from server.models import Account, Base
+from server.models import Account
 
 
 # =============================================================================
@@ -145,7 +146,7 @@ def parse_bearer_token(authorization: Optional[str]) -> Optional[str]:
     if not authorization:
         return None
     val = authorization.strip()
-    if not val.lower().startswith("bearer "):
+    if not val.lower().startswith("bearer"):
         return None
     return val.split(" ", 1)[1]
 
@@ -455,12 +456,10 @@ def create_auth_router(
         msg = validate_password(payload.password, settings)
         if msg:
             raise HTTPException(status_code=422, detail=msg)
-        # Default all new accounts to admin for development
-        # TODO: Change to "Free" in production
         acc = repo.create_account(
             email,
             hash_password(payload.password),
-            subscription_tier="admin",
+            subscription_tier="Free",
         )
         return _to_account_out(acc)
 
@@ -511,12 +510,6 @@ def create_auth_router(
 # =============================================================================
 # CookieUserMiddleware
 # =============================================================================
-
-from typing import Optional
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
-from fastapi import HTTPException
 
 
 class CookieUserMiddleware(BaseHTTPMiddleware):
@@ -573,7 +566,7 @@ class CookieUserMiddleware(BaseHTTPMiddleware):
                             response.delete_cookie(self.cookie_name, path="/")
                             return response
 
-            except Exception as e:
+            except Exception:
                 # Invalid token - continue without user
                 pass
 

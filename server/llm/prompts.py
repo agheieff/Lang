@@ -83,6 +83,44 @@ Example format:
 Hola|Hello|INTJ|hola
 mundo|world|NOUN|mundo""",
     },
+    "fr": {
+        "system": "You're a language tutor, creating texts for learners to practice comprehensible input.",
+        "text": """Please generate a text in French for comprehensible input training.
+The learner is around {level} level; please write accordingly.
+Please try to make the text around {length} words long.
+Try to include at least some of the following words in the text: {include_words}. Gently reinforce target words in context and keep language natural and engaging.
+Separate paragraphs with double newlines (\\n\\n).
+{topic_line}
+Please output title and text in pipe-separated CSV format with a header row:
+title|text
+Une promenade au parc|Il fait beau aujourd'hui.\\n\\nAllons nous promener ensemble dans le parc.
+ 
+For words with separable prefixes (like German), mark them with ... to indicate non-continuity:
+word|translation|pos|lemma""",
+        "translation": """Translate this text from {source_lang} to {target_lang} sentence by sentence:
+source|translation
+
+{text}
+ 
+Example format:
+Bonjour.|Hello.
+Comment ça va?|How are you?""",
+        "words": """Analyze and translate each word in this {source_lang} text.
+ 
+Return pipe-separated CSV format:
+word|translation|pos|lemma
+ 
+For German separable prefixes, use ... notation:
+Ich|I|PRON|ich
+ruf...an|call|VERB|anrufen
+meinen|my|DET|mein
+Freund|friend|NOUN|Freund
+an|at|PREP|an
+ 
+Example format:
+Bonjour|Hello|INTJ|bonjour
+monde|world|NOUN|monde""",
+    },
 }
 
 
@@ -121,9 +159,41 @@ def get_prompt(lang: str, key: str, **kwargs) -> str:
     template = PROMPTS.get(lang, {}).get(key) or PROMPTS.get(base_lang, {}).get(key)
 
     if not template:
-        raise ValueError(f"Prompt not found for lang={lang}, key={key}")
+        logger.warning(f"Prompt not found for lang={lang}, key={key}, using default")
+        template = _get_default_prompt(key)
 
     return _safe_format(template, kwargs)
+
+
+def _get_default_prompt(key: str) -> str:
+    """Get a default fallback prompt for missing language prompts."""
+    defaults = {
+        "system": "You are a language tutor creating texts for comprehensible input training.",
+        "text": """Please generate a text in the target language for comprehensible input training.
+The learner is around {level} level; please write accordingly.
+Please try to make the text around {length} words long.
+Try to include at least some of the following words in the text: {include_words}.
+{topic_line}
+Please output the title and text in pipe-separated CSV format with a header row:
+title|text""",
+        "translation": """Translate this text from {source_lang} to {target_lang} sentence by sentence:
+source|translation
+
+{text}
+
+Example format:
+Hello.|Hola.
+How are you?|How are you?""",
+        "words": """Analyze and translate each word in this text.
+
+Return pipe-separated CSV format:
+word|translation|pos|lemma
+
+Example format:
+Hello|Hello|INTJ|hello
+world|world|NOUN|world""",
+    }
+    return defaults.get(key, "Please assist with language learning.")
 
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:

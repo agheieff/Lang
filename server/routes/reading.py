@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
+import logging
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -19,24 +21,53 @@ from server.models import (
 )
 from server.deps import get_current_account
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reading"])
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
-_templates_env = None
 
 
 def _templates() -> Jinja2Templates:
-    global _templates_env
-    if _templates_env is None:
-        try:
-            env = Environment(
-                loader=FileSystemLoader([str(TEMPLATES_DIR)]),
-                autoescape=select_autoescape(["html", "xml"]),
-            )
-            _templates_env = Jinja2Templates(env=env)
-        except Exception:
-            _templates_env = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    return _templates_env
+    try:
+        env = Environment(
+            loader=FileSystemLoader([str(TEMPLATES_DIR)]),
+            autoescape=select_autoescape(["html", "xml"]),
+        )
+        return Jinja2Templates(env=env)
+    except Exception:
+        return Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+# Pydantic models for request validation
+class WordInteraction(BaseModel):
+    surface: str
+    lemma: Optional[str] = None
+    pos: str = "NOUN"
+    span_start: int
+    span_end: int
+    clicked: bool = False
+    click_count: int = 0
+    translation_viewed: bool = False
+    translation_viewed_at: Optional[float] = None
+    timestamp: Optional[float] = None
+
+
+class SessionData(BaseModel):
+    exposed_at: Optional[float] = None
+    words: List[WordInteraction] = []
+    sentences: Optional[List[Dict[str, Any]]] = None
+    full_translation_views: Optional[List[Dict[str, Any]]] = None
+
+
+class WordClickRequest(BaseModel):
+    text_id: int = Field(..., gt=0, description="Text ID")
+    word_data: Optional[Dict[str, Any]] = None
+    session_data: Optional[SessionData] = None
+
+
+class SaveSessionRequest(BaseModel):
+    text_id: int = Field(..., gt=0, description="Text ID")
+    session_data: Optional[SessionData] = None
 
 
 # Demo text for when no texts are available
@@ -54,13 +85,7 @@ def reading_page(
     t = _templates()
 
     # Get current user
-    account_id = None
-    try:
-        u = getattr(request.state, "user", None)
-        if u is not None:
-            account_id = getattr(u, "id", None)
-    except Exception:
-        pass
+    account_id = getattr(request.state, "account_id", None)
 
     if account_id is None:
         return HTMLResponse(
@@ -144,13 +169,7 @@ def reading_next(
 
     try:
         # Get current user
-        account_id = None
-        try:
-            u = getattr(request.state, "user", None)
-            if u is not None:
-                account_id = getattr(u, "id", None)
-        except Exception:
-            pass
+        account_id = getattr(request.state, "account_id", None)
 
         if not account_id:
             return JSONResponse({"status": "error", "message": "Not authenticated"})
@@ -248,126 +267,106 @@ def get_text_status(
 
 @router.post("/reading/word-click")
 def word_click(
-    data: dict,
+    data: WordClickRequest,
     request: Request,
     db: Session = Depends(get_db),
 ):
     """Track word clicks for SRS."""
     from server.services.learning import (
-        track_word_click,
         track_interactions_from_session,
     )
 
     try:
-        account_id = getattr(request.state, "user_id", None)
+        account_id = getattr(request.state, "account_id", None)
         if not account_id:
-            return {"status": "error", "message": "Not authenticated"}
-
-        text_id = data.get("text_id")
-        word_data = data.get("word_data", {})
-        session_data = data.get("session_data", {})
-
-        if not text_id:
-            return {"status": "error", "message": "Missing text_id"}
+            return JSONResponse(
+                {"status": "error", "message": "Not authenticated"}, status_code=401
+            )
 
         # Get profile from account_id
         profile = db.query(Profile).filter(Profile.account_id == account_id).first()
         if not profile:
-            return {"status": "error", "message": "Profile not found"}
+            return JSONResponse(
+                {"status": "error", "message": "Profile not found"}, status_code=404
+            )
 
-        # Track individual word click (for immediate feedback)
-        track_word_click(
-            db=db,
-            account_id=account_id,
-            profile_id=profile.id,
-            text_id=text_id,
-            word_info=word_data,
-        )
-
-        # Track all interactions from session data
-        if session_data.get("words"):
+        # Track all interactions from session data (includes clicks with timestamps)
+        if data.session_data and data.session_data.words:
             track_interactions_from_session(
                 db=db,
                 account_id=account_id,
                 profile_id=profile.id,
-                text_id=text_id,
-                interactions=session_data.get("words", []),
+                text_id=data.text_id,
+                interactions=[
+                    {
+                        "surface": w.surface,
+                        "lemma": w.lemma or w.surface,
+                        "pos": w.pos,
+                        "span_start": w.span_start,
+                        "span_end": w.span_end,
+                        "clicked": w.clicked,
+                        "click_count": w.click_count,
+                        "translation_viewed": w.translation_viewed,
+                    }
+                    for w in data.session_data.words
+                ],
             )
 
         return {"status": "ok"}
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        return {"status": "error", "message": str(e)}
-
-        text_id = data.get("text_id")
-        word_info = data.get("word_info")
-
-        if not text_id or not word_info:
-            return {"status": "error", "message": "Missing data"}
-
-        # Get profile from account_id
-        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
-        if not profile:
-            return {"status": "error", "message": "Profile not found"}
-
-        track_word_click(
-            db=db,
-            account_id=account_id,
-            profile_id=profile.id,
-            text_id=text_id,
-            word_info=word_info,
+        logger.error(f"Error in word_click: {e}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": "Internal server error"}, status_code=500
         )
-        return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 @router.post("/reading/save-session")
 def save_session(
-    data: dict,
+    data: SaveSessionRequest,
     request: Request,
     db: Session = Depends(get_db),
 ):
     """Save reading session and update user level."""
     from server.services.learning import update_level_from_text
-    from datetime import datetime, timezone
     from server.models import ProfileTextRead
 
     try:
-        account_id = getattr(request.state, "user_id", None)
+        account_id = getattr(request.state, "account_id", None)
         if not account_id:
-            return {"status": "error", "message": "Not authenticated"}
+            return JSONResponse(
+                {"status": "error", "message": "Not authenticated"}, status_code=401
+            )
 
-        text_id = data.get("text_id")
-        session_data = data.get("session_data", {})
-
-        if not text_id:
-            return {"status": "error", "message": "Missing text_id"}
+        if not data.text_id:
+            return JSONResponse(
+                {"status": "error", "message": "Missing text_id"}, status_code=400
+            )
 
         # Get profile from account_id
         profile = db.query(Profile).filter(Profile.account_id == account_id).first()
         if not profile:
-            return {"status": "error", "message": "Profile not found"}
+            return JSONResponse(
+                {"status": "error", "message": "Profile not found"}, status_code=404
+            )
 
         # Process session data
-        exposed_at = session_data.get("exposed_at")
-        words = session_data.get("words", [])
-        sentences = session_data.get("sentences", [])
-        full_translation_views = session_data.get("full_translation_views", [])
+        session_data = data.session_data or SessionData()
+        words = session_data.words or []
+        sentences = session_data.sentences or []
 
-        # Track text exposure (when user first saw the full text)
-        if exposed_at:
+        # Track text exposure (when user first saw full text)
+        if session_data.exposed_at:
             # Convert JS timestamp to datetime
-            exposed_dt = datetime.fromtimestamp(exposed_at / 1000.0, tz=timezone.utc)
+            exposed_dt = datetime.fromtimestamp(
+                session_data.exposed_at / 1000.0, tz=timezone.utc
+            )
 
             # Check if this text was already tracked as read
             existing_read = (
                 db.query(ProfileTextRead)
                 .filter(
                     ProfileTextRead.profile_id == profile.id,
-                    ProfileTextRead.text_id == text_id,
+                    ProfileTextRead.text_id == data.text_id,
                 )
                 .first()
             )
@@ -376,7 +375,7 @@ def save_session(
                 # Create read entry when session is saved
                 read_entry = ProfileTextRead(
                     profile_id=profile.id,
-                    text_id=text_id,
+                    text_id=data.text_id,
                     read_count=1,
                     first_read_at=exposed_dt,
                     last_read_at=exposed_dt,
@@ -388,22 +387,22 @@ def save_session(
         word_interactions = []
         for word in words:
             interaction = {
-                "surface": word.get("surface"),
-                "lemma": word.get("lemma"),
-                "pos": word.get("pos"),
-                "span_start": word.get("span_start"),
-                "span_end": word.get("span_end"),
-                "clicked": word.get("clicked", False),
-                "click_count": word.get("click_count", 0),
-                "translation_viewed": word.get("translation_viewed", False),
-                "translation_viewed_at": word.get("translation_viewed_at"),
-                "timestamp": word.get("timestamp"),
+                "surface": word.surface,
+                "lemma": word.lemma or word.surface,
+                "pos": word.pos,
+                "span_start": word.span_start,
+                "span_end": word.span_end,
+                "clicked": word.clicked,
+                "click_count": word.click_count,
+                "translation_viewed": word.translation_viewed,
+                "translation_viewed_at": word.translation_viewed_at,
+                "timestamp": word.timestamp,
             }
             word_interactions.append(interaction)
 
         # Update user level based on all interactions
         new_level, new_var = update_level_from_text(
-            db=db, profile=profile, text_id=text_id, interactions=word_interactions
+            db=db, profile=profile, text_id=data.text_id, interactions=word_interactions
         )
 
         return {
@@ -414,7 +413,7 @@ def save_session(
             "processed_sentences": len(sentences),
         }
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Error in save_session: {e}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": "Internal server error"}, status_code=500
+        )

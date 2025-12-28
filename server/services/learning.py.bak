@@ -24,7 +24,6 @@ from server.models import (
     GenerationLog,
     ReadingText,
 )
-from server.services.srs_algorithm import update_srs_from_session
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +140,8 @@ def track_word_exposure(
             lexeme.last_seen_at = datetime.now(timezone.utc)
             lexeme.distinct_texts += 1
 
-            # Note: SRS parameters are updated when user interacts with words (clicks/views)
-            # For pure exposure, we just track the event
+            # Update SRS parameters
+            _update_srs_parameters(lexeme)
 
             # Create word event
             event = WordEvent(
@@ -236,23 +235,8 @@ def track_interactions_from_session(
                 if clicked:
                     lexeme.clicks += click_count
 
-            # Update SRS parameters using SRS module
-            srs_update = update_srs_from_session(
-                lexeme=lexeme,
-                was_clicked=clicked,
-                click_count=click_count,
-                was_viewed=translation_viewed,
-            )
-
-            # Apply SRS update
-            lexeme.stability = srs_update.stability
-            lexeme.alpha = srs_update.alpha
-            lexeme.beta = srs_update.beta
-            lexeme.difficulty = srs_update.difficulty
-            lexeme.familiarity = srs_update.familiarity
-            lexeme.importance = srs_update.importance
-            lexeme.next_due_at = srs_update.next_due_at
-            lexeme.updated_at = datetime.now(timezone.utc)
+            # Update SRS parameters
+            _update_srs_parameters(lexeme, clicked=clicked)
 
             # Create word event for each click
             if clicked:
@@ -279,6 +263,123 @@ def track_interactions_from_session(
         db.rollback()
 
 
+def track_word_click(
+    db: Session,
+    account_id: int,
+    profile_id: int,
+    text_id: int,
+    word_info: Dict,
+) -> None:
+    """Track word click/lookup events."""
+    try:
+        surface = word_info.get("surface", "")
+        lemma = word_info.get("lemma", surface)
+        pos = word_info.get("pos", "NOUN")
+        span_start = word_info.get("span_start", 0)
+        span_end = word_info.get("span_end", 0)
+
+        # Get lexeme
+        lexeme = (
+            db.query(Lexeme)
+            .filter(
+                Lexeme.account_id == account_id,
+                Lexeme.profile_id == profile_id,
+                Lexeme.lang == word_info.get("lang", ""),
+                Lexeme.lemma == lemma,
+                Lexeme.pos == pos,
+            )
+            .first()
+        )
+
+        if not lexeme:
+            # Create new lexeme for clicked word
+            lexeme = Lexeme(
+                account_id=account_id,
+                profile_id=profile_id,
+                lang=word_info.get("lang", ""),
+                lemma=lemma,
+                pos=pos,
+                first_seen_at=datetime.now(timezone.utc),
+                last_seen_at=datetime.now(timezone.utc),
+                exposures=1,
+                clicks=1,
+                distinct_texts=1,
+                last_clicked_at=datetime.now(timezone.utc),
+            )
+            db.add(lexeme)
+        else:
+            # Update existing lexeme
+            lexeme.clicks += 1
+            lexeme.last_clicked_at = datetime.now(timezone.utc)
+
+            # Update SRS parameters
+            _update_srs_parameters(lexeme, clicked=True)
+
+        # Create click event
+        event = WordEvent(
+            account_id=account_id,
+            profile_id=profile_id,
+            event_type="click",
+            surface=surface,
+            span_start=span_start,
+            span_end=span_end,
+            text_id=text_id,
+            meta={"lemma": lemma, "pos": pos},
+        )
+        db.add(event)
+
+        db.commit()
+
+    except Exception as e:
+        logger.error(f"Error tracking word click: {e}")
+        db.rollback()
+
+
+def _update_srs_parameters(
+    lexeme: Lexeme,
+    clicked: bool = False,
+) -> None:
+    """Update SRS parameters using Bayesian model."""
+    try:
+        # Current parameters
+        alpha = lexeme.alpha
+        beta = lexeme.beta
+        clicks = lexeme.clicks
+        exposures = lexeme.exposures
+
+        # Update Bayesian posterior
+        if clicked:
+            # Click increases belief in future clicks
+            alpha += 1.0
+            beta += 0.1
+        else:
+            # Exposure without click suggests knowledge
+            alpha += 0.1
+            beta += 1.0
+
+        # Update difficulty (lower = easier)
+        click_rate = clicks / max(exposures, 1)
+        difficulty = max(0.1, 1.0 - click_rate)
+
+        # Calculate familiarity
+        familiarity = 1.0 - (alpha / (alpha + beta))
+
+        # Calculate next due date
+        interval_days = max(1, int(7 * familiarity))
+        next_due = datetime.now(timezone.utc) + timedelta(days=interval_days)
+
+        # Update lexeme
+        lexeme.alpha = alpha
+        lexeme.beta = beta
+        lexeme.difficulty = difficulty
+        lexeme.familiarity = familiarity
+        lexeme.next_due_at = next_due
+        lexeme.updated_at = datetime.now(timezone.utc)
+
+    except Exception as e:
+        logger.error(f"Error updating SRS parameters: {e}")
+
+
 def get_due_lexemes(
     db: Session,
     profile_id: int,
@@ -292,6 +393,7 @@ def get_due_lexemes(
         .filter(
             Lexeme.profile_id == profile_id,
             Lexeme.next_due_at <= now,
+            Lexeme.is_active == True,
         )
         .order_by(
             Lexeme.next_due_at.asc(),
@@ -337,6 +439,7 @@ def get_lexemes_by_importance(
         db.query(Lexeme)
         .filter(
             Lexeme.profile_id == profile_id,
+            Lexeme.is_active == True,
         )
         .order_by(
             Lexeme.importance.desc(),

@@ -53,16 +53,7 @@ def dashboard_page(
     t = _templates()
     from ..models import Profile
 
-    account_id: Optional[int] = None
-    try:
-        u = getattr(request.state, "user", None)
-        if u is not None:
-            if isinstance(u, dict) and "id" in u:
-                account_id = int(u["id"])
-            elif hasattr(u, "id"):
-                account_id = int(getattr(u, "id"))
-    except Exception:
-        account_id = None
+    account_id = getattr(request.state, "account_id", None)
 
     profile = None
     if account_id is not None:

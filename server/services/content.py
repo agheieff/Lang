@@ -7,8 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, Optional, List, Tuple
 
@@ -366,8 +364,6 @@ def select_next_text(
 
     return None
 
-    return None
-
 
 async def ensure_next_text_ready(
     account_id: int,
@@ -409,29 +405,8 @@ async def ensure_next_text_ready(
 
 
 # Helper Functions
-def _get_ci_target(level_value: float, level_var: float = 1.0) -> float:
-    """Get target comprehension index based on user level."""
-    if level_value < 2.0:
-        return 0.95
-    elif level_value < 4.0:
-        return 0.92
-    elif level_value < 6.0:
-        return 0.88
-    elif level_value < 8.0:
-        return 0.86
-    else:
-        return 0.85
-
-
-def _pick_openrouter_model(requested: Optional[str] = None) -> str:
-    """Prefer non-thinking model variants by default."""
-    if requested:
-        return requested
-    m = os.getenv("OPENROUTER_MODEL_NONREASONING")
-    if m:
-        return m
-    m2 = os.getenv("OPENROUTER_MODEL")
-    return m2 or "x-ai/grok-4.1-fast:free"
+from server.services.learning import get_ci_target as _get_ci_target
+from server.llm.client import _pick_openrouter_model
 
 
 def _compose_level_hint(

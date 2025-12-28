@@ -90,7 +90,7 @@ def get_srs_level():
 @router.get("/srs/words")
 def get_srs_words(
     lang: Optional[str] = None,
-    min_S: Optional[float] = None,
+    min_stability: Optional[float] = None,
     account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
@@ -109,8 +109,8 @@ def get_srs_words(
     if lang:
         query = query.filter(Lexeme.lang == lang)
 
-    if min_S is not None:
-        query = query.filter(Lexeme.stability >= min_S)
+    if min_stability is not None:
+        query = query.filter(Lexeme.stability >= min_stability)
 
     lexemes = query.order_by(Lexeme.next_due_at.asc()).limit(100).all()
 
