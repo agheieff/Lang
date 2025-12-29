@@ -521,17 +521,23 @@ def get_or_create_language(
     # Default names for common languages
     if not name:
         name_map = {
-            "es": "Spanish",
-            "zh": "Chinese",
-            "en": "English",
-            "fr": "French",
-            "de": "German",
-            "ja": "Japanese",
-            "ko": "Korean",
+            "es": ("Spanish", "Spanish", "Latin"),
+            "zh": ("Chinese", "Chinese (Simplified)", "Hans"),
+            "zh-TW": ("Chinese", "Chinese (Traditional)", "Hant"),
+            "en": ("English", "English", "Latin"),
+            "fr": ("French", "French", "Latin"),
+            "de": ("German", "German", "Latin"),
+            "ja": ("Japanese", "Japanese", "Jpan"),
+            "ko": ("Korean", "Korean", "Kore"),
         }
-        name = name_map.get(code, code.capitalize())
+        name, display_name, script = name_map.get(
+            code, (code.capitalize(), code.capitalize(), "Latn")
+        )
+    else:
+        display_name = name
+        script = "Latn"
 
-    language = Language(code=code, name=name)
+    language = Language(code=code, name=name, display_name=display_name, script=script)
     db.add(language)
     db.flush()
     return language

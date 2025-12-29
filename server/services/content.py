@@ -16,7 +16,7 @@ from server.llm.client import chat_complete_with_raw
 from server.llm.prompts import (
     PromptSpec,
     build_reading_prompt,
-    build_translation_contexts,
+    build_structured_translation_prompt,
     build_word_translation_prompt,
 )
 from server.utils.nlp import (
@@ -269,19 +269,15 @@ async def _generate_sentence_translations(
         if not sentences:
             return True
 
-        contexts = build_translation_contexts(
-            reading_messages=[],
+        prompt = build_structured_translation_prompt(
             source_lang=lang,
             target_lang=target_lang,
             text=content_str,
         )
 
-        batch_size = 5
-        word_translations = contexts.get("words", [])
-
         model = _pick_openrouter_model()
         response = chat_complete_with_raw(
-            messages=word_translations,
+            messages=prompt,
             model=model,
         )
 

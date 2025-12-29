@@ -51,7 +51,7 @@ def dashboard_page(
 ):
     """Dashboard/home page - simple landing with links to reading and other features."""
     t = _templates()
-    from ..models import Profile
+    from ..models import Profile, Language
 
     account_id = getattr(request.state, "account_id", None)
 
@@ -59,20 +59,16 @@ def dashboard_page(
     if account_id is not None:
         profile = db.query(Profile).filter(Profile.account_id == account_id).first()
 
-    # Map language codes to display names
-    lang_names = {
-        "es": "Spanish",
-        "zh": "Chinese",
-        "en": "English",
-        "fr": "French",
-        "de": "German",
+    languages = {
+        lang.code: lang.display_name
+        for lang in db.query(Language).filter(Language.is_enabled == True).all()
     }
 
     context = {
         "title": "Arcadia Lang",
         "has_profile": profile is not None,
         "profile_lang": (profile.lang if profile is not None else None),
-        "profile_lang_name": lang_names.get(profile.lang, profile.lang)
+        "profile_lang_name": languages.get(profile.lang, profile.lang)
         if profile
         else None,
         "is_authenticated": account_id is not None,

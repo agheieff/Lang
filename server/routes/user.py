@@ -69,10 +69,18 @@ def stats_page(
 ):
     t = _templates()
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    from ..models import Language
+
+    default_lang = db.query(Language).filter(Language.code == "es").first()
+    lang_code = (
+        profile.lang if profile else (default_lang.code if default_lang else "en")
+    )
+
     return t.TemplateResponse(
         request,
         "pages/stats.html",
-        {"title": "Statistics", "lang": profile.lang if profile else "es"},
+        {"title": "Statistics", "lang": lang_code},
     )
 
 
@@ -84,10 +92,18 @@ def words_page(
 ):
     t = _templates()
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    from ..models import Language
+
+    default_lang = db.query(Language).filter(Language.code == "es").first()
+    lang_code = (
+        profile.lang if profile else (default_lang.code if default_lang else "en")
+    )
+
     return t.TemplateResponse(
         request,
         "pages/words.html",
-        {"title": "My Words", "lang": profile.lang if profile else "es"},
+        {"title": "My Words", "lang": lang_code},
     )
 
 
@@ -137,13 +153,15 @@ def get_profile_endpoint(
 
 
 @router.get("/languages")
-def get_languages():
+def get_languages(db: Session = Depends(get_db)):
     """Get supported languages for profile creation."""
+    from ..models import Language
+
+    languages = db.query(Language).filter(Language.is_enabled == True).all()
+
     return {
         "languages": [
-            {"code": "es", "name": "Spanish"},
-            {"code": "zh-Hans", "name": "Chinese (Simplified)"},
-            {"code": "zh-Hant", "name": "Chinese (Traditional)"},
+            {"code": lang.code, "name": lang.display_name} for lang in languages
         ]
     }
 

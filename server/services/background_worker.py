@@ -239,8 +239,17 @@ async def startup_generation(
 ) -> None:
     """Generate initial texts on startup for specified languages."""
     if not langs:
-        # Default to common languages if none specified
-        langs = ["es", "zh", "fr"]
+        # Default to enabled languages if none specified
+        from server.models import Language
+
+        with SessionLocal() as db:
+            enabled_langs = (
+                db.query(Language)
+                .filter(Language.is_enabled == True)
+                .filter(Language.code != "en")
+                .all()
+            )
+            langs = [lang.code for lang in enabled_langs]
 
     logger.info(f"Startup generation: {texts_per_lang} texts for {', '.join(langs)}")
 

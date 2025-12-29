@@ -5,6 +5,7 @@ Usage:
     python reset_db.py        # Reset users only (keep texts and shared data)
     python reset_db.py --full # Reset everything including texts
 """
+
 import argparse
 import os
 import sys
@@ -14,13 +15,15 @@ from pathlib import Path
 # Add the current directory to Python path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from server.db import recreate_db, get_db_info, DB_PATH, global_engine
+from server.db import recreate_db, get_db_info, DB_PATH, engine as global_engine
 
 # LLM generation logs directory
 LOG_DIR = Path(os.getenv("ARC_OR_LOG_DIR") or (Path.cwd() / "data" / "llm_stream_logs"))
 
-# Session logs directory  
-SESSION_LOG_DIR = Path(os.getenv("ARC_OR_LOG_DIR") or (Path.cwd() / "data" / "session_logs"))
+# Session logs directory
+SESSION_LOG_DIR = Path(
+    os.getenv("ARC_OR_LOG_DIR") or (Path.cwd() / "data" / "session_logs")
+)
 
 # Tables that contain shared data (texts, translations, etc.) - preserved in partial reset
 SHARED_TABLES = {
@@ -59,18 +62,42 @@ PER_ACCOUNT_TABLES = {
 }
 
 
+def kill_database_connections():
+    """Kill any processes holding database files."""
+    import psutil
+    import os
+
+    try:
+        for proc in psutil.process_iter(["pid", "name", "open_files"]):
+            try:
+                for file in proc.info["open_files"] or []:
+                    if str(DB_PATH) in file.path:
+                        print(
+                            f"Killing process {proc.info['pid']} ({proc.info['name']}) holding database"
+                        )
+                        proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except ImportError:
+        print("psutil not available, skipping connection cleanup")
+    except Exception as e:
+        print(f"Warning: Could not kill database connections: {e}")
+
+
 def clear_user_tables():
     """Clear user-related tables in global DB while preserving shared data."""
     from sqlalchemy import text
-    
+
+    kill_database_connections()
+
     with global_engine.connect() as conn:
         # Disable foreign key checks temporarily
         conn.execute(text("PRAGMA foreign_keys = OFF"))
-        
+
         # Get existing tables
         result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
         existing_tables = {row[0] for row in result}
-        
+
         # Clear global user tables
         for table in GLOBAL_USER_TABLES:
             if table in existing_tables:
@@ -79,12 +106,14 @@ def clear_user_tables():
                     print(f"✓ Cleared table: {table}")
                 except Exception as e:
                     print(f"! Failed to clear {table}: {e}")
-        
+
         # Clear generated_for_account_id in reading_texts (disassociate from users)
         if "reading_texts" in existing_tables:
-            conn.execute(text("UPDATE reading_texts SET generated_for_account_id = NULL"))
+            conn.execute(
+                text("UPDATE reading_texts SET generated_for_account_id = NULL")
+            )
             print("✓ Cleared account references from reading_texts")
-        
+
         # Re-enable foreign key checks
         conn.execute(text("PRAGMA foreign_keys = ON"))
         conn.commit()
@@ -115,7 +144,7 @@ def delete_logs():
 def delete_cookies():
     """Delete local cookie jar."""
     try:
-        cj = Path.cwd() / 'cookies.txt'
+        cj = Path.cwd() / "cookies.txt"
         if cj.exists():
             cj.unlink()
             print("✓ Deleted local cookies.txt")
@@ -125,12 +154,31 @@ def delete_cookies():
 
 def full_reset():
     """Full database reset - delete and recreate everything."""
-    # Fully remove the global DB file
+    from server.db import engine
+
+    print("Closing database connections...")
     try:
-        for p in [DB_PATH, DB_PATH.with_suffix(DB_PATH.suffix + "-wal"), DB_PATH.with_suffix(DB_PATH.suffix + "-shm")]:
+        engine.dispose()
+    except Exception as e:
+        print(f"! Warning: Could not dispose engine: {e}")
+
+    kill_database_connections()
+
+    # Fully remove the global DB file and all related files
+    try:
+        for p in [
+            DB_PATH,
+            DB_PATH.with_suffix(DB_PATH.suffix + "-wal"),
+            DB_PATH.with_suffix(DB_PATH.suffix + "-shm"),
+        ]:
             if p.exists():
                 p.unlink()
                 print(f"✓ Deleted global DB file: {p.name}")
+
+        # Small delay to ensure file system cleanup
+        import time
+
+        time.sleep(0.1)
     except Exception as e:
         print(f"! Failed to delete global DB files: {e}")
 
@@ -164,13 +212,21 @@ def show_db_info():
 
     print("  Account databases: 0 (using single database mode)")
 
-    print(f"  LLM logs dir: {LOG_DIR} {'(exists)' if LOG_DIR.exists() else '(missing)'}")
-    print(f"  Session logs dir: {SESSION_LOG_DIR} {'(exists)' if SESSION_LOG_DIR.exists() else '(missing)'}")
+    print(
+        f"  LLM logs dir: {LOG_DIR} {'(exists)' if LOG_DIR.exists() else '(missing)'}"
+    )
+    print(
+        f"  Session logs dir: {SESSION_LOG_DIR} {'(exists)' if SESSION_LOG_DIR.exists() else '(missing)'}"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reset the database")
-    parser.add_argument("--full", action="store_true", help="Full reset including texts (default: users only)")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Full reset including texts (default: users only)",
+    )
     args = parser.parse_args()
 
     show_db_info()
@@ -179,9 +235,9 @@ if __name__ == "__main__":
         prompt = "\nFull reset? This will DELETE ALL DATA including texts (y/N): "
     else:
         prompt = "\nReset user data? Texts will be preserved (y/N): "
-    
+
     response = input(prompt)
-    if response.lower() == 'y':
+    if response.lower() == "y":
         if args.full:
             print("\nPerforming full reset...")
             full_reset()
@@ -192,6 +248,8 @@ if __name__ == "__main__":
         # Show updated info
         print()
         show_db_info()
-        print("\nNote: You may still have a browser cookie set. Visit /auth/logout in the app or clear cookies for localhost to fully sign out.")
+        print(
+            "\nNote: You may still have a browser cookie set. Visit /auth/logout in the app or clear cookies for localhost to fully sign out."
+        )
     else:
         print("Cancelled")

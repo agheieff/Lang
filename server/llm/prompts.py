@@ -1,127 +1,48 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-PROMPTS = {
-    "zh": {
-        "system": "You're a language tutor, creating texts for learners to practice comprehensible input.",
-        "text": """Please generate a text in Chinese for the comprehensible input training.
-Write it in {script} characters.
-The learner is around {level} level, please try to make the text correspond to that.
-Please try to make the text around {length} characters long.
-Try to include at least some of the following words in the text: {include_words}. Gently reinforce the target words in context and keep the language natural and engaging.
-Separate paragraphs with double newlines (\\n\\n).
-{topic_line}
-Please output the title and text in pipe-separated CSV format with a header row:
-title|text
-去公园散步|今天天气很好，阳光明媚。微风轻轻吹过脸庞。\\n\\n我们一起去公园散步吧。""",
-        "translation": """Now please translate this text into English sentence by sentence. Return pipe-separated CSV format:
-source|translation
-今天天气很好，阳光明媚。|The weather is great today, with bright sunshine.
-微风轻轻吹过脸庞。|A gentle breeze brushes across the face.
-我们一起去公园散步吧。|Let's go for a walk in the park together.
+logger = logging.getLogger(__name__)
 
-Translate the title as well:
-title|translation
-去公园散步|A walk in the park""",
-        "words": """Now please analyze the following sentence: {sentence}
+PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-Return pipe-separated CSV format for each word in order:
-word|translation|pos|lemma|pinyin
 
-Tokenize into smallest meaningful units (words, not characters unless single-char words).
-For words with multiple characters like "吃饭", tokenize as one word.
-For compounds like "一个", tokenize as two words.
-Skip punctuation.
-Include all words in order, including duplicates.
+def _load_prompt_from_file(filename: str) -> Optional[str]:
+    """Load a prompt file directly from the prompts directory."""
+    try:
+        file_path = PROMPTS_DIR / filename
+        if file_path.exists():
+            return file_path.read_text(encoding="utf-8")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to load prompt file {filename}: {e}")
+        return None
 
-Example for the sentence "今天天气很好，阳光明媚。":
-今天|today|NOUN|今天|jīntiān
-天气|weather|NOUN|天气|tiānqì
-很|very|ADV|很|hěn
-好|good|ADJ|好|hǎo
-阳光|sunshine|NOUN|阳光|yáng guāng
-明媚|bright and beautiful|ADJ|明媚|míng mèi""",
-    },
-    "es": {
-        "system": "You're a language tutor, creating texts for learners to practice comprehensible input.",
-        "text": """Please generate a text in Spanish for the comprehensible input training.
-The learner is around {level} level; please write accordingly.
-Please try to make the text around {length} words long.
-Try to include at least some of the following words in the text: {include_words}. Gently reinforce the target words in context and keep the language natural and engaging.
-Separate paragraphs with double newlines (\\n\\n).
-{topic_line}
-Please output the title and text in pipe-separated CSV format with a header row:
-title|text
-Un paseo en el parque|Hoy hace buen tiempo.\\n\\nVamos juntos a pasear por el parque.
 
-For words with separable prefixes (like German), mark them with ... to indicate non-continuity:
-word|translation|pos|lemma
-ruf...an|call|VERB|anrufen""",
-        "translation": """Translate this text from {source_lang} to {target_lang} sentence by sentence:
-source|translation
+def _load_prompt_file(category: str, lang: str) -> Optional[str]:
+    """Load a prompt file from the prompts directory."""
+    try:
+        lang_base = lang.split("-", 1)[0].split("_", 1)[0]
 
-{text}
+        file_path = PROMPTS_DIR / category / f"{lang}.md"
+        if file_path.exists():
+            return file_path.read_text(encoding="utf-8")
 
-Example format:
-Hola.|Hello.
-¿Cómo estás?|How are you?""",
-        "words": """Analyze and translate each word in this {source_lang} text.
+        file_path = PROMPTS_DIR / category / f"{lang_base}.md"
+        if file_path.exists():
+            return file_path.read_text(encoding="utf-8")
 
-Return pipe-separated CSV format:
-word|translation|pos|lemma
+        file_path = PROMPTS_DIR / category / "default.md"
+        if file_path.exists():
+            return file_path.read_text(encoding="utf-8")
 
-For German separable prefixes, use ... notation:
-Ich|I|PRON|ich
-ruf...an|call|VERB|anrufen
-meinen|my|DET|mein
-Freund|friend|NOUN|Freund
-an|at|PREP|an
-
-Example format:
-Hola|Hello|INTJ|hola
-mundo|world|NOUN|mundo""",
-    },
-    "fr": {
-        "system": "You're a language tutor, creating texts for learners to practice comprehensible input.",
-        "text": """Please generate a text in French for comprehensible input training.
-The learner is around {level} level; please write accordingly.
-Please try to make the text around {length} words long.
-Try to include at least some of the following words in the text: {include_words}. Gently reinforce target words in context and keep language natural and engaging.
-Separate paragraphs with double newlines (\\n\\n).
-{topic_line}
-Please output title and text in pipe-separated CSV format with a header row:
-title|text
-Une promenade au parc|Il fait beau aujourd'hui.\\n\\nAllons nous promener ensemble dans le parc.
- 
-For words with separable prefixes (like German), mark them with ... to indicate non-continuity:
-word|translation|pos|lemma""",
-        "translation": """Translate this text from {source_lang} to {target_lang} sentence by sentence:
-source|translation
-
-{text}
- 
-Example format:
-Bonjour.|Hello.
-Comment ça va?|How are you?""",
-        "words": """Analyze and translate each word in this {source_lang} text.
- 
-Return pipe-separated CSV format:
-word|translation|pos|lemma
- 
-For German separable prefixes, use ... notation:
-Ich|I|PRON|ich
-ruf...an|call|VERB|anrufen
-meinen|my|DET|mein
-Freund|friend|NOUN|Freund
-an|at|PREP|an
- 
-Example format:
-Bonjour|Hello|INTJ|bonjour
-monde|world|NOUN|monde""",
-    },
-}
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to load prompt file for {category}/{lang}: {e}")
+        return None
 
 
 def _safe_format(s: str, mapping: Dict[str, str]) -> str:
@@ -131,7 +52,7 @@ def _safe_format(s: str, mapping: Dict[str, str]) -> str:
     """
     import re
 
-    def repl(m: re.Match[str]) -> str:
+    def repl(m) -> str:
         key = m.group(1)
         return str(mapping.get(key, m.group(0)))
 
@@ -145,60 +66,44 @@ class PromptSpec:
     approx_len: int
     user_level_hint: Optional[str]
     include_words: Optional[List[str]]
-    script: Optional[str] = None  # for zh source formatting
+    script: Optional[str] = None
     ci_target: Optional[float] = None
     recent_titles: Optional[List[str]] = None
-    topic: Optional[str] = (
-        None  # Topic category: fiction, news, science, history, daily_life, culture
-    )
+    topic: Optional[str] = None
 
 
 def get_prompt(lang: str, key: str, **kwargs) -> str:
     """Get a prompt template for a given language and key, with formatting."""
-    base_lang = lang.split("-", 1)[0].split("_", 1)[0]  # Get base language code
-    template = PROMPTS.get(lang, {}).get(key) or PROMPTS.get(base_lang, {}).get(key)
+    if key == "system":
+        template = _load_prompt_from_file("system.md")
+        if not template:
+            return "You are a language tutor creating texts for comprehensible input training."
+        return _safe_format(template, kwargs)
 
+    category_map = {
+        "text": "text_generation",
+        "translation": "sentence_translation",
+        "words": "word_analysis",
+    }
+
+    category = category_map.get(key)
+    if not category:
+        logger.warning(f"Unknown prompt key: {key}")
+        return "Please assist with language learning."
+
+    template = _load_prompt_file(category, lang)
     if not template:
         logger.warning(f"Prompt not found for lang={lang}, key={key}, using default")
-        template = _get_default_prompt(key)
+        template = _load_prompt_file(category, "default")
+
+    if not template:
+        return "Please assist with language learning."
 
     return _safe_format(template, kwargs)
 
 
-def _get_default_prompt(key: str) -> str:
-    """Get a default fallback prompt for missing language prompts."""
-    defaults = {
-        "system": "You are a language tutor creating texts for comprehensible input training.",
-        "text": """Please generate a text in the target language for comprehensible input training.
-The learner is around {level} level; please write accordingly.
-Please try to make the text around {length} words long.
-Try to include at least some of the following words in the text: {include_words}.
-{topic_line}
-Please output the title and text in pipe-separated CSV format with a header row:
-title|text""",
-        "translation": """Translate this text from {source_lang} to {target_lang} sentence by sentence:
-source|translation
-
-{text}
-
-Example format:
-Hello.|Hola.
-How are you?|How are you?""",
-        "words": """Analyze and translate each word in this text.
-
-Return pipe-separated CSV format:
-word|translation|pos|lemma
-
-Example format:
-Hello|Hello|INTJ|hello
-world|world|NOUN|world""",
-    }
-    return defaults.get(key, "Please assist with language learning.")
-
-
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     """Build reading prompt messages for LLM."""
-    # Simplified prompt building
     script = (
         "simplified"
         if spec.script == "Hans"
@@ -212,7 +117,6 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         else spec.user_level_hint or ""
     )
 
-    # Format topic
     topic_line = ""
     if spec.topic:
         topic_display_map = {
@@ -258,12 +162,8 @@ def build_structured_translation_prompt(
     source_lang: str, target_lang: str, text: str
 ) -> List[Dict[str, str]]:
     """Build prompt for structured sentence-by-sentence translation."""
-    lang_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(
-        source_lang, source_lang
-    )
-    target_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(
-        target_lang, target_lang
-    )
+    lang_display = _get_language_display(source_lang)
+    target_display = _get_language_display(target_lang)
 
     system_content = ""
     user_content = get_prompt(
@@ -284,12 +184,8 @@ def build_word_translation_prompt(
     source_lang: str, target_lang: str, text: str
 ) -> List[Dict[str, str]]:
     """Build prompt for word-by-word translation with linguistic analysis."""
-    lang_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(
-        source_lang, source_lang
-    )
-    target_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(
-        target_lang, target_lang
-    )
+    lang_display = _get_language_display(source_lang)
+    target_display = _get_language_display(target_lang)
 
     system_content = ""
     user_content = get_prompt(
@@ -321,7 +217,6 @@ def build_translation_contexts(
         else ""
     )
 
-    # Structured
     tr_msgs = build_structured_translation_prompt(source_lang, target_lang, text)
     tr_system = tr_msgs[0]["content"]
     tr_user = tr_msgs[1]["content"]
@@ -332,7 +227,6 @@ def build_translation_contexts(
         {"role": "user", "content": tr_user},
     ]
 
-    # Word-by-word
     w_msgs = build_word_translation_prompt(source_lang, target_lang, text)
     w_system = w_msgs[0]["content"]
     w_user = w_msgs[1]["content"]
@@ -350,12 +244,8 @@ def build_title_translation_prompt(
     source_lang: str, target_lang: str, title: str
 ) -> List[Dict[str, str]]:
     """Build prompt for title translation."""
-    lang_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(
-        source_lang, source_lang
-    )
-    target_display = {"zh": "Chinese", "es": "Spanish", "fr": "French"}.get(
-        target_lang, target_lang
-    )
+    lang_display = _get_language_display(source_lang)
+    target_display = _get_language_display(target_lang)
 
     system_content = f"You are a professional translator. Translate the following {lang_display} title to {target_display}. Provide only the translated title without any additional text or explanations."
 
@@ -363,3 +253,26 @@ def build_title_translation_prompt(
         {"role": "system", "content": system_content},
         {"role": "user", "content": title},
     ]
+
+
+def _get_language_display(lang_code: str) -> str:
+    """Get language display name from database or fallback to hardcoded mapping."""
+    try:
+        from server.db import SessionLocal
+        from server.models import Language
+
+        with SessionLocal() as db:
+            lang = db.query(Language).filter(Language.code == lang_code).first()
+            if lang:
+                return lang.name
+    except Exception:
+        pass
+
+    fallback_map = {
+        "zh": "Chinese",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "en": "English",
+    }
+    return fallback_map.get(lang_code, lang_code)

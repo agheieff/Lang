@@ -179,6 +179,9 @@ class Language(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(64))
+    display_name: Mapped[str] = mapped_column(String(128))
+    script: Mapped[str] = mapped_column(String(16))
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

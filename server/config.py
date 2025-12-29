@@ -9,21 +9,26 @@ from typing import Dict
 
 @dataclass
 class _Settings:
-    NEXT_READY_MAX_WAIT_SEC: float = float(os.getenv("ARC_NEXT_READY_MAX_WAIT_SEC", "8"))
+    NEXT_READY_MAX_WAIT_SEC: float = float(
+        os.getenv("ARC_NEXT_READY_MAX_WAIT_SEC", "8")
+    )
     NEXT_READY_GRACE_SEC: float = float(os.getenv("ARC_NEXT_READY_GRACE_SEC", "60"))
-    CONTENT_ONLY_GRACE_SEC: float = float(os.getenv("ARC_CONTENT_ONLY_GRACE_SEC", "120"))
+    CONTENT_ONLY_GRACE_SEC: float = float(
+        os.getenv("ARC_CONTENT_ONLY_GRACE_SEC", "120")
+    )
 
 
 # Enum for subscription tiers
 class SubscriptionTier(str, Enum):
     """Enum for subscription tiers with string values."""
+
     FREE = "Free"
     STANDARD = "Standard"
     PRO = "Pro"
     PRO_PLUS = "Pro+"
     BYOK = "BYOK"
     ADMIN = "admin"  # Internal ops/internal tier
-    
+
     def __str__(self) -> str:
         return self.value
 
@@ -118,7 +123,9 @@ except Exception:
 
 # OpenRouter per-user key management
 OPENROUTER_PROVISIONING_KEY: str = os.getenv("OPENROUTER_PROVISIONING_KEY", "")
-OPENROUTER_KEY_ENCRYPTION_SECRET: str = os.getenv("OPENROUTER_KEY_ENCRYPTION_SECRET", "")
+OPENROUTER_KEY_ENCRYPTION_SECRET: str = os.getenv(
+    "OPENROUTER_KEY_ENCRYPTION_SECRET", ""
+)
 
 # Per-tier monthly spending limits (USD) for OpenRouter sub-keys
 # None means no limit (BYOK users bring their own key)
@@ -132,17 +139,25 @@ TIER_SPENDING_LIMITS: Dict[SubscriptionTier, float | None] = {
 }
 
 # Tiers that get their own OpenRouter sub-key
-PAID_TIERS: set[SubscriptionTier] = {SubscriptionTier.STANDARD, SubscriptionTier.PRO, SubscriptionTier.PRO_PLUS}
+PAID_TIERS: set[SubscriptionTier] = {
+    SubscriptionTier.STANDARD,
+    SubscriptionTier.PRO,
+    SubscriptionTier.PRO_PLUS,
+}
 
 
 # Text pool settings
-POOL_SIZE: int = _i("ARC_POOL_SIZE", 4)  # Number of pre-generated texts to maintain per user/lang
-POOL_CI_VARIANCE: float = _f("ARC_POOL_CI_VARIANCE", 0.05)  # How much to vary CI target in pool
+POOL_SIZE: int = _i(
+    "ARC_POOL_SIZE", 4
+)  # Number of pre-generated texts to maintain per user/lang
+POOL_CI_VARIANCE: float = _f(
+    "ARC_POOL_CI_VARIANCE", 0.05
+)  # How much to vary CI target in pool
 
 # Topic categories for text generation (path-based strings, hierarchy-ready)
 TOPICS: list[str] = [
     "fiction",
-    "news", 
+    "news",
     "science",
     "technology",
     "history",
@@ -164,8 +179,12 @@ FREE_TIER_TEXT_LIMIT: int = _i("ARC_FREE_TEXT_LIMIT", 50)  # Hard cap on text co
 # Startup text pre-generation
 # Set ARC_SYSTEM_API_KEY to enable pre-generation on startup
 STARTUP_TEXTS_PER_LANG: int = _i("ARC_STARTUP_TEXTS_PER_LANG", 1)  # 0 to disable
-STARTUP_LANGS: str = os.getenv("ARC_STARTUP_LANGS", "es,zh")  # Comma-separated language codes
-STARTUP_TARGET_LANG: str = os.getenv("ARC_STARTUP_TARGET_LANG", "en")
+STARTUP_LANGS: str = os.getenv(
+    "ARC_STARTUP_LANGS", "es,zh"
+)  # Comma-separated language codes
+STARTUP_TARGET_LANG: str = os.getenv(
+    "ARC_STARTUP_TARGET_LANG", "es"
+)  # Default to Spanish instead of English
 STARTUP_TIMEOUT_SEC: int = _i("ARC_STARTUP_TIMEOUT_SEC", 300)  # Max wait time for texts
 
 

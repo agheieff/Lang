@@ -68,13 +68,19 @@ def get_db() -> Generator[Session, None, None]:
 
 # ---- Database Initialization ----
 def init_db() -> None:
-    """Initialize database: create all tables"""
+    """Initialize database: create all tables and seed data"""
     try:
         from . import models  # noqa: F401
 
         with engine.begin() as conn:
             Base.metadata.create_all(bind=conn, checkfirst=True)
         logger.info("Database tables created successfully")
+
+        from .utils.migrations import seed_languages
+
+        with SessionLocal() as db:
+            seed_languages(db)
+        logger.info("Languages seeded successfully")
 
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")

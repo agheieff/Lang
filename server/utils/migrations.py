@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
+from server.models import Language
 
 
 def _has_column(inspector, table: str, col: str) -> bool:
@@ -46,3 +47,46 @@ def ensure_reading_text_lifecycle_columns(db: Session) -> None:
             db.rollback()
         except Exception:
             pass
+
+
+def seed_languages(db: Session) -> None:
+    """Seed the languages table with supported languages."""
+    languages = [
+        {
+            "code": "es",
+            "name": "Spanish",
+            "display_name": "Spanish",
+            "script": "Latin",
+            "is_enabled": True,
+        },
+        {
+            "code": "zh",
+            "name": "Chinese",
+            "display_name": "Chinese (Simplified)",
+            "script": "Hans",
+            "is_enabled": True,
+        },
+        {
+            "code": "zh-TW",
+            "name": "Chinese",
+            "display_name": "Chinese (Traditional)",
+            "script": "Hant",
+            "is_enabled": True,
+        },
+        {
+            "code": "en",
+            "name": "English",
+            "display_name": "English",
+            "script": "Latin",
+            "is_enabled": True,
+        },
+    ]
+
+    existing_codes = {lang.code for lang in db.query(Language).all()}
+
+    for lang_data in languages:
+        if lang_data["code"] not in existing_codes:
+            lang = Language(**lang_data)
+            db.add(lang)
+
+    db.commit()

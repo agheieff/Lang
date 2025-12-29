@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import asyncio
 import json
-import time
 import random
 import logging
 import os
@@ -35,37 +35,25 @@ def get_llm_config() -> Dict[str, Any]:
     try:
         with open(models_file, "r") as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to load models.json: {e}, using empty config")
         return {
-            "models": [
-                {
-                    "id": "grok-fast-free",
-                    "display_name": "Grok 4.1 Fast (Free)",
-                    "model": "x-ai/grok-4.1-fast:free",
-                    "base_url": "https://openrouter.ai/api/v1",
-                    "api_key_env": "OPENROUTER_API_KEY",
-                    "max_tokens": 32768,
-                    "allowed_tiers": [
-                        "Free",
-                        "Standard",
-                        "Pro",
-                        "Pro+",
-                        "BYOK",
-                        "admin",
-                    ],
-                }
-            ],
-            "default_model": "grok-fast-free",
+            "models": [],
+            "default_model": None,
+            "fallback_chain": [],
+            "provider_configs": {},
         }
 
 
-def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -> Any:
+async def _retry_with_backoff(
+    func: Callable, *args, max_retries: int = 3, **kwargs
+) -> Any:
     """Execute a function with exponential backoff for rate limits and transient errors."""
     last_exception: Optional[Exception] = None
 
     for attempt in range(max_retries + 1):
         try:
-            return func(*args, **kwargs)
+            return await func(*args, **kwargs)
         except httpx.TimeoutException as e:
             last_exception = e
             if attempt >= max_retries:
@@ -81,7 +69,7 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
             logger.warning(
                 f"LLM request timed out (attempt {attempt + 1}/{max_retries + 1}). Retrying in {sleep_time:.2f}s..."
             )
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
 
         except httpx.NetworkError as e:
             last_exception = e
@@ -100,7 +88,7 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
             logger.warning(
                 f"LLM request network error (attempt {attempt + 1}/{max_retries + 1}). Retrying in {sleep_time:.2f}s..."
             )
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
 
         except httpx.HTTPStatusError as e:
             last_exception = e
@@ -131,7 +119,7 @@ def _retry_with_backoff(func: Callable, *args, max_retries: int = 3, **kwargs) -
             logger.warning(
                 f"LLM request failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {sleep_time:.2f}s..."
             )
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
 
     if last_exception is not None:
         raise last_exception
@@ -148,25 +136,55 @@ def _pick_openrouter_model(requested: Optional[str] = None) -> str:
     m2 = os.getenv("OPENROUTER_MODEL")
     if m2:
         return m2
+
+    config = get_llm_config()
+    default_id = config.get("default_model")
+
+    if default_id:
+        models = config.get("models", [])
+        for model in models:
+            if model.get("id") == default_id:
+                return model.get("model", default_id)
+
+    models = config.get("models", [])
+    if models:
+        return models[0].get("model", "unknown")
+
+    logger.warning("No models configured in JSON config, using fallback")
     return "x-ai/grok-4.1-fast:free"
 
 
-# Fallback models to try if primary model fails with 404
-FALLBACK_MODELS = [
-    "x-ai/grok-4.1-fast:free",
-    "google/gemma-3-27b-it:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-]
+def _get_fallback_models() -> List[str]:
+    """Get fallback model IDs from JSON config."""
+    config = get_llm_config()
+    fallback_chain = config.get("fallback_chain", [])
+
+    if not fallback_chain:
+        logger.debug("No fallback chain configured")
+        return []
+
+    models = config.get("models", [])
+    model_map = {m["id"]: m["model"] for m in models}
+    fallback_models = [model_map.get(mid, mid) for mid in fallback_chain if mid]
+
+    logger.debug(f"Loaded {len(fallback_models)} fallback models from config")
+    return fallback_models
 
 
-def _call_openrouter_with_model(
+def _get_provider_config(provider: str) -> Dict[str, Any]:
+    """Get provider-specific configuration from JSON config."""
+    config = get_llm_config()
+    provider_configs = config.get("provider_configs", {})
+    return provider_configs.get(provider, {})
+
+
+async def _call_openrouter_with_model(
     messages: List[Dict[str, str]],
     model_id: str,
     temperature: Optional[float],
     max_tokens: int,
     api_key: str,
-) -> tuple[str, Optional[Dict[str, Any]]]:
+):
     """Make OpenRouter API call using httpx with specific model."""
     url = "https://openrouter.ai/api/v1/chat/completions"
     data = {
@@ -176,18 +194,36 @@ def _call_openrouter_with_model(
         "max_tokens": max_tokens,
     }
 
+    provider_cfg = _get_provider_config("openrouter")
+    app_title = os.getenv(
+        "OPENROUTER_APP_TITLE", provider_cfg.get("app_title", "Arcadia AI Chat")
+    )
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Arcadia AI Chat"),
+        "X-Title": app_title,
     }
 
-    if ref := os.getenv("OPENROUTER_REFERER"):
-        headers["HTTP-Referer"] = ref
+    referer = os.getenv("OPENROUTER_REFERER", provider_cfg.get("referer"))
+    if referer:
+        headers["HTTP-Referer"] = referer
 
-    def _execute_call():
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(url, json=data, headers=headers)
+    timeout = provider_cfg.get("timeout", 60)
+    max_retries = provider_cfg.get("max_retries", 3)
+
+    logger.info(
+        f"Calling OpenRouter API with model: {model_id}, messages count: {len(messages)}"
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"Request data: {json.dumps(data, ensure_ascii=False)[:500]}")
+        logger.debug(
+            f"Request messages: {json.dumps(messages, ensure_ascii=False)[:500]}"
+        )
+
+    async def _execute_call():
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+            resp = await client.post(url, json=data, headers=headers)
             resp.raise_for_status()
             resp_dict = resp.json()
 
@@ -205,19 +241,19 @@ def _call_openrouter_with_model(
 
         return strip_thinking_blocks(content), resp_dict
 
-    return _retry_with_backoff(_execute_call, max_retries=3)
+    return await _retry_with_backoff(_execute_call, max_retries=max_retries)
 
 
-def _call_with_model_fallback(
+async def _call_with_model_fallback(
     messages: List[Dict[str, str]],
     model: Optional[str],
     temperature: Optional[float],
     max_tokens: int,
     api_key: str,
-) -> tuple[str, Optional[Dict[str, Any]]]:
+):
     """Try primary model, fallback to alternatives on 404 errors."""
     models_to_try = [model] if model else [_pick_openrouter_model()]
-    models_to_try.extend(FALLBACK_MODELS)
+    models_to_try.extend(_get_fallback_models())
 
     last_error = None
 
@@ -226,7 +262,7 @@ def _call_with_model_fallback(
             continue  # Skip duplicates
 
         try:
-            return _call_openrouter_with_model(
+            return await _call_openrouter_with_model(
                 messages, try_model, temperature, max_tokens, api_key
             )
         except httpx.HTTPStatusError as e:
@@ -290,7 +326,7 @@ def chat_complete_with_raw(
         )
 
 
-def _call_openrouter(
+async def _call_openrouter(
     messages: List[Dict[str, str]],
     model: Optional[str],
     temperature: Optional[float],
@@ -298,17 +334,19 @@ def _call_openrouter(
     api_key: str,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Make OpenRouter API call using httpx with model fallback."""
-    return _call_with_model_fallback(messages, model, temperature, max_tokens, api_key)
+    return await _call_with_model_fallback(
+        messages, model, temperature, max_tokens, api_key
+    )
 
 
-def _call_local_api(
+async def _call_local_api(
     messages: List[Dict[str, str]],
     model: Optional[str],
     base_url: str,
     temperature: Optional[float],
     max_tokens: int,
     api_key: Optional[str],
-) -> tuple[str, Optional[Dict[str, Any]]]:
+):
     """Make local OpenAI-compatible API call using httpx."""
     url = f"{base_url.rstrip('/')}/chat/completions"
 
@@ -323,9 +361,13 @@ def _call_local_api(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    def _execute_call():
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(url, json=data, headers=headers)
+    provider_cfg = _get_provider_config("local")
+    timeout = provider_cfg.get("timeout", 60)
+    max_retries = provider_cfg.get("max_retries", 3)
+
+    async def _execute_call():
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+            resp = await client.post(url, json=data, headers=headers)
             resp.raise_for_status()
             resp_dict = resp.json()
 
@@ -343,4 +385,4 @@ def _call_local_api(
 
         return strip_thinking_blocks(content), resp_dict
 
-    return _retry_with_backoff(_execute_call, max_retries=3)
+    return await _retry_with_backoff(_execute_call, max_retries=max_retries)
