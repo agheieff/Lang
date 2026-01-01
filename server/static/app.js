@@ -595,7 +595,7 @@
             if (toggleBtn) {
                 toggleBtn.addEventListener('click', toggleTranslation);
             }
-            
+
             // Next text button
             const nextBtn = $('next-text-btn');
             if (nextBtn) {
@@ -605,106 +605,17 @@
                     }
                 });
             }
-            
-            // Word hover and click handlers
-            const readingText = $('reading-text');
-            if (readingText) {
-                this._attachWordHandlers(readingText);
-            }
-            
-            // Context menu for right-click
-            readingText?.addEventListener('contextmenu', this._handleContextMenu.bind(this));
-            
-            // Hide tooltip on click outside
+
+            // Note: Word hover/click handlers are now in reading.html inline JS
+            // to avoid duplicate event listeners and conflicts
+
+            // Hide tooltip on click outside (works with reading.html tooltips)
             document.addEventListener('click', (e) => {
-                if (AppState.tooltipVisible && !e.target.closest('#word-tooltip')) {
-                    hideTooltip();
+                const tooltip = document.getElementById('word-tooltip');
+                if (tooltip && tooltip.style.display === 'block' && !e.target.closest('[data-word-index]') && !e.target.closest('#word-tooltip')) {
+                    tooltip.style.display = 'none';
                 }
             });
-        }
-        
-        _attachWordHandlers(textElement) {
-            const wordElements = textElement.querySelectorAll('[data-word-index]');
-            
-            wordElements.forEach(element => {
-                // Hover handlers
-                element.addEventListener('mouseenter', (e) => {
-                    this._handleWordHover(e, element);
-                });
-                
-                element.addEventListener('mouseleave', () => {
-                    // Delay hide to allow moving to tooltip
-                    setTimeout(() => {
-                        if (! AppState.tooltipVisible) return;
-                        const tooltip = $('word-tooltip');
-                        if (tooltip && !tooltip.matches(':hover')) {
-                            hideTooltip();
-                        }
-                    }, Config.TOOLTIP_HIDE_DELAY);
-                });
-                
-                // Click handler
-                element.addEventListener('click', (e) => {
-                    this._handleWordClick(e, element);
-                });
-            });
-        }
-        
-        _handleWordHover(event, element) {
-            const wordData = this._extractWordData(element);
-            if (!wordData || !wordData.translation) return;
-
-            // Track translation view on hover
-            trackTranslationView('word', wordData);
-
-            showTooltip(
-                `<div class="font-medium">${wordData.surface}</div><div class="text-gray-600">${wordData.translation}</div>`,
-                event.pageX,
-                event.pageY
-            );
-        }
-
-        _handleWordClick(event, element) {
-            const wordData = this._extractWordData(element);
-            if (!wordData) return;
-
-            // Track word click
-            trackWordClick(wordData);
-            trackTranslationView('word', wordData);
-
-            // Show translation in tooltip
-            if (wordData.translation) {
-                showTooltip(
-                    `<div class="font-medium">${wordData.surface}</div><div class="text-gray-600">${wordData.translation}</div>`,
-                    event.pageX,
-                    event.pageY
-                );
-            } else {
-                showTooltip(
-                    `<div class="font-medium">${wordData.surface}</div><div class="text-gray-500">Translation not available</div>`,
-                    event.pageX,
-                    event.pageY
-                );
-            }
-        }
-        
-        _handleContextMenu(event) {
-            const target = event.target.closest('[data-word-index]');
-            if (!target) return;
-            
-            const wordData = this._extractWordData(target);
-            if (!wordData) return;
-            
-            showContextMenu(event, wordData);
-        }
-        
-        _extractWordData(element) {
-            try {
-                return JSON.parse(element.dataset.wordData || '{}');
-            } catch (error) {
-                console.error('Error parsing word data:', error);
-                return null;
-            }
         }
     }
     

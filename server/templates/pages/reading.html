@@ -236,18 +236,28 @@
    */
   function setupMultiSegmentHighlighting() {
     const words = document.querySelectorAll('[data-word-id]');
+    let hideTimeout = null;
+    let isSticky = false; // When true, tooltip stays visible until clicked away
 
     words.forEach(word => {
       const wordId = word.getAttribute('data-word-id');
 
       word.addEventListener('mouseenter', function() {
+        // Clear any pending hide
+        if (hideTimeout) {
+          clearTimeout(hideTimeout);
+          hideTimeout = null;
+        }
+
         // Highlight all segments with the same word-id
         document.querySelectorAll(`[data-word-id="${wordId}"]`).forEach(el => {
           el.classList.add('highlighted-segment');
         });
 
-        // Show translation tooltip
-        showTooltipForWord(word);
+        // Show tooltip (unless sticky mode is active)
+        if (!isSticky) {
+          showTooltipForWord(word, false);
+        }
       });
 
       word.addEventListener('mouseleave', function() {
@@ -255,35 +265,79 @@
         document.querySelectorAll(`[data-word-id="${wordId}"]`).forEach(el => {
           el.classList.remove('highlighted-segment');
         });
+
+        // Hide tooltip after delay (unless sticky mode or hovering over tooltip)
+        if (!isSticky) {
+          const tooltip = document.getElementById('word-tooltip');
+          if (tooltip && !tooltip.matches(':hover')) {
+            hideTimeout = setTimeout(() => {
+              tooltip.style.display = 'none';
+            }, 300);
+          }
+        }
       });
 
-      // Click handler to show tooltip
+      // Click handler to show sticky tooltip
       word.addEventListener('click', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        showTooltipForWord(word);
+
+        // Clear any pending hide
+        if (hideTimeout) {
+          clearTimeout(hideTimeout);
+          hideTimeout = null;
+        }
+
+        // Show tooltip in sticky mode
+        isSticky = true;
+        showTooltipForWord(word, true);
       });
+    });
+
+    // Hide sticky tooltip when clicking outside
+    document.addEventListener('click', function(e) {
+      if (isSticky && !e.target.closest('[data-word-id]') && !e.target.closest('#word-tooltip')) {
+        const tooltip = document.getElementById('word-tooltip');
+        if (tooltip) {
+          tooltip.style.display = 'none';
+        }
+        isSticky = false;
+      }
+    });
+
+    // Also hide on ESC key
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && isSticky) {
+        const tooltip = document.getElementById('word-tooltip');
+        if (tooltip) {
+          tooltip.style.display = 'none';
+        }
+        isSticky = false;
+      }
     });
   }
 
   /**
    * Show translation tooltip for a word
+   * @param {HTMLElement} wordElement - The word element
+   * @param {boolean} sticky - If true, tooltip stays visible until clicked away
    */
-  function showTooltipForWord(wordElement) {
+  function showTooltipForWord(wordElement, sticky = false) {
     const container = document.getElementById('reading-text');
     if (!container || !container.wordData) return;
 
     const wordIndex = parseInt(wordElement.getAttribute('data-word-index'));
     const wordData = container.wordData[wordIndex];
 
-    if (!wordData || !wordData.translation) return;
+    if (!wordData) return;
 
     // Create or get tooltip
     let tooltip = document.getElementById('word-tooltip');
     if (!tooltip) {
       tooltip = document.createElement('div');
       tooltip.id = 'word-tooltip';
-      tooltip.className = 'absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-3 text-sm max-w-xs pointer-events-none';
+      // Allow pointer events so tooltip can be hovered
+      tooltip.className = 'absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-3 text-sm max-w-xs';
       document.body.appendChild(tooltip);
     }
 
@@ -292,6 +346,8 @@
 
     if (wordData.translation) {
       content += `<div class="text-gray-700">${escapeHtml(wordData.translation)}</div>`;
+    } else {
+      content += `<div class="text-gray-500 italic">No translation available</div>`;
     }
 
     if (wordData.lemma && wordData.lemma !== wordData.surface) {
@@ -300,6 +356,10 @@
 
     if (wordData.pinyin) {
       content += `<div class="text-xs text-gray-500 mt-1">${escapeHtml(wordData.pinyin)}</div>`;
+    }
+
+    if (sticky) {
+      content += `<div class="text-xs text-gray-400 mt-2 italic">Press ESC or click elsewhere to close</div>`;
     }
 
     tooltip.innerHTML = content;
@@ -326,13 +386,6 @@
 
     tooltip.style.left = left + 'px';
     tooltip.style.top = top + 'px';
-
-    // Hide tooltip after delay
-    setTimeout(() => {
-      if (!tooltip.matches(':hover')) {
-        tooltip.style.display = 'none';
-      }
-    }, 2000);
   }
 
   // Initialize when DOM is ready
