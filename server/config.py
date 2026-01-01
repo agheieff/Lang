@@ -180,7 +180,7 @@ FREE_TIER_TEXT_LIMIT: int = _i("ARC_FREE_TEXT_LIMIT", 50)  # Hard cap on text co
 # Set ARC_SYSTEM_API_KEY to enable pre-generation on startup
 STARTUP_TEXTS_PER_LANG: int = _i("ARC_STARTUP_TEXTS_PER_LANG", 1)  # 0 to disable
 STARTUP_LANGS: str = os.getenv(
-    "ARC_STARTUP_LANGS", "es,zh"
+    "ARC_STARTUP_LANGS", "es,zh-CN"
 )  # Comma-separated language codes
 STARTUP_TARGET_LANG: str = os.getenv(
     "ARC_STARTUP_TARGET_LANG", "es"

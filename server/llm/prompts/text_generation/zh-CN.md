@@ -1,5 +1,5 @@
-Please generate a text in Chinese for comprehensible input training.
-Write it in {script} characters.
+Please generate a text in Chinese (Simplified) for comprehensible input training.
+Write it in simplified Chinese characters (简体字).
 The learner is around {level} level, please try to make the text correspond to that.
 Please try to make the text around {length} characters long.
 Try to include at least some of the following words in the text: {include_words}. Gently reinforce target words in context and keep the language natural and engaging.

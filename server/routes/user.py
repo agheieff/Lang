@@ -191,17 +191,22 @@ def create_or_update_profile(
     db: Session = Depends(get_db),
 ):
     """Create or update user profile."""
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    # Check for existing profile with same lang and target_lang
+    profile = db.query(Profile).filter(
+        Profile.account_id == account.id,
+        Profile.lang == profile_data.get("lang"),
+        Profile.target_lang == profile_data.get("target_lang")
+    ).first()
 
     if profile:
-        # Update existing
+        # Update existing profile for this language pair
         for key, value in profile_data.items():
-            if hasattr(profile, key) and key not in ["id", "account_id", "created_at"]:
+            if hasattr(profile, key) and key not in ["id", "account_id", "created_at", "lang", "target_lang"]:
                 setattr(profile, key, value)
         db.commit()
         db.refresh(profile)
     else:
-        # Create new
+        # Create new profile for this language pair
         profile = Profile(account_id=account.id, **profile_data)
         db.add(profile)
         db.commit()
@@ -462,3 +467,85 @@ def get_tier_info(
         "text_limit": text_limit,
         "chars_percentage": (chars_used / char_limit * 100) if char_limit else 0,
     }
+
+
+# Profile Management
+@router.get("/profile/list")
+def list_profiles(
+    account: Account = Depends(_get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Get all profiles for the current user."""
+    profiles = db.query(Profile).filter(Profile.account_id == account.id).all()
+
+    # Language code to flag and display name mapping
+    lang_info = {
+        "es": {"flag": "🇪🇸", "name": "Spanish"},
+        "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+        "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},  # Legacy code fallback
+        "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
+        "zh-Hans": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},  # Another legacy fallback
+        "zh-Hant": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},  # Another legacy fallback
+        "en": {"flag": "🇬🇧", "name": "English"},
+        "fr": {"flag": "🇫🇷", "name": "French"},
+        "de": {"flag": "🇩🇪", "name": "German"},
+        "ja": {"flag": "🇯🇵", "name": "Japanese"},
+        "ko": {"flag": "🇰🇷", "name": "Korean"},
+    }
+
+    result = []
+    for p in profiles:
+        # Get language info with fallback
+        lang = p.lang
+        info = lang_info.get(lang)
+
+        if not info:
+            # Generate a display name from the language code
+            if lang.startswith("zh-"):
+                info = {"flag": "🌏", "name": f"Chinese ({lang.split('-')[1].upper()})"}
+            elif lang == "zh":
+                info = {"flag": "🇨🇳", "name": "Chinese"}
+            else:
+                info = {"flag": "🌐", "name": lang.upper()}
+
+        result.append({
+            "id": p.id,
+            "lang": p.lang,
+            "target_lang": p.target_lang,
+            "level_value": p.level_value,
+            "flag": info["flag"],
+            "name": info["name"],
+        })
+
+    return {"profiles": result}
+
+
+@router.post("/profile/switch")
+def switch_profile(
+    profile_id: int = Body(..., embed=True),
+    account: Account = Depends(_get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Switch to a different profile."""
+    profile = db.query(Profile).filter(
+        Profile.id == profile_id,
+        Profile.account_id == account.id
+    ).first()
+
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+
+    from fastapi.responses import JSONResponse
+    response = JSONResponse({"success": True, "profile_id": profile.id})
+
+    # Set cookie to remember active profile (7 days)
+    response.set_cookie(
+        "active_profile_id",
+        str(profile.id),
+        max_age=604800,
+        httponly=True,
+        secure=False,  # Set True in production with HTTPS
+        samesite="lax",
+    )
+
+    return response

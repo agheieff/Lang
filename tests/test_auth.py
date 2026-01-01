@@ -34,12 +34,14 @@ def test_register_success(client):
 
     assert response.status_code == 201
 
+    # Register now returns a token (for auto-login)
     data = response.json()
-    assert "email" in data
-    assert data["email"] == email.lower()
-    assert data["is_active"] is True
-    assert data["is_verified"] is True
-    assert "id" in data
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
+
+    # Check that cookie was set
+    cookies = response.cookies.get("access_token")
+    assert cookies is not None
 
 
 def test_register_duplicate_email(client):
@@ -109,6 +111,10 @@ def test_login_success(client):
     assert "access_token" in data
     assert isinstance(data["access_token"], str)
     assert len(data["access_token"]) > 0
+
+    # Check that cookie was set
+    cookies = response.cookies.get("access_token")
+    assert cookies is not None
 
 
 def test_login_wrong_password(client):

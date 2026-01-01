@@ -34,7 +34,7 @@ def test_profile(test_account):
     with SessionLocal() as db:
         profile = Profile(
             account_id=test_account.id,
-            lang="zh",
+            lang="zh-CN",
             target_lang="en",
             level_value=3.0,
             level_var=1.0,
@@ -54,7 +54,7 @@ async def test_generate_text_content(test_account, test_profile):
     result = await generate_text_content(
         account_id=test_account.id,
         profile_id=test_profile.id,
-        lang="zh",
+        lang="zh-CN",
         target_lang="en",
         profile=test_profile,
     )
@@ -64,7 +64,7 @@ async def test_generate_text_content(test_account, test_profile):
     assert result.id is not None
     assert result.content is not None
     assert len(result.content) > 0
-    assert result.lang == "zh"
+    assert result.lang == "zh-CN"
     assert result.target_lang == "en"
 
 
@@ -75,7 +75,7 @@ async def test_generate_word_translations(test_account, test_profile):
         generated_text = await generate_text_content(
             account_id=test_account.id,
             profile_id=test_profile.id,
-            lang="zh",
+            lang="zh-CN",
             target_lang="en",
             profile=test_profile,
         )
@@ -85,7 +85,7 @@ async def test_generate_word_translations(test_account, test_profile):
 
         success = await generate_translations(
             text_id=text_id,
-            lang="zh",
+            lang="zh-CN",
             target_lang="en",
         )
 
@@ -98,7 +98,7 @@ async def test_generate_word_translations(test_account, test_profile):
         assert len(word_glosses) > 0
         for gloss in word_glosses:
             assert gloss.text_id == text_id
-            assert gloss.lang == "zh"
+            assert gloss.lang == "zh-CN"
             assert gloss.target_lang == "en"
             assert gloss.surface is not None
             assert len(gloss.surface) > 0
@@ -115,7 +115,7 @@ async def test_generate_sentence_translations(test_account, test_profile):
         generated_text = await generate_text_content(
             account_id=test_account.id,
             profile_id=test_profile.id,
-            lang="zh",
+            lang="zh-CN",
             target_lang="en",
             profile=test_profile,
         )

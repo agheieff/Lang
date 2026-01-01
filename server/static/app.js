@@ -242,57 +242,6 @@
         }
     }
 
-        // When opening the panel, fetch translation if missing
-        if (show) {
-            const textEl = $('translation-text');
-            if (textEl && !textEl.textContent.trim()) {
-                textEl.textContent = 'Loading translation...';
-                
-                // Fetch full text translation
-                const mainTextEl = $('reading-text');
-                const textId = mainTextEl ? mainTextEl.dataset.textId : null;
-                
-                if (textId) {
-                    try {
-                        const res = await fetchWithTimeout(`/reading/${textId}/translations?unit=text`, { 
-                            headers: { 'Accept': 'application/json' } 
-                        });
-                        
-                        if (res.ok) {
-                            const data = await res.json();
-                            if (data.items && data.items.length > 0) {
-                                // Find the longest translation (likely the body, not title)
-                                const items = data.items.sort((a, b) => 
-                                    (b.translation?.length || 0) - (a.translation?.length || 0)
-                                );
-                                const best = items[0];
-                                
-                                if (best && best.translation) {
-                                    textEl.textContent = best.translation;
-                                    
-                                    // Cache it in session data for persistence
-                                    const sessionKey = localStorage.getItem(`arc_current_session_${textId}`);
-                                    if (sessionKey) {
-                                        const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
-                                        sessionData.full_translation = best.translation;
-                                        localStorage.setItem(sessionKey, JSON.stringify(sessionData));
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                        textEl.textContent = 'Translation is not ready yet.';
-                    } catch (error) {
-                        console.error('Error fetching translation:', error);
-                        textEl.textContent = 'Error loading translation.';
-                    }
-                } else {
-                    textEl.textContent = 'No text available.';
-                }
-            }
-        }
-    }
-    
     function showContextMenu(event, wordData) {
         event.preventDefault();
         
@@ -610,29 +559,34 @@
             // Get initial data
             const textEl = $('reading-text');
             const accountEl = document.querySelector('[data-account-id]');
-            
+
             if (textEl && textEl.dataset.textId) {
                 AppState.textId = parseInt(textEl.dataset.textId);
             }
-            
+
             if (accountEl && accountEl.dataset.accountId) {
                 AppState.accountId = parseInt(accountEl.dataset.accountId);
             }
-            
+
             // Check initial next button state
             const initialNextReady = document.querySelector('[data-next-ready]');
             if (initialNextReady) {
                 AppState.isNextReady = initialNextReady.dataset.nextReady === 'true';
                 this.sseManager.updateNextButton();
             }
-            
+
             // Connect SSE
             if (AppState.textId && AppState.accountId) {
                 this.sseManager.connect(AppState.textId, AppState.accountId);
             }
-            
+
             // Attach event listeners
             this._attachEventListeners();
+
+            // Listen for custom event when words are rendered by inline script
+            window.addEventListener('arcadia:words-rendered', () => {
+                this._attachEventListeners();
+            });
         }
         
         _attachEventListeners() {
@@ -718,29 +672,6 @@
             trackWordClick(wordData);
             trackTranslationView('word', wordData);
 
-            // Show translation in tooltip
-            if (wordData.translation) {
-                showTooltip(
-                    `<div class="font-medium">${wordData.surface}</div><div class="text-gray-600">${wordData.translation}</div>`,
-                    event.pageX,
-                    event.pageY
-                );
-            } else {
-                showTooltip(
-                    `<div class="font-medium">${wordData.surface}</div><div class="text-gray-500">Translation not available</div>`,
-                    event.pageX,
-                    event.pageY
-                );
-            }
-        }
-        
-        _handleWordClick(event, element) {
-            const wordData = this._extractWordData(element);
-            if (!wordData) return;
-            
-            // Track the word click
-            trackWordClick(wordData);
-            
             // Show translation in tooltip
             if (wordData.translation) {
                 showTooltip(
@@ -900,43 +831,7 @@
             console.error('Error tracking translation view:', error);
         }
     }
-            
-            // Add or update word interaction
-            const existingInteraction = sessionData.wordInteractions.find(
-                w => w.surface === wordData.surface && w.span_start === wordData.span_start
-            );
-            
-            if (existingInteraction) {
-                existingInteraction.clicked = true;
-                existingInteraction.click_count = (existingInteraction.click_count || 0) + 1;
-            } else {
-                sessionData.wordInteractions.push({
-                    surface: wordData.surface,
-                    lemma: wordData.lemma,
-                    pos: wordData.pos,
-                    span_start: wordData.span_start,
-                    span_end: wordData.span_end,
-                    clicked: true,
-                    click_count: 1,
-                    timestamp: Date.now()
-                });
-            }
-            
-            // Save updated session data
-            localStorage.setItem(sessionKey, JSON.stringify(sessionData));
-            
-            // Send to server (in background)
-            navigator.sendBeacon('/reading/word-click', JSON.stringify({
-                text_id: AppState.textId,
-                word_data: wordData,
-                session_data: sessionData.wordInteractions
-            }));
-            
-        } catch (error) {
-            console.error('Error tracking word click:', error);
-        }
-    }
-    
+
     async function saveSessionToServer() {
         if (!AppState.textId || !AppState.accountId) return;
         

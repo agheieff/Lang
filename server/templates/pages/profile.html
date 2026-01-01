@@ -4,17 +4,13 @@
 <div class="container mx-auto max-w-2xl p-4">
   <h1 class="text-2xl font-bold mb-6">Profile</h1>
 
-  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-    <h2 class="text-xl font-bold mb-4">Account Information</h2>
-    <p class="text-gray-600">Your profile settings and preferences.</p>
-  </div>
-
   <!-- Create New Profile Section -->
   <div class="bg-white rounded-lg shadow-md p-6">
     <h2 class="text-xl font-bold mb-4">Add New Language Profile</h2>
-    <p class="text-gray-600 mb-6">Create a new profile to learn a different language.</p>
 
-    <form hx-post="/profile/api" hx-target="#profile-list" hx-swap="innerHTML" class="space-y-4">
+    <div id="profile-result"></div>
+
+    <form hx-post="/profile/api" hx-ext="json-enc" hx-on::after-request="handleProfileResponse(event)" class="space-y-4">
       <div>
         <label for="lang" class="block text-sm font-medium text-gray-700 mb-2">Learning Language</label>
         <select
@@ -24,8 +20,8 @@
           class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
         >
           <option value="es">Spanish</option>
-          <option value="zh-Hans">Chinese (Simplified)</option>
-          <option value="zh-Hant">Chinese (Traditional)</option>
+          <option value="zh-CN">Chinese (Simplified)</option>
+          <option value="zh-TW">Chinese (Traditional)</option>
         </select>
       </div>
 
@@ -57,19 +53,6 @@
         </select>
       </div>
 
-      <div>
-        <label for="preferred_script" class="block text-sm font-medium text-gray-700 mb-2">Preferred Script (Chinese only)</label>
-        <select
-          id="preferred_script"
-          name="preferred_script"
-          class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-        >
-          <option value="">Default</option>
-          <option value="Hans">Simplified</option>
-          <option value="Hant">Traditional</option>
-        </select>
-      </div>
-
       <button
         type="submit"
         class="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
@@ -79,4 +62,30 @@
     </form>
   </div>
 </div>
+
+<script>
+function handleProfileResponse(event) {
+  const resultDiv = document.getElementById('profile-result');
+
+  if (event.detail.xhr.status === 200) {
+    // Automatically redirect to reading page
+    window.location.href = '/reading';
+  } else if (event.detail.xhr.status >= 400) {
+    try {
+      const error = JSON.parse(event.detail.xhr.responseText);
+      resultDiv.innerHTML = `
+        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          ${error.detail || 'Failed to create profile'}
+        </div>
+      `;
+    } catch {
+      resultDiv.innerHTML = `
+        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          Failed to create profile. Please try again.
+        </div>
+      `;
+    }
+  }
+}
+</script>
 {% endblock %}

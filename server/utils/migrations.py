@@ -60,7 +60,7 @@ def seed_languages(db: Session) -> None:
             "is_enabled": True,
         },
         {
-            "code": "zh",
+            "code": "zh-CN",
             "name": "Chinese",
             "display_name": "Chinese (Simplified)",
             "script": "Hans",

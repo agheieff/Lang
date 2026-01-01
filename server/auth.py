@@ -447,8 +447,10 @@ def create_auth_router(
             }
         )
 
-    @r.post("/register", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
-    def register(payload: AccountCreate):
+    @r.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
+    def register(payload: AccountCreate, request: Request):
+        from fastapi.responses import JSONResponse
+
         email = payload.email.strip().lower()
         if repo.find_account_by_email(email):
             raise HTTPException(status_code=409, detail="Email already registered")
@@ -461,10 +463,34 @@ def create_auth_router(
             hash_password(payload.password),
             subscription_tier="Free",
         )
-        return _to_account_out(acc)
+
+        # Create token and set cookie for auto-login
+        token = create_access_token(
+            acc["id"],
+            settings.secret_key,
+            settings.algorithm,
+            settings.access_expire_minutes,
+        )
+
+        # Set cookie in response
+        response = JSONResponse(
+            status_code=201,
+            content={"access_token": token, "token_type": "bearer"}
+        )
+        response.set_cookie(
+            "access_token",
+            token,
+            httponly=True,
+            secure=False,  # Set True in production with HTTPS
+            samesite="lax",
+            max_age=settings.access_expire_minutes * 60,
+        )
+        return response
 
     @r.post("/login", response_model=TokenOut)
     def login(payload: LoginIn):
+        from fastapi.responses import JSONResponse
+
         email = payload.email.strip().lower()
         creds = repo.get_account_credentials(email)
         if not creds or not verify_password(
@@ -479,7 +505,20 @@ def create_auth_router(
             settings.algorithm,
             settings.access_expire_minutes,
         )
-        return TokenOut(access_token=token)
+
+        # Set cookie in response
+        response = JSONResponse(
+            content={"access_token": token, "token_type": "bearer"}
+        )
+        response.set_cookie(
+            "access_token",
+            token,
+            httponly=True,
+            secure=False,  # Set True in production with HTTPS
+            samesite="lax",
+            max_age=settings.access_expire_minutes * 60,
+        )
+        return response
 
     @r.get("/logout")
     def logout():

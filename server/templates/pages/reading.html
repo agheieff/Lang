@@ -20,21 +20,41 @@
   </div>
   {% endif %}
 
-  <div class="bg-white rounded-lg shadow-md p-8">
-    <div id="reading-content" data-text-id="{{ text_id }}">
-      <p class="text-lg leading-relaxed whitespace-pre-wrap">{{ text_content }}</p>
-    </div>
+  <!-- Main reading content -->
+  <div id="current-reading">
+    <div class="bg-white rounded-lg shadow-md p-8">
+      <!-- Reading text container -->
+      <div
+        id="reading-text"
+        data-text-id="{{ text_id }}"
+        data-account-id="{{ account_id }}"
+        class="text-lg leading-relaxed"
+      >
+        <!-- Text will be rendered here with interactive word spans -->
+      </div>
 
-    <div class="mt-8 pt-6 border-t flex justify-between items-center">
-      <button id="toggle-translation" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
-        Show Translation
-      </button>
-      <button id="next-text-btn" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
-        Next Text
-      </button>
+      <!-- Action buttons -->
+      <div class="mt-8 pt-6 border-t flex justify-between items-center">
+        <button
+          id="translation-toggle"
+          type="button"
+          class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+          aria-expanded="false"
+        >
+          Show Translation
+        </button>
+        <button
+          id="next-text-btn"
+          type="button"
+          class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg"
+        >
+          Next Text
+        </button>
+      </div>
     </div>
   </div>
 
+  <!-- Translation panel -->
   <div id="translation-panel" class="hidden mt-6 bg-white rounded-lg shadow-md p-6">
     <h2 class="text-lg font-bold mb-4">Translation</h2>
     <p id="translation-text" class="text-gray-700">
@@ -49,21 +69,333 @@
   </div>
 </div>
 
+<!-- Word data and initial content -->
 <script>
-document.getElementById('toggle-translation').addEventListener('click', function() {
-  const panel = document.getElementById('translation-panel');
-  const btn = this;
-  if (panel.classList.contains('hidden')) {
-    panel.classList.remove('hidden');
-    btn.textContent = 'Hide Translation';
-  } else {
-    panel.classList.add('hidden');
-    btn.textContent = 'Show Translation';
-  }
-});
+(function() {
+  'use strict';
 
-document.getElementById('next-text-btn').addEventListener('click', function() {
-  window.location.reload();
-});
+  // Word data passed from backend
+  const wordData = {{ word_data | tojson }};
+  const textContent = {{ text_content | tojson }};
+
+  /**
+   * Render text with interactive word spans
+   * Words with available glosses become clickable with hover translations
+   * Multi-segment words (e.g., German "ruf...an") have all segments linked
+   */
+  function renderInteractiveText() {
+    const container = document.getElementById('reading-text');
+    if (!container) return;
+
+    // If no word data, just show plain text
+    if (!wordData || wordData.length === 0) {
+      container.innerHTML = `<p class="whitespace-pre-wrap">${escapeHtml(textContent)}</p>`;
+      return;
+    }
+
+    // Expand word_data to handle multi-segment words
+    const expandedWords = [];
+    let wordIdCounter = 0;
+
+    for (const word of wordData) {
+      // Check if this is a multi-segment word
+      const multiSpans = word.grammar?.spans;
+      if (multiSpans && Array.isArray(multiSpans) && multiSpans.length > 1) {
+        // Multi-segment word - create entry for each segment
+        const sharedWordId = `word-${wordIdCounter++}`;
+        for (const span of multiSpans) {
+          expandedWords.push({
+            ...word,
+            span_start: span[0],
+            span_end: span[1],
+            word_id: sharedWordId,
+            is_segment: true
+          });
+        }
+      } else {
+        // Single-segment word
+        expandedWords.push({
+          ...word,
+          word_id: `word-${wordIdCounter++}`,
+          is_segment: false
+        });
+      }
+    }
+
+    // Sort and validate spans
+    const validWords = expandedWords
+      .filter(word => {
+        // Validate span positions
+        const hasValidSpans = (
+          word.span_start >= 0 &&
+          word.span_end <= textContent.length &&
+          word.span_start < word.span_end
+        );
+
+        // Validate that the span actually points to the expected word
+        if (hasValidSpans) {
+          const extractedText = textContent.substring(word.span_start, word.span_end);
+          // For multi-segment words, be more lenient with matching
+          const matches = (
+            extractedText === word.surface ||
+            extractedText.includes(word.surface) ||
+            word.surface.includes(extractedText) ||
+            word.is_segment  // Allow segments even if they don't perfectly match surface
+          );
+          return matches;
+        }
+
+        return false;
+      })
+      .sort((a, b) => a.span_start - b.span_start);
+
+    if (validWords.length === 0) {
+      console.warn('[Reading] No valid word spans found, showing plain text');
+      container.innerHTML = `<p class="whitespace-pre-wrap">${escapeHtml(textContent)}</p>`;
+      return;
+    }
+
+    let html = '';
+    let lastPos = 0;
+
+    for (const word of validWords) {
+      // Add text before this word
+      if (word.span_start > lastPos) {
+        const beforeText = textContent.substring(lastPos, word.span_start);
+        html += escapeHtml(beforeText);
+      }
+
+      // Extract the actual text at the span position
+      const actualText = textContent.substring(word.span_start, word.span_end);
+
+      // Add the interactive word span - store word data in a global array instead of HTML attribute
+      const wordIndex = validWords.indexOf(word);
+      html += `<span
+        class="interactive-word cursor-pointer border-b border-dotted border-gray-400 hover:bg-blue-50 hover:border-blue-500 transition-colors"
+        data-word-index="${wordIndex}"
+        data-word-id="${word.word_id}"
+        data-surface="${escapeHtml(word.surface)}"
+        data-translation="${escapeHtml(word.translation || '')}"
+      >${escapeHtml(actualText)}</span>`;
+
+      lastPos = word.span_end;
+    }
+
+    // Add remaining text after last word
+    if (lastPos < textContent.length) {
+      html += escapeHtml(textContent.substring(lastPos));
+    }
+
+    // Wrap in paragraph and store word data globally
+    container.innerHTML = `<p class="whitespace-pre-wrap">${html}</p>`;
+
+    // Store word data globally for click handlers
+    container.wordData = validWords;
+  }
+
+  /**
+   * Escape HTML to prevent XSS
+   */
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  /**
+   * Handle next text button with proper API call
+   */
+  function setupNextButton() {
+    const nextBtn = document.getElementById('next-text-btn');
+    if (!nextBtn) return;
+
+    nextBtn.addEventListener('click', async function() {
+      try {
+        const response = await fetch('/reading/next', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (response.ok) {
+          // Reload page to show next text
+          window.location.reload();
+        } else {
+          console.error('Failed to get next text');
+        }
+      } catch (error) {
+        console.error('Error:', error);
+      }
+    });
+  }
+
+  /**
+   * Setup multi-segment word highlighting
+   * When hovering one segment, all segments with the same word-id highlight
+   */
+  function setupMultiSegmentHighlighting() {
+    const words = document.querySelectorAll('[data-word-id]');
+
+    words.forEach(word => {
+      const wordId = word.getAttribute('data-word-id');
+
+      word.addEventListener('mouseenter', function() {
+        // Highlight all segments with the same word-id
+        document.querySelectorAll(`[data-word-id="${wordId}"]`).forEach(el => {
+          el.classList.add('highlighted-segment');
+        });
+
+        // Show translation tooltip
+        showTooltipForWord(word);
+      });
+
+      word.addEventListener('mouseleave', function() {
+        // Remove highlight from all segments with the same word-id
+        document.querySelectorAll(`[data-word-id="${wordId}"]`).forEach(el => {
+          el.classList.remove('highlighted-segment');
+        });
+      });
+
+      // Click handler to show tooltip
+      word.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        showTooltipForWord(word);
+      });
+    });
+  }
+
+  /**
+   * Show translation tooltip for a word
+   */
+  function showTooltipForWord(wordElement) {
+    const container = document.getElementById('reading-text');
+    if (!container || !container.wordData) return;
+
+    const wordIndex = parseInt(wordElement.getAttribute('data-word-index'));
+    const wordData = container.wordData[wordIndex];
+
+    if (!wordData || !wordData.translation) return;
+
+    // Create or get tooltip
+    let tooltip = document.getElementById('word-tooltip');
+    if (!tooltip) {
+      tooltip = document.createElement('div');
+      tooltip.id = 'word-tooltip';
+      tooltip.className = 'absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-3 text-sm max-w-xs pointer-events-none';
+      document.body.appendChild(tooltip);
+    }
+
+    // Build tooltip content
+    let content = `<div class="font-medium text-gray-900 mb-1">${escapeHtml(wordData.surface)}</div>`;
+
+    if (wordData.translation) {
+      content += `<div class="text-gray-700">${escapeHtml(wordData.translation)}</div>`;
+    }
+
+    if (wordData.lemma && wordData.lemma !== wordData.surface) {
+      content += `<div class="text-xs text-gray-500 mt-1">Lemma: ${escapeHtml(wordData.lemma)}</div>`;
+    }
+
+    if (wordData.pinyin) {
+      content += `<div class="text-xs text-gray-500 mt-1">${escapeHtml(wordData.pinyin)}</div>`;
+    }
+
+    tooltip.innerHTML = content;
+    tooltip.style.display = 'block';
+
+    // Position tooltip near the word
+    const rect = wordElement.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+
+    let left = rect.left + (rect.width / 2) - (tooltipRect.width / 2);
+    let top = rect.top - tooltipRect.height - 8;
+
+    // Keep tooltip in viewport
+    if (left < 10) left = 10;
+    if (left + tooltipRect.width > window.innerWidth - 10) {
+      left = window.innerWidth - tooltipRect.width - 10;
+    }
+    if (top < 10) {
+      top = rect.bottom + 8; // Show below instead
+    }
+    if (top + tooltipRect.height > window.innerHeight - 10) {
+      top = window.innerHeight - tooltipRect.height - 10;
+    }
+
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
+
+    // Hide tooltip after delay
+    setTimeout(() => {
+      if (!tooltip.matches(':hover')) {
+        tooltip.style.display = 'none';
+      }
+    }, 2000);
+  }
+
+  // Initialize when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      renderInteractiveText();
+      setupNextButton();
+      setupMultiSegmentHighlighting();
+      // Re-attach app.js event handlers after rendering
+      setTimeout(() => {
+        if (window.ArcadiaReadingApp) {
+          const readingText = document.getElementById('reading-text');
+          if (readingText && window.ArcadiaReadingApp.ReadingController) {
+            // Trigger re-attachment of handlers by dispatching custom event
+            window.dispatchEvent(new Event('arcadia:words-rendered'));
+          }
+        }
+      }, 50);
+    });
+  } else {
+    renderInteractiveText();
+    setupNextButton();
+    setupMultiSegmentHighlighting();
+    // Re-attach app.js event handlers after rendering
+    setTimeout(() => {
+      if (window.ArcadiaReadingApp) {
+        const readingText = document.getElementById('reading-text');
+        if (readingText && window.ArcadiaReadingApp.ReadingController) {
+          // Trigger re-attachment of handlers by dispatching custom event
+          window.dispatchEvent(new Event('arcadia:words-rendered'));
+        }
+      }
+    }, 50);
+  }
+})();
 </script>
+
+<style>
+.interactive-word {
+  cursor: pointer;
+  border-bottom: 1px dotted #9ca3af;
+  transition: all 0.15s ease-in-out;
+}
+
+.interactive-word:hover {
+  background-color: #eff6ff;
+  border-bottom: 1px solid #3b82f6;
+}
+
+/* Multi-segment word highlighting - all segments highlight together */
+.interactive-word.highlighted-segment {
+  background-color: #dbeafe !important;
+  border-bottom: 2px solid #3b82f6 !important;
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.1);
+}
+
+#word-tooltip {
+  z-index: 1000;
+  pointer-events: none;
+}
+
+#word-tooltip:hover {
+  pointer-events: auto;
+}
+</style>
 {% endblock %}

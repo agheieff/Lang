@@ -522,7 +522,7 @@ def get_or_create_language(
     if not name:
         name_map = {
             "es": ("Spanish", "Spanish", "Latin"),
-            "zh": ("Chinese", "Chinese (Simplified)", "Hans"),
+            "zh-CN": ("Chinese", "Chinese (Simplified)", "Hans"),
             "zh-TW": ("Chinese", "Chinese (Traditional)", "Hant"),
             "en": ("English", "English", "Latin"),
             "fr": ("French", "French", "Latin"),

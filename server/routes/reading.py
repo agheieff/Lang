@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy.orm import Session
 
 from server.db import get_db
@@ -21,21 +20,28 @@ from server.models import (
 )
 from server.deps import get_current_account
 
+# Move service imports to top
+from server.services.recommendation import select_best_text
+from server.services.learning import (
+    track_interactions_from_session,
+    update_level_from_text,
+)
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reading"])
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+_templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-def _templates() -> Jinja2Templates:
-    try:
-        env = Environment(
-            loader=FileSystemLoader([str(TEMPLATES_DIR)]),
-            autoescape=select_autoescape(["html", "xml"]),
-        )
-        return Jinja2Templates(env=env)
-    except Exception:
-        return Jinja2Templates(directory=str(TEMPLATES_DIR))
+def _get_account_id(request: Request) -> Optional[int]:
+    """Get account_id from request state set by middleware."""
+    return getattr(request.state, "account_id", None)
+
+
+def _get_profile_for_account(db: Session, account_id: int) -> Optional[Profile]:
+    """Get profile for a given account_id."""
+    return db.query(Profile).filter(Profile.account_id == account_id).first()
 
 
 # Pydantic models for request validation
@@ -82,17 +88,31 @@ def reading_page(
     db: Session = Depends(get_db),
 ):
     """Reading practice page."""
-    t = _templates()
 
     # Get current user
-    account_id = getattr(request.state, "account_id", None)
+    account_id = _get_account_id(request)
 
     if account_id is None:
         return HTMLResponse(
             "<div><h1>Please log in</h1><p><a href='/login'>Login</a></p></div>"
         )
 
-    profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+    # Check for active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id")
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account_id
+            ).first()
+        except ValueError:
+            profile = None
+    else:
+        profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = _get_profile_for_account(db, account_id)
 
     if profile is None:
         return HTMLResponse(
@@ -100,8 +120,6 @@ def reading_page(
         )
 
     # Use recommendation engine to select best text
-    from server.services.recommendation import select_best_text
-
     ready_text = select_best_text(db, profile)
 
     if not ready_text:
@@ -112,6 +130,8 @@ def reading_page(
             "text_content": DEMO_TEXT,
             "is_demo": True,
             "text_id": None,
+            "word_data": [],
+            "account_id": account_id,
         }
     else:
         # Mark text as current
@@ -133,6 +153,7 @@ def reading_page(
                 "translation": g.translation,
                 "span_start": g.span_start,
                 "span_end": g.span_end,
+                "grammar": g.grammar,  # Include multi-segment spans
             }
             for g in word_glosses
         ]
@@ -144,9 +165,10 @@ def reading_page(
             "is_demo": False,
             "text_id": ready_text.id,
             "word_data": word_data,
+            "account_id": account_id,
         }
 
-    return t.TemplateResponse(request, "pages/reading.html", context)
+    return _templates.TemplateResponse(request, "pages/reading.html", context)
 
 
 @router.get("/reading/current", response_class=HTMLResponse)
@@ -164,17 +186,15 @@ def reading_next(
     db: Session = Depends(get_db),
 ):
     """Mark current text as read and move to next."""
-    from server.services.recommendation import select_best_text
-    from server.models import ProfileTextRead
 
     try:
         # Get current user
-        account_id = getattr(request.state, "account_id", None)
+        account_id = _get_account_id(request)
 
         if not account_id:
             return JSONResponse({"status": "error", "message": "Not authenticated"})
 
-        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        profile = _get_profile_for_account(db, account_id)
         if not profile or not profile.current_text_id:
             return JSONResponse({"status": "error", "message": "No current text"})
 
@@ -272,19 +292,16 @@ def word_click(
     db: Session = Depends(get_db),
 ):
     """Track word clicks for SRS."""
-    from server.services.learning import (
-        track_interactions_from_session,
-    )
 
     try:
-        account_id = getattr(request.state, "account_id", None)
+        account_id = _get_account_id(request)
         if not account_id:
             return JSONResponse(
                 {"status": "error", "message": "Not authenticated"}, status_code=401
             )
 
         # Get profile from account_id
-        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        profile = _get_profile_for_account(db, account_id)
         if not profile:
             return JSONResponse(
                 {"status": "error", "message": "Profile not found"}, status_code=404
@@ -327,11 +344,9 @@ def save_session(
     db: Session = Depends(get_db),
 ):
     """Save reading session and update user level."""
-    from server.services.learning import update_level_from_text
-    from server.models import ProfileTextRead
 
     try:
-        account_id = getattr(request.state, "account_id", None)
+        account_id = _get_account_id(request)
         if not account_id:
             return JSONResponse(
                 {"status": "error", "message": "Not authenticated"}, status_code=401
@@ -343,7 +358,7 @@ def save_session(
             )
 
         # Get profile from account_id
-        profile = db.query(Profile).filter(Profile.account_id == account_id).first()
+        profile = _get_profile_for_account(db, account_id)
         if not profile:
             return JSONResponse(
                 {"status": "error", "message": "Profile not found"}, status_code=404

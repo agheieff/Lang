@@ -69,7 +69,7 @@ async def generate_text_content(
 
         logger.info(f"Generating text for account {account_id}, profile {profile_id}")
 
-        response = chat_complete_with_raw(
+        response = await chat_complete_with_raw(
             messages=prompt,
             model=model,
         )
@@ -199,7 +199,7 @@ async def _generate_word_translations(
         )
 
         model = _pick_openrouter_model()
-        response = chat_complete_with_raw(
+        response = await chat_complete_with_raw(
             messages=prompt,
             model=model,
         )
@@ -226,6 +226,20 @@ async def _generate_word_translations(
             # For non-continuous words, use the first span for span_start/end
             # Store full spans in grammar field for frontend use
             span_start, span_end = spans[0]
+
+            # Check if gloss already exists (avoid UNIQUE constraint violations)
+            existing = db.query(ReadingWordGloss).filter(
+                ReadingWordGloss.text_id == rt.id,
+                ReadingWordGloss.target_lang == target_lang,
+                ReadingWordGloss.span_start == span_start,
+                ReadingWordGloss.span_end == span_end,
+            ).first()
+
+            if existing:
+                # Update existing gloss if translation is missing
+                if not existing.translation and translation:
+                    existing.translation = translation
+                continue
 
             gloss = ReadingWordGloss(
                 text_id=rt.id,
@@ -276,7 +290,7 @@ async def _generate_sentence_translations(
         )
 
         model = _pick_openrouter_model()
-        response = chat_complete_with_raw(
+        response = await chat_complete_with_raw(
             messages=prompt,
             model=model,
         )
@@ -288,6 +302,20 @@ async def _generate_sentence_translations(
 
         for i, (start, end, seg) in enumerate(sentences):
             trans_text = trans_map.get(seg, seg)
+
+            # Check if translation already exists (avoid UNIQUE constraint violations)
+            existing = db.query(ReadingTextTranslation).filter(
+                ReadingTextTranslation.text_id == rt.id,
+                ReadingTextTranslation.target_lang == target_lang,
+                ReadingTextTranslation.unit == "sentence",
+                ReadingTextTranslation.segment_index == i,
+            ).first()
+
+            if existing:
+                # Update existing translation if needed
+                if not existing.translated_text and trans_text:
+                    existing.translated_text = trans_text
+                continue
 
             trans = ReadingTextTranslation(
                 text_id=rt.id,

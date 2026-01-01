@@ -104,13 +104,6 @@ def get_prompt(lang: str, key: str, **kwargs) -> str:
 
 def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     """Build reading prompt messages for LLM."""
-    script = (
-        "simplified"
-        if spec.script == "Hans"
-        else "traditional"
-        if spec.script == "Hant"
-        else ""
-    )
     level = (
         spec.user_level_hint.split(":")[0]
         if spec.user_level_hint and ":" in spec.user_level_hint
@@ -145,7 +138,6 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
     user_content = get_prompt(
         spec.lang,
         "text",
-        script=script,
         level=level,
         length=str(spec.approx_len),
         include_words=", ".join(spec.include_words or []),

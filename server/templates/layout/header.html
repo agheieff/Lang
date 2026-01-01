@@ -1,8 +1,31 @@
 <header class="bg-gradient-to-b from-gray-900 to-gray-800 text-white shadow-lg sticky top-0 z-50">
   <div class="container mx-auto px-4 py-3 flex items-center justify-between">
-    <a class="text-xl font-bold hover:text-blue-300 transition-colors" href="/">
-      Arcadia Lang
-    </a>
+    <div class="flex items-center space-x-6">
+      <a class="text-xl font-bold hover:text-blue-300 transition-colors" href="/">
+        Arcadia Lang
+      </a>
+
+      {% if request.state.user %}
+      <!-- Profile Switcher -->
+      <div class="relative">
+        <button class="flex items-center space-x-2 px-3 py-2 rounded-lg border border-gray-600 bg-gray-800 hover:bg-gray-700 transition-colors" onclick="toggleProfileMenu()">
+          <span id="current-profile-flag">🌐</span>
+          <span id="current-profile-name">Loading...</span>
+          <span>▾</span>
+          </button>
+          <div class="absolute left-0 top-full mt-2 w-56 bg-white text-gray-800 rounded-lg shadow-lg border border-gray-200 py-2 hidden" id="profile-menu">
+            <div id="profile-list" class="max-h-64 overflow-y-auto">
+              <!-- Profiles will be loaded here -->
+            </div>
+            <hr class="my-2" />
+            <a href="/profile" class="block px-4 py-2 hover:bg-gray-100 text-blue-600">
+              + Add new profile
+            </a>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
     <div class="flex items-center space-x-6">
       {% if request.state.user %}
         <nav class="flex space-x-4" aria-label="Primary">
@@ -37,6 +60,100 @@
   </div>
 </header>
 
+{% if request.state.user %}
+<script>
+// Profile management
+let currentProfileId = null;
+
+async function loadProfiles() {
+  try {
+    const response = await fetch('/profile/list');
+    const data = await response.json();
+
+    if (data.profiles && data.profiles.length > 0) {
+      // Get current active profile from cookie
+      const cookies = document.cookie.split(';').map(c => c.trim());
+      const activeProfileCookie = cookies.find(c => c.startsWith('active_profile_id='));
+
+      let activeProfileId = null;
+      if (activeProfileCookie) {
+        activeProfileId = parseInt(activeProfileCookie.split('=')[1]);
+      }
+
+      // Find active profile or default to first
+      const activeProfile = data.profiles.find(p => p.id === activeProfileId) || data.profiles[0];
+      currentProfileId = activeProfile.id;
+
+      // Update header button
+      document.getElementById('current-profile-flag').textContent = activeProfile.flag;
+      document.getElementById('current-profile-name').textContent = activeProfile.name;
+
+      // Populate dropdown
+      const profileList = document.getElementById('profile-list');
+      profileList.innerHTML = data.profiles.map(p => `
+        <button
+          onclick="switchProfile(${p.id})"
+          class="w-full text-left px-4 py-2 hover:bg-gray-100 flex items-center justify-between ${p.id === currentProfileId ? 'bg-blue-50' : ''}"
+        >
+          <span>${p.flag} ${p.name}</span>
+          ${p.id === currentProfileId ? '<span class="text-blue-600">✓</span>' : ''}
+        </button>
+      `).join('');
+    }
+  } catch (error) {
+    console.error('Failed to load profiles:', error);
+  }
+}
+
+async function switchProfile(profileId) {
+  try {
+    const response = await fetch('/profile/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId })
+    });
+
+    if (response.ok) {
+      // Small delay to ensure cookie is set before reload
+      await new Promise(resolve => setTimeout(resolve, 100));
+      // Reload page to apply new profile
+      window.location.reload();
+    }
+  } catch (error) {
+    console.error('Failed to switch profile:', error);
+  }
+}
+
+function toggleProfileMenu() {
+  const menu = document.getElementById('profile-menu');
+  menu.classList.toggle('hidden');
+}
+
+function toggleUserMenu() {
+  const menu = document.getElementById('user-menu');
+  menu.classList.toggle('hidden');
+}
+
+// Close menus when clicking outside
+document.addEventListener('click', function(event) {
+  const profileMenu = document.getElementById('profile-menu');
+  const userMenu = document.getElementById('user-menu');
+  const profileBtn = document.querySelector('button[onclick="toggleProfileMenu()"]');
+  const userBtn = document.querySelector('button[onclick="toggleUserMenu()"]');
+
+  if (profileMenu && profileBtn && !profileBtn.contains(event.target) && !profileMenu.contains(event.target)) {
+    profileMenu.classList.add('hidden');
+  }
+
+  if (userMenu && userBtn && !userBtn.contains(event.target) && !userMenu.contains(event.target)) {
+    userMenu.classList.add('hidden');
+  }
+});
+
+// Load profiles on page ready
+loadProfiles();
+</script>
+{% else %}
 <script>
 function toggleUserMenu() {
   const menu = document.getElementById('user-menu');
@@ -52,3 +169,4 @@ document.addEventListener('click', function(event) {
   }
 });
 </script>
+{% endif %}

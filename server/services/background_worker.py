@@ -298,10 +298,3 @@ async def startup_generation(
 
                 except Exception as e:
                     logger.error(f"Error in startup generation: {e}", exc_info=True)
-
-
-def start_background_worker():
-    """Start the background worker task."""
-    task = asyncio.create_task(background_worker())
-    logger.info("Background worker task started")
-    return task
