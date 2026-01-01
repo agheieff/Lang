@@ -624,6 +624,37 @@ class CookieUserMiddleware(BaseHTTPMiddleware):
                                         Profile.account_id == request.state.account_id
                                     ).first()
 
+                                # Add computed attributes to profile
+                                if profile:
+                                    # Language code to flag and display name mapping
+                                    lang_info = {
+                                        "es": {"flag": "🇪🇸", "name": "Spanish"},
+                                        "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+                                        "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},  # Legacy
+                                        "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
+                                        "en": {"flag": "🇬🇧", "name": "English"},
+                                        "fr": {"flag": "🇫🇷", "name": "French"},
+                                        "de": {"flag": "🇩🇪", "name": "German"},
+                                        "ja": {"flag": "🇯🇵", "name": "Japanese"},
+                                        "ko": {"flag": "🇰🇷", "name": "Korean"},
+                                    }
+
+                                    lang = profile.lang
+                                    info = lang_info.get(lang)
+
+                                    if not info:
+                                        # Generate a display name from the language code
+                                        if lang.startswith("zh-"):
+                                            info = {"flag": "🌏", "name": f"Chinese ({lang.split('-')[1].upper()})"}
+                                        elif lang == "zh":
+                                            info = {"flag": "🇨🇳", "name": "Chinese"}
+                                        else:
+                                            info = {"flag": "🌐", "name": lang.upper()}
+
+                                    # Add computed attributes as properties
+                                    profile.flag = info["flag"]
+                                    profile.name = info["name"]
+
                                 request.state.current_profile = profile
                             finally:
                                 db.close()
