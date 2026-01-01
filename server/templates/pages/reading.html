@@ -350,6 +350,12 @@
       content += `<div class="text-gray-500 italic">No translation available</div>`;
     }
 
+    // Add part of speech
+    if (wordData.pos) {
+      const posDisplay = wordData.pos.replace(/_/g, ' ');
+      content += `<div class="text-xs text-blue-600 mt-1 font-medium">${escapeHtml(posDisplay)}</div>`;
+    }
+
     if (wordData.lemma && wordData.lemma !== wordData.surface) {
       content += `<div class="text-xs text-gray-500 mt-1">Lemma: ${escapeHtml(wordData.lemma)}</div>`;
     }

@@ -54,22 +54,34 @@ def seed_spanish_demo(db: Session) -> None:
 
     # Add sentence translations
     sentences = [
-        "¡Hola! Bienvenido a tu práctica de lectura.",
-        "Este es un texto de demostración simple para comenzar.",
-        "El sistema completo de generación de textos estará disponible pronto.",
+        ("¡Hola! Bienvenido a tu práctica de lectura.", "Hello! Welcome to your reading practice."),
+        ("Este es un texto de demostración simple para comenzar.", "This is a simple demo text to get you started."),
+        ("El sistema completo de generación de textos estará disponible pronto.", "The complete text generation system will be available soon."),
     ]
 
-    for idx, source in enumerate(sentences):
+    for idx, (source, translated) in enumerate(sentences):
         translation = ReadingTextTranslation(
             text_id=text.id,
             target_lang="en",
             unit="sentence",
             segment_index=idx,
             source_text=source,
-            translated_text="",
+            translated_text=translated,
             provider="manual",
         )
         db.add(translation)
+
+    # Add full text translation
+    full_translation = ReadingTextTranslation(
+        text_id=text.id,
+        target_lang="en",
+        unit="text",
+        segment_index=None,
+        source_text=text.content,
+        translated_text="Hello! Welcome to your reading practice. This is a simple demo text to get you started. The complete text generation system will be available soon.",
+        provider="manual",
+    )
+    db.add(full_translation)
 
     # Add word translations (span_start, span_end based on content string)
     words_data = [
@@ -154,22 +166,34 @@ def seed_chinese_simplified_demo(db: Session) -> None:
     db.flush()
 
     sentences = [
-        "你好！欢迎来到阅读练习。",
-        "这是一个简单的演示文本，帮你开始学习。",
-        "完整的文本生成系统很快就会推出。",
+        ("你好！欢迎来到阅读练习。", "Hello! Welcome to your reading practice."),
+        ("这是一个简单的演示文本，帮你开始学习。", "This is a simple demo text to get you started."),
+        ("完整的文本生成系统很快就会推出。", "The full text generation system will be available soon."),
     ]
 
-    for idx, source in enumerate(sentences):
+    for idx, (source, translated) in enumerate(sentences):
         translation = ReadingTextTranslation(
             text_id=text.id,
             target_lang="en",
             unit="sentence",
             segment_index=idx,
             source_text=source,
-            translated_text="",
+            translated_text=translated,
             provider="manual",
         )
         db.add(translation)
+
+    # Add full text translation
+    full_translation = ReadingTextTranslation(
+        text_id=text.id,
+        target_lang="en",
+        unit="text",
+        segment_index=None,
+        source_text=text.content,
+        translated_text="Hello! Welcome to your reading practice. This is a simple demo text to get you started. The full text generation system will be available soon.",
+        provider="manual",
+    )
+    db.add(full_translation)
 
     # Calculate character positions for Chinese
     # Content: 你好！欢迎来到阅读练习。这是一个简单的演示文本，帮你开始学习。完整的文本生成系统很快就会推出。
@@ -254,22 +278,34 @@ def seed_chinese_traditional_demo(db: Session) -> None:
     db.flush()
 
     sentences = [
-        "你好！歡迎來到閱讀練習。",
-        "這是一個簡單的演示文本，幫你開始學習。",
-        "完整的文本生成系統很快就會推出。",
+        ("你好！歡迎來到閱讀練習。", "Hello! Welcome to your reading practice."),
+        ("這是一個簡單的演示文本，幫你開始學習。", "This is a simple demo text to get you started."),
+        ("完整的文本生成系統很快就會推出。", "The full text generation system will be available soon."),
     ]
 
-    for idx, source in enumerate(sentences):
+    for idx, (source, translated) in enumerate(sentences):
         translation = ReadingTextTranslation(
             text_id=text.id,
             target_lang="en",
             unit="sentence",
             segment_index=idx,
             source_text=source,
-            translated_text="",
+            translated_text=translated,
             provider="manual",
         )
         db.add(translation)
+
+    # Add full text translation
+    full_translation = ReadingTextTranslation(
+        text_id=text.id,
+        target_lang="en",
+        unit="text",
+        segment_index=None,
+        source_text=text.content,
+        translated_text="Hello! Welcome to your reading practice. This is a simple demo text to get you started. The full text generation system will be available soon.",
+        provider="manual",
+    )
+    db.add(full_translation)
 
     # Content: 你好！歡迎來到閱讀練習。這是一個簡單的演示文本，幫你開始學習。完整的文本生成系統很快就會推出。
     content = text.content
@@ -353,22 +389,34 @@ def seed_english_demo(db: Session) -> None:
     db.flush()
 
     sentences = [
-        "Hello! Welcome to your reading practice.",
-        "This is a simple demo text to get you started.",
-        "The full text generation system will be available soon.",
+        ("Hello! Welcome to your reading practice.", "¡Hola! Bienvenido a tu práctica de lectura."),
+        ("This is a simple demo text to get you started.", "Este es un texto de demostración simple para comenzar."),
+        ("The full text generation system will be available soon.", "El sistema completo de generación de textos estará disponible pronto."),
     ]
 
-    for idx, source in enumerate(sentences):
+    for idx, (source, translated) in enumerate(sentences):
         translation = ReadingTextTranslation(
             text_id=text.id,
             target_lang="es",
             unit="sentence",
             segment_index=idx,
             source_text=source,
-            translated_text="",
+            translated_text=translated,
             provider="manual",
         )
         db.add(translation)
+
+    # Add full text translation
+    full_translation = ReadingTextTranslation(
+        text_id=text.id,
+        target_lang="es",
+        unit="text",
+        segment_index=None,
+        source_text=text.content,
+        translated_text="¡Hola! Bienvenido a tu práctica de lectura. Este es un texto de demostración simple para comenzar. El sistema completo de generación de textos estará disponible pronto.",
+        provider="manual",
+    )
+    db.add(full_translation)
 
     content = text.content
     words_data = [
