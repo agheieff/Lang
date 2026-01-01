@@ -152,6 +152,7 @@ def reading_page(
                 "lemma": g.lemma,
                 "pos": g.pos,
                 "translation": g.translation,
+                "pinyin": g.pinyin,  # Pronunciation (pinyin/IPA)
                 "span_start": g.span_start,
                 "span_end": g.span_end,
                 "grammar": g.grammar,  # Include multi-segment spans

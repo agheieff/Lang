@@ -196,35 +196,33 @@
             trackTranslationView('full');
 
             const textEl = $('translation-text');
-            if (textEl && !textEl.textContent.trim()) {
+            if (textEl && (!textEl.textContent.trim() || textEl.textContent === 'Translation not yet available.')) {
                 textEl.textContent = 'Loading translation...';
 
-                // Fetch full text translation
+                // Fetch sentence translations and combine them
                 const mainTextEl = $('reading-text');
                 const textId = mainTextEl ? mainTextEl.dataset.textId : null;
 
                 if (textId) {
                     try {
-                        const res = await fetchWithTimeout(`/reading/${textId}/translations?unit=text`, {
+                        const res = await fetchWithTimeout(`/reading/${textId}/translations?unit=sentence`, {
                             headers: { 'Accept': 'application/json' }
                         });
 
                         if (res.ok) {
                             const data = await res.json();
                             if (data.items && data.items.length > 0) {
-                                // Find longest translation (likely body, not title)
-                                const items = data.items.sort((a, b) =>
-                                    (b.translation?.length || 0) - (a.translation?.length || 0)
-                                );
-                                const best = items[0];
+                                // Sort by segment_index and combine all sentences
+                                const sortedItems = data.items.sort((a, b) => a.index - b.index);
+                                const fullTranslation = sortedItems.map(item => item.translation).join(' ');
 
-                                if (best && best.translation) {
-                                    textEl.textContent = best.translation;
+                                if (fullTranslation) {
+                                    textEl.textContent = fullTranslation;
 
                                     // Cache it in session data for persistence
                                     const sessionKey = `arc_current_session_${textId}`;
                                     const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
-                                    sessionData.full_translation = best.translation;
+                                    sessionData.full_translation = fullTranslation;
                                     localStorage.setItem(sessionKey, JSON.stringify(sessionData));
                                     return;
                                 }
@@ -596,15 +594,8 @@
                 toggleBtn.addEventListener('click', toggleTranslation);
             }
 
-            // Next text button
-            const nextBtn = $('next-text-btn');
-            if (nextBtn) {
-                nextBtn.addEventListener('click', () => {
-                    if (AppState.isNextReady) {
-                        window.location.href = '/reading/next';
-                    }
-                });
-            }
+            // Note: Next text button is handled by reading.html inline JS
+            // to ensure proper POST request instead of GET navigation
 
             // Note: Word hover/click handlers are now in reading.html inline JS
             // to avoid duplicate event listeners and conflicts

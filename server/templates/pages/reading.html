@@ -253,11 +253,6 @@
         document.querySelectorAll(`[data-word-id="${wordId}"]`).forEach(el => {
           el.classList.add('highlighted-segment');
         });
-
-        // Show tooltip (unless sticky mode is active)
-        if (!isSticky) {
-          showTooltipForWord(word, false);
-        }
       });
 
       word.addEventListener('mouseleave', function() {
@@ -266,12 +261,13 @@
           el.classList.remove('highlighted-segment');
         });
 
-        // Hide tooltip after delay (unless sticky mode or hovering over tooltip)
-        if (!isSticky) {
+        // Hide tooltip after delay if in sticky mode
+        if (isSticky) {
           const tooltip = document.getElementById('word-tooltip');
           if (tooltip && !tooltip.matches(':hover')) {
             hideTimeout = setTimeout(() => {
               tooltip.style.display = 'none';
+              isSticky = false;
             }, 300);
           }
         }
@@ -344,10 +340,20 @@
     // Build tooltip content
     let content = `<div class="font-medium text-gray-900 mb-1">${escapeHtml(wordData.surface)}</div>`;
 
+    // Add pronunciation (pinyin for Chinese, IPA for English, etc.) between word and translation
+    if (wordData.pinyin) {
+      content += `<div class="text-sm text-gray-600">${escapeHtml(wordData.pinyin)}</div>`;
+    }
+
     if (wordData.translation) {
       content += `<div class="text-gray-700">${escapeHtml(wordData.translation)}</div>`;
     } else {
       content += `<div class="text-gray-500 italic">No translation available</div>`;
+    }
+
+    // Add lemma before form info
+    if (wordData.lemma && wordData.lemma !== wordData.surface) {
+      content += `<div class="text-xs text-gray-500 mt-1">Lemma: ${escapeHtml(wordData.lemma)}</div>`;
     }
 
     // Add part of speech
@@ -387,18 +393,6 @@
       if (formParts.length > 0) {
         content += `<div class="text-xs text-purple-600 mt-0.5">${formParts.join('.')}</div>`;
       }
-    }
-
-    if (wordData.lemma && wordData.lemma !== wordData.surface) {
-      content += `<div class="text-xs text-gray-500 mt-1">Lemma: ${escapeHtml(wordData.lemma)}</div>`;
-    }
-
-    if (wordData.pinyin) {
-      content += `<div class="text-xs text-gray-500 mt-1">${escapeHtml(wordData.pinyin)}</div>`;
-    }
-
-    if (sticky) {
-      content += `<div class="text-xs text-gray-400 mt-2 italic">Press ESC or click elsewhere to close</div>`;
     }
 
     tooltip.innerHTML = content;

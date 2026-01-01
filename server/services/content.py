@@ -213,6 +213,9 @@ async def _generate_word_translations(
         # Compute spans for all words
         all_spans = compute_word_spans(content_str, word_data)
 
+        # Track spans we've already processed to avoid duplicates in same batch
+        processed_spans = set()
+
         for word, spans in zip(word_data, all_spans):
             if not spans:
                 continue
@@ -226,6 +229,12 @@ async def _generate_word_translations(
             # For non-continuous words, use the first span for span_start/end
             # Store full spans in grammar field for frontend use
             span_start, span_end = spans[0]
+
+            # Skip if we've already processed this span in this batch
+            span_key = (span_start, span_end)
+            if span_key in processed_spans:
+                continue
+            processed_spans.add(span_key)
 
             # Check if gloss already exists (avoid UNIQUE constraint violations)
             existing = db.query(ReadingWordGloss).filter(
@@ -262,6 +271,7 @@ async def _generate_word_translations(
         return True
 
     except Exception as e:
+        db.rollback()
         logger.error(f"Error generating word translations: {e}")
         return False
 
@@ -297,11 +307,19 @@ async def _generate_sentence_translations(
 
         translations = parse_csv_translation(response[0] if response else "")
 
-        # Create mapping from source text to translation
-        trans_map = {t["source"]: t["translation"] for t in translations}
-
         for i, (start, end, seg) in enumerate(sentences):
-            trans_text = trans_map.get(seg, seg)
+            # Try to find translation by index first, then by exact source match
+            trans_text = None
+
+            if i < len(translations):
+                # Use index-based matching
+                trans_text = translations[i]["translation"]
+            else:
+                # Fallback to source-based matching
+                trans_text = next(
+                    (t["translation"] for t in translations if t["source"] == seg),
+                    seg  # Final fallback to source if no match
+                )
 
             # Check if translation already exists (avoid UNIQUE constraint violations)
             existing = db.query(ReadingTextTranslation).filter(
@@ -334,6 +352,7 @@ async def _generate_sentence_translations(
         return True
 
     except Exception as e:
+        db.rollback()
         logger.error(f"Error generating sentence translations: {e}")
         return False
 
