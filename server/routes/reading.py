@@ -127,6 +127,7 @@ def reading_page(
         context = {
             "title": "Reading Practice",
             "profile": profile,
+            "current_profile": profile,
             "text_content": DEMO_TEXT,
             "is_demo": True,
             "text_id": None,
@@ -161,6 +162,7 @@ def reading_page(
         context = {
             "title": ready_text.title or "Reading Practice",
             "profile": profile,
+            "current_profile": profile,
             "text_content": ready_text.content,
             "is_demo": False,
             "text_id": ready_text.id,

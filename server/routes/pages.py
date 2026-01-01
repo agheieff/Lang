@@ -67,6 +67,7 @@ def dashboard_page(
     context = {
         "title": "Arcadia Lang",
         "has_profile": profile is not None,
+        "current_profile": profile,
         "profile_lang": (profile.lang if profile is not None else None),
         "profile_lang_name": languages.get(profile.lang, profile.lang)
         if profile

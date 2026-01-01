@@ -39,9 +39,13 @@ def _templates() -> Jinja2Templates:
 
 # HTML Page Endpoints
 @router.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request, account: Account = Depends(_get_current_account)):
+def profile_page(request: Request, account: Account = Depends(_get_current_account), db: Session = Depends(get_db)):
     t = _templates()
-    return t.TemplateResponse(request, "pages/profile.html", {"title": "Profile"})
+    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    return t.TemplateResponse(request, "pages/profile.html", {
+        "title": "Profile",
+        "current_profile": profile
+    })
 
 
 @router.get("/settings", response_class=HTMLResponse)
