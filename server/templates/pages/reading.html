@@ -210,6 +210,11 @@
     if (!nextBtn) return;
 
     nextBtn.addEventListener('click', async function() {
+      // Save session data before moving to next text
+      if (window.saveSessionToServer) {
+        await window.saveSessionToServer();
+      }
+
       try {
         const response = await fetch('/reading/next', {
           method: 'POST',
@@ -273,7 +278,7 @@
         }
       });
 
-      // Click handler to show sticky tooltip
+      // Click handler to show sticky tooltip and track interaction
       word.addEventListener('click', function(e) {
         e.preventDefault();
         e.stopPropagation();
@@ -287,6 +292,23 @@
         // Show tooltip in sticky mode
         isSticky = true;
         showTooltipForWord(word, true);
+
+        // Track word click for SRS/vocabulary system
+        if (window.trackWordClick && container.wordData) {
+          const wordIndex = parseInt(word.getAttribute('data-word-index'));
+          const clickedWord = container.wordData[wordIndex];
+
+          if (clickedWord) {
+            window.trackWordClick({
+              surface: clickedWord.surface,
+              lemma: clickedWord.lemma,
+              pos: clickedWord.pos,
+              span_start: clickedWord.span_start,
+              span_end: clickedWord.span_end,
+              translation: clickedWord.translation
+            });
+          }
+        }
       });
     });
 
@@ -421,12 +443,35 @@
     tooltip.style.top = top + 'px';
   }
 
+  // Initialize session tracking when text is loaded
+  function initializeSessionTracking() {
+    if (!window.ArcadiaReadingApp || !window.ArcadiaReadingApp.AppState) return;
+
+    const readingText = document.getElementById('reading-text');
+    if (!readingText) return;
+
+    const textId = readingText.getAttribute('data-text-id');
+    if (!textId) return;
+
+    // Set app state
+    window.ArcadiaReadingApp.AppState.currentTextId = parseInt(textId);
+    window.ArcadiaReadingApp.AppState.accountId = parseInt(readingText.getAttribute('data-account-id'));
+
+    // Initialize session data
+    if (window.ArcadiaReadingApp.ReadingController) {
+      window.ArcadiaReadingApp.ReadingController.initializeSessionData();
+    }
+
+    console.log('[Session] Initialized tracking for text', textId);
+  }
+
   // Initialize when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       renderInteractiveText();
       setupNextButton();
       setupMultiSegmentHighlighting();
+      initializeSessionTracking();
       // Re-attach app.js event handlers after rendering
       setTimeout(() => {
         if (window.ArcadiaReadingApp) {
@@ -442,6 +487,7 @@
     renderInteractiveText();
     setupNextButton();
     setupMultiSegmentHighlighting();
+    initializeSessionTracking();
     // Re-attach app.js event handlers after rendering
     setTimeout(() => {
       if (window.ArcadiaReadingApp) {

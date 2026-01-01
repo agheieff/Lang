@@ -585,6 +585,33 @@
             window.addEventListener('arcadia:words-rendered', () => {
                 this._attachEventListeners();
             });
+
+            // Initialize session tracking
+            this.initializeSessionData();
+        }
+
+        initializeSessionData() {
+            if (!AppState.textId || !AppState.accountId) return null;
+
+            const sessionKey = `arc_current_session_${AppState.textId}`;
+            let sessionData = localStorage.getItem(sessionKey);
+
+            if (!sessionData) {
+                sessionData = {
+                    text_id: AppState.textId,
+                    exposed_at: Date.now(),
+                    words: [],
+                    sentences: [],
+                    full_translation_views: []
+                };
+                localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+                console.log('[Session] Initialized new session with exposed_at:', sessionData.exposed_at);
+            } else {
+                sessionData = JSON.parse(sessionData);
+                console.log('[Session] Loaded existing session:', sessionData);
+            }
+
+            return sessionKey;
         }
         
         _attachEventListeners() {
@@ -795,9 +822,11 @@
         
         // Expose global functions for backward compatibility
         window.arcToggleTranslation = toggleTranslation;
-        window.arcReadingUtils = Object.freeze({ 
-            serializePlainText, 
-            buildSentenceOffsets 
+        window.trackWordClick = trackWordClick;
+        window.saveSessionToServer = saveSessionToServer;
+        window.arcReadingUtils = Object.freeze({
+            serializePlainText,
+            buildSentenceOffsets
         });
     }
     
