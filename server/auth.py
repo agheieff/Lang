@@ -24,7 +24,7 @@ from starlette.requests import Request as StarletteRequest
 # Database Models - Import from central models
 # =============================================================================
 
-from server.models import Account
+from server.models import Account, Profile
 
 
 # =============================================================================
@@ -599,6 +599,35 @@ class CookieUserMiddleware(BaseHTTPMiddleware):
                                 user.get("id") if isinstance(user, dict) else None,
                             )
                             request.state.account_id = request.state.user_id
+
+                            # Load current profile for this user
+                            from server.db import SessionLocal
+                            db = SessionLocal()
+
+                            try:
+                                # Get active profile from cookie
+                                active_profile_id = request.cookies.get("active_profile_id")
+                                profile = None
+
+                                if active_profile_id:
+                                    try:
+                                        profile = db.query(Profile).filter(
+                                            Profile.id == int(active_profile_id),
+                                            Profile.account_id == request.state.account_id
+                                        ).first()
+                                    except (ValueError, TypeError):
+                                        profile = None
+
+                                # Fall back to first profile if no active profile or not found
+                                if profile is None:
+                                    profile = db.query(Profile).filter(
+                                        Profile.account_id == request.state.account_id
+                                    ).first()
+
+                                request.state.current_profile = profile
+                            finally:
+                                db.close()
+
                         else:
                             # Invalid user - clear cookie
                             response = await call_next(request)
