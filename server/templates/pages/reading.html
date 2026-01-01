@@ -356,6 +356,39 @@
       content += `<div class="text-xs text-blue-600 mt-1 font-medium">${escapeHtml(posDisplay)}</div>`;
     }
 
+    // Add grammar/word form info (gender, number, person, tense, mood, etc.)
+    if (wordData.grammar && Object.keys(wordData.grammar).length > 0) {
+      const grammar = wordData.grammar;
+      const formParts = [];
+
+      // Build form string from grammar features
+      if (grammar.gender) {
+        const genderMap = { 'm': 'masc', 'f': 'fem' };
+        formParts.push(genderMap[grammar.gender] || grammar.gender);
+      }
+      if (grammar.number) {
+        const numberMap = { 'sg': 'sing', 'pl': 'plur' };
+        formParts.push(numberMap[grammar.number] || grammar.number);
+      }
+      if (grammar.person) {
+        if (grammar.person === '1') formParts.push('1st');
+        else if (grammar.person === '2') formParts.push('2nd');
+        else if (grammar.person === '3') formParts.push('3rd');
+        else formParts.push(grammar.person);
+      }
+      if (grammar.tense) {
+        formParts.push(grammar.tense);
+      }
+      if (grammar.mood && grammar.mood !== 'indicative') {
+        formParts.push(grammar.mood);
+      }
+
+      // Format as "3sg.pres.ind" style notation
+      if (formParts.length > 0) {
+        content += `<div class="text-xs text-purple-600 mt-0.5">${formParts.join('.')}</div>`;
+      }
+    }
+
     if (wordData.lemma && wordData.lemma !== wordData.surface) {
       content += `<div class="text-xs text-gray-500 mt-1">Lemma: ${escapeHtml(wordData.lemma)}</div>`;
     }

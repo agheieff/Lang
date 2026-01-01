@@ -84,37 +84,37 @@ def seed_spanish_demo(db: Session) -> None:
     db.add(full_translation)
 
     # Add word translations (span_start, span_end based on content string)
+    # Format: (Surface, Lemma, POS, Translation, Start, End, Grammar JSON)
     words_data = [
-        # Word, Lemma, POS, Translation, Start, End
-        ("¡Hola!", "hola", "INTJ", "Hello!", 0, 6),
-        ("Bienvenido", "bienvenido", "ADJ", "Welcome", 7, 17),
-        ("a", "a", "ADP", "to", 18, 19),
-        ("tu", "tú", "PRON", "your", 20, 22),
-        ("práctica", "práctica", "NOUN", "practice", 23, 31),
-        ("de", "de", "ADP", "of", 32, 34),
-        ("lectura", "lectura", "NOUN", "reading", 35, 42),
-        ("Este", "este", "DET", "This", 44, 48),
-        ("es", "ser", "AUX", "is", 49, 51),
-        ("un", "uno", "DET", "a", 52, 54),
-        ("texto", "texto", "NOUN", "text", 55, 60),
-        ("de", "de", "ADP", "of", 61, 63),
-        ("demostración", "demostración", "NOUN", "demonstration", 64, 76),
-        ("simple", "simple", "ADJ", "simple", 77, 83),
-        ("para", "para", "ADP", "to", 84, 88),
-        ("comenzar", "comenzar", "VERB", "get started", 89, 97),
-        ("El", "el", "DET", "The", 99, 101),
-        ("sistema", "sistema", "NOUN", "system", 102, 109),
-        ("completo", "completo", "ADJ", "complete", 110, 118),
-        ("de", "de", "ADP", "of", 119, 121),
-        ("generación", "generación", "NOUN", "generation", 122, 132),
-        ("de", "de", "ADP", "of", 133, 135),
-        ("textos", "texto", "NOUN", "texts", 136, 142),
-        ("estará", "estar", "AUX", "will be", 143, 149),
-        ("disponible", "disponible", "ADJ", "available", 150, 160),
-        ("pronto", "pronto", "ADV", "soon", 161, 167),
+        ("¡Hola!", "hola", "INTJ", "Hello!", 0, 6, {}),
+        ("Bienvenido", "bienvenido", "ADJ", "Welcome", 7, 17, {"gender": "m", "number": "sg"}),
+        ("a", "a", "ADP", "to", 18, 19, {}),
+        ("tu", "tú", "PRON", "your", 20, 22, {"person": "2", "number": "sg"}),
+        ("práctica", "práctica", "NOUN", "practice", 23, 31, {"gender": "f", "number": "sg"}),
+        ("de", "de", "ADP", "of", 32, 34, {}),
+        ("lectura", "lectura", "NOUN", "reading", 35, 42, {"gender": "f", "number": "sg"}),
+        ("Este", "este", "DET", "This", 44, 48, {"gender": "m", "number": "sg"}),
+        ("es", "ser", "AUX", "is", 49, 51, {"mood": "indicative", "person": "3", "number": "sg"}),
+        ("un", "uno", "DET", "a", 52, 54, {"gender": "m", "number": "sg"}),
+        ("texto", "texto", "NOUN", "text", 55, 60, {"gender": "m", "number": "sg"}),
+        ("de", "de", "ADP", "of", 61, 63, {}),
+        ("demostración", "demostración", "NOUN", "demonstration", 64, 76, {"gender": "f", "number": "sg"}),
+        ("simple", "simple", "ADJ", "simple", 77, 83, {"number": "sg"}),
+        ("para", "para", "ADP", "to", 84, 88, {}),
+        ("comenzar", "comenzar", "VERB", "get started", 89, 97, {"mood": "infinitive"}),
+        ("El", "el", "DET", "The", 99, 101, {"gender": "m", "number": "sg"}),
+        ("sistema", "sistema", "NOUN", "system", 102, 109, {"gender": "m", "number": "sg"}),
+        ("completo", "completo", "ADJ", "complete", 110, 118, {"gender": "m", "number": "sg"}),
+        ("de", "de", "ADP", "of", 119, 121, {}),
+        ("generación", "generación", "NOUN", "generation", 122, 132, {"gender": "f", "number": "sg"}),
+        ("de", "de", "ADP", "of", 133, 135, {}),
+        ("textos", "texto", "NOUN", "texts", 136, 142, {"gender": "m", "number": "pl"}),
+        ("estará", "estar", "AUX", "will be", 143, 149, {"mood": "indicative", "person": "3", "number": "sg", "tense": "future"}),
+        ("disponible", "disponible", "ADJ", "available", 150, 160, {"number": "sg"}),
+        ("pronto", "pronto", "ADV", "soon", 161, 167, {}),
     ]
 
-    for surface, lemma, pos, translation, start, end in words_data:
+    for surface, lemma, pos, translation, start, end, grammar in words_data:
         word = ReadingWordGloss(
             text_id=text.id,
             target_lang="en",
@@ -124,6 +124,7 @@ def seed_spanish_demo(db: Session) -> None:
             pos=pos,
             translation=translation,
             lemma_translation=translation,
+            grammar=grammar,
             span_start=start,
             span_end=end,
         )
