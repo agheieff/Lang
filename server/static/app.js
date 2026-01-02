@@ -708,14 +708,21 @@
             
             // Save updated session data
             localStorage.setItem(sessionKey, JSON.stringify(sessionData));
-            
-            // Send to server (in background)
-            navigator.sendBeacon('/reading/word-click', JSON.stringify({
-                text_id: AppState.textId,
-                word_data: wordData,
-                session_data: sessionData
-            }));
-            
+
+            // Send to server
+            fetch('/reading/word-click', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    text_id: AppState.textId,
+                    word_data: wordData,
+                    session_data: sessionData
+                }),
+                keepalive: true
+            }).catch(err => console.error('Error sending word click:', err));
+
         } catch (error) {
             console.error('Error tracking word click:', error);
         }

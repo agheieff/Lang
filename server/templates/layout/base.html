@@ -16,6 +16,11 @@
 
     <!-- Consolidated application script -->
     <script src="/static/app.js"></script>
+
+    <!-- Text state manager (only on reading pages) -->
+    {% if request.url.path.startswith('/reading') %}
+    <script src="/static/reading-state.js"></script>
+    {% endif %}
 </head>
 <body>
     {% include "layout/header.html" %}

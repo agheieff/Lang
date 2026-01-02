@@ -22,10 +22,11 @@ from server.deps import get_current_account
 
 # Move service imports to top
 from server.services.recommendation import select_best_text
-from server.services.learning import (
-    track_interactions_from_session,
-    update_level_from_text,
-)
+# NOTE: Old tracking system disabled - using new reading-text-log system instead
+# from server.services.learning import (
+#     track_interactions_from_session,
+#     update_level_from_text,
+# )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reading"])
@@ -133,6 +134,7 @@ def reading_page(
             "text_id": None,
             "word_data": [],
             "account_id": account_id,
+            "profile_id": profile.id if profile else None,
         }
     else:
         # Mark text as current
@@ -169,6 +171,7 @@ def reading_page(
             "text_id": ready_text.id,
             "word_data": word_data,
             "account_id": account_id,
+            "profile_id": profile.id,
         }
 
     return _templates.TemplateResponse(request, "pages/reading.html", context)
@@ -288,7 +291,7 @@ def get_text_status(
     }
 
 
-@router.post("/reading/word-click")
+# @router.post("/reading/word-click")  # DISABLED - using new reading-text-log system
 def word_click(
     data: WordClickRequest,
     request: Request,
@@ -340,7 +343,7 @@ def word_click(
         )
 
 
-@router.post("/reading/save-session")
+# @router.post("/reading/save-session")  # DISABLED - using new reading-text-log system
 def save_session(
     data: SaveSessionRequest,
     request: Request,

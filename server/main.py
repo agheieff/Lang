@@ -21,6 +21,7 @@ from .config import MSP_ENABLE
 from .auth import CookieUserMiddleware, Account
 from .routes.health import router as health_router
 from .routes.reading import router as reading_router
+from .routes.reading_text_log import router as reading_text_log_router
 from .routes.srs import router as srs_router
 from .routes.pages import router as pages_router
 from .routes.user import router as user_router
@@ -172,6 +173,7 @@ app.include_router(user_router)
 
 # Feature routers
 app.include_router(reading_router)
+app.include_router(reading_text_log_router)
 app.include_router(srs_router)
 app.include_router(pages_router)
 app.include_router(admin_router)

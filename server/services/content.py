@@ -136,6 +136,10 @@ async def generate_text_content(
                     rt.title = title
                     db.commit()
 
+            # Create initial text state
+            from .text_state_builder import create_text_state
+            create_text_state(db, rt)
+
             logger.info(f"Generated text content {rt.id} for account {account_id}")
             return rt
 
@@ -268,6 +272,10 @@ async def _generate_word_translations(
 
         db.commit()
 
+        # Update text state with words
+        from .text_state_builder import add_words_to_state
+        add_words_to_state(db, rt.id)
+
         return True
 
     except Exception as e:
@@ -348,6 +356,10 @@ async def _generate_sentence_translations(
             db.add(trans)
 
         db.commit()
+
+        # Update text state with translations
+        from .text_state_builder import add_translations_to_state
+        add_translations_to_state(db, rt.id)
 
         return True
 

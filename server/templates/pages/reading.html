@@ -28,6 +28,7 @@
         id="reading-text"
         data-text-id="{{ text_id }}"
         data-account-id="{{ account_id }}"
+        data-profile-id="{{ profile_id }}"
         class="text-lg leading-relaxed"
       >
         <!-- Text will be rendered here with interactive word spans -->
@@ -210,9 +211,10 @@
     if (!nextBtn) return;
 
     nextBtn.addEventListener('click', async function() {
-      // Save session data before moving to next text
-      if (window.saveSessionToServer) {
-        await window.saveSessionToServer();
+      // Save text state before moving to next text
+      if (window.ArcadiaTextState) {
+        const result = await window.ArcadiaTextState.saveState();
+        console.log('[NextButton] State saved:', result);
       }
 
       try {
@@ -292,23 +294,6 @@
         // Show tooltip in sticky mode
         isSticky = true;
         showTooltipForWord(word, true);
-
-        // Track word click for SRS/vocabulary system
-        if (window.trackWordClick && container.wordData) {
-          const wordIndex = parseInt(word.getAttribute('data-word-index'));
-          const clickedWord = container.wordData[wordIndex];
-
-          if (clickedWord) {
-            window.trackWordClick({
-              surface: clickedWord.surface,
-              lemma: clickedWord.lemma,
-              pos: clickedWord.pos,
-              span_start: clickedWord.span_start,
-              span_end: clickedWord.span_end,
-              translation: clickedWord.translation
-            });
-          }
-        }
       });
     });
 
@@ -444,26 +429,7 @@
   }
 
   // Initialize session tracking when text is loaded
-  function initializeSessionTracking() {
-    if (!window.ArcadiaReadingApp || !window.ArcadiaReadingApp.AppState) return;
-
-    const readingText = document.getElementById('reading-text');
-    if (!readingText) return;
-
-    const textId = readingText.getAttribute('data-text-id');
-    if (!textId) return;
-
-    // Set app state
-    window.ArcadiaReadingApp.AppState.currentTextId = parseInt(textId);
-    window.ArcadiaReadingApp.AppState.accountId = parseInt(readingText.getAttribute('data-account-id'));
-
-    // Initialize session data
-    if (window.ArcadiaReadingApp.ReadingController) {
-      window.ArcadiaReadingApp.ReadingController.initializeSessionData();
-    }
-
-    console.log('[Session] Initialized tracking for text', textId);
-  }
+  // Note: Session tracking removed - now handled by reading-state.js
 
   // Initialize when DOM is ready
   if (document.readyState === 'loading') {
@@ -471,7 +437,6 @@
       renderInteractiveText();
       setupNextButton();
       setupMultiSegmentHighlighting();
-      initializeSessionTracking();
       // Re-attach app.js event handlers after rendering
       setTimeout(() => {
         if (window.ArcadiaReadingApp) {
@@ -487,7 +452,6 @@
     renderInteractiveText();
     setupNextButton();
     setupMultiSegmentHighlighting();
-    initializeSessionTracking();
     // Re-attach app.js event handlers after rendering
     setTimeout(() => {
       if (window.ArcadiaReadingApp) {

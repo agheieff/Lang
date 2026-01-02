@@ -120,13 +120,12 @@ def get_srs_words(
             {
                 "id": lex.id,
                 "lemma": lex.lemma,
-                "surface": lex.surface,
                 "pos": lex.pos,
                 "n": lex.exposures,
                 "p_click": lex.clicks,
                 "stability": lex.stability,
                 "level_code": lex.level_code,
-                "freq_rank": lex.freq_rank,
+                "freq_rank": lex.frequency_rank,
                 "next_due_at": lex.next_due_at.isoformat() if lex.next_due_at else None,
             }
         )

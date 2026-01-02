@@ -210,7 +210,6 @@ def track_interactions_from_session(
                     lang=lang,
                     lemma=lemma,
                     pos=pos,
-                    surface=surface,
                     first_seen_at=datetime.now(timezone.utc),
                     last_seen_at=datetime.now(timezone.utc),
                     exposures=1,

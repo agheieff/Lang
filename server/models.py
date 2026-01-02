@@ -816,6 +816,68 @@ class GenerationRetryAttempt(Base):
     )
 
 
+class TextState(Base):
+    """Complete text state JSON - generated during text creation and served to users."""
+
+    __tablename__ = "text_states"
+    __table_args__ = (
+        UniqueConstraint("text_id", name="uq_text_state_text"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text_id: Mapped[int] = mapped_column(
+        ForeignKey("reading_texts.id", ondelete="CASCADE"), unique=True, index=True
+    )
+
+    # Build status - can be updated incrementally
+    status: Mapped[str] = mapped_column(
+        String(32), default="building"
+    )  # building | ready | failed
+
+    # Components flags
+    has_content: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_words: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_translations: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # The complete state JSON
+    state_data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Metadata
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+
+class ProfileTextState(Base):
+    """Text state returned by user after reading - keyed by (text_id, profile_id)."""
+
+    __tablename__ = "profile_text_states"
+    __table_args__ = (
+        UniqueConstraint("text_id", "profile_id", name="uq_profile_text_state"),
+        Index("ix_pts_profile_saved", "profile_id", "saved_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text_id: Mapped[int] = mapped_column(
+        ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True
+    )
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+
+    # The state data as returned by client (includes interactions)
+    state_data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Timestamps
+    saved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
