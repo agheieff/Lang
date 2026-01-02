@@ -125,6 +125,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Log all incoming requests
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log all incoming requests to help debug client issues."""
+    logger.info(f"[REQUEST] {request.method} {request.url.path}")
+    response = await call_next(request)
+    return response
+
 # Lightweight auth context via cookie
 try:
     secret = os.getenv("ARC_LANG_JWT_SECRET")

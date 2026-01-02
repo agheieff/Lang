@@ -207,45 +207,55 @@
    * Handle next text button with proper API call
    */
   function setupNextButton() {
-    const nextBtn = document.getElementById('next-text-btn');
-    console.log('[setupNextButton] Button found:', !!nextBtn, 'ArcadiaTextState:', !!window.ArcadiaTextState);
+    // Wait for ArcadiaTextState to be available
+    const checkInterval = setInterval(() => {
+      if (window.ArcadiaTextState && window.ArcadiaTextState.saveState) {
+        clearInterval(checkInterval);
 
-    if (!nextBtn) {
-      console.error('[setupNextButton] Button NOT found!');
-      return;
-    }
+        const nextBtn = document.getElementById('next-text-btn');
+        if (!nextBtn) {
+          console.error('[setupNextButton] Button NOT found!');
+          return;
+        }
 
-    nextBtn.addEventListener('click', async function() {
-      console.log('[NextButton] Clicked!');
+        console.log('[setupNextButton] Button found and ArcadiaTextState available');
 
-      // Save text state before moving to next text
-      if (window.ArcadiaTextState) {
-        const result = await window.ArcadiaTextState.saveState();
-        console.log('[NextButton] State saved:', result);
-      } else {
-        console.error('[NextButton] window.ArcadiaTextState not available!');
-      }
+        nextBtn.addEventListener('click', async function() {
+          console.log('[NextButton] Clicked!');
 
-      try {
-        const response = await fetch('/reading/next', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
+          // Save text state before moving to next text
+          try {
+            const result = await window.ArcadiaTextState.saveState();
+            console.log('[NextButton] State saved:', result);
+          } catch (error) {
+            console.error('[NextButton] Save failed:', error);
+          }
+
+          try {
+            const response = await fetch('/reading/next', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            });
+
+            if (response.ok) {
+              // Reload page to show next text
+              window.location.reload();
+            } else {
+              console.error('Failed to get next text');
+            }
+          } catch (error) {
+            console.error('Error:', error);
           }
         });
 
-        if (response.ok) {
-          // Reload page to show next text
-          window.location.reload();
-        } else {
-          console.error('Failed to get next text');
-        }
-      } catch (error) {
-        console.error('Error:', error);
+        console.log('[setupNextButton] Handler attached successfully');
       }
-    });
+    }, 100);
 
-    console.log('[setupNextButton] Handler attached successfully');
+    // Timeout after 5 seconds
+    setTimeout(() => clearInterval(checkInterval), 5000);
   }
 
   /**

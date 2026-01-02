@@ -110,6 +110,12 @@ def log_text_state(
     db: Session = Depends(get_db),
 ):
     """Save unified text state from client - stores per (text_id, profile_id) and adds words to profile vocabulary."""
+    print(f"\n{'='*60}")
+    print(f"[TextState] ENDPOINT CALLED")
+    print(f"[TextState] text_id={data.text_id}, profile_id={data.profile_id}")
+    print(f"[TextState] words_count={len(data.words) if data.words else 0}")
+    print(f"{'='*60}\n")
+
     try:
         profile_id = data.profile_id
 
@@ -126,6 +132,7 @@ def log_text_state(
         state_dict = data.model_dump()
 
         # Add all words from this text to profile's vocabulary
+        print(f"[TextState] About to add {len(data.words) if data.words else 0} words to vocabulary...")
         result = _add_words_to_profile_vocabulary(
             db=db,
             account_id=data.account_id,
@@ -134,6 +141,7 @@ def log_text_state(
             lang=data.lang,
             words=data.words,
         )
+        print(f"[TextState] Vocabulary result: {result}")
 
         logger.info(f"[TextState] Vocabulary added: {result}")
 

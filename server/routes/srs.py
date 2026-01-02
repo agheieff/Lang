@@ -112,7 +112,7 @@ def get_srs_words(
     if min_stability is not None:
         query = query.filter(Lexeme.stability >= min_stability)
 
-    lexemes = query.order_by(Lexeme.next_due_at.asc()).limit(100).all()
+    lexemes = query.order_by(Lexeme.next_due_at.asc()).all()
 
     items = []
     for lex in lexemes:
