@@ -51,12 +51,15 @@
      */
     async function saveState() {
         if (!State) {
-            console.warn('[TextState] No state to save');
-            return null;
+            console.error('[TextState] No state to save - State is null or undefined');
+            console.error('[TextState] window.ArcadiaTextState:', window.ArcadiaTextState);
+            return { success: false, error: 'No state to save' };
         }
 
         // Add saved_at timestamp
         State.saved_at = new Date().toISOString();
+
+        console.log('[TextState] Saving state with', State.words?.length || 0, 'words for text', State.text_id);
 
         try {
             const response = await fetch('/reading/log-text-state', {
@@ -65,12 +68,17 @@
                 body: JSON.stringify(State)
             });
 
+            if (!response.ok) {
+                console.error('[TextState] Save failed with status:', response.status);
+                return { success: false, error: response.status };
+            }
+
             const result = await response.json();
-            console.log('[TextState] Saved:', result);
+            console.log('[TextState] Saved successfully:', result);
             return result;
         } catch (error) {
             console.error('[TextState] Save failed:', error);
-            return null;
+            return { success: false, error: error.message };
         }
     }
 

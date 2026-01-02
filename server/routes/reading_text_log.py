@@ -113,7 +113,10 @@ def log_text_state(
     try:
         profile_id = data.profile_id
 
+        logger.info(f"[TextState] Saving state: text_id={data.text_id}, profile_id={profile_id}, words_count={len(data.words) if data.words else 0}")
+
         if not profile_id:
+            logger.error(f"[TextState] Save FAILED: No profile_id in request data")
             return JSONResponse(
                 {"status": "error", "message": "profile_id required"},
                 status_code=400,
@@ -123,7 +126,7 @@ def log_text_state(
         state_dict = data.model_dump()
 
         # Add all words from this text to profile's vocabulary
-        _add_words_to_profile_vocabulary(
+        result = _add_words_to_profile_vocabulary(
             db=db,
             account_id=data.account_id,
             profile_id=profile_id,
@@ -131,6 +134,8 @@ def log_text_state(
             lang=data.lang,
             words=data.words,
         )
+
+        logger.info(f"[TextState] Vocabulary added: {result}")
 
         # Create or update profile text state
         existing = (
@@ -147,21 +152,41 @@ def log_text_state(
             existing.state_data = state_dict
             existing.account_id = data.account_id
             if data.saved_at:
-                existing.saved_at = data.saved_at
+                # Parse ISO string to datetime (strip timezone for simplicity)
+                try:
+                    # Remove timezone offset to make it compatible with SQLite
+                    saved_at_clean = data.saved_at.split('+')[0].split('Z')[0]
+                    existing.saved_at = datetime.fromisoformat(saved_at_clean)
+                except:
+                    existing.saved_at = datetime.now(timezone.utc)
             logger.info(f"Updated text state for text={data.text_id}, profile={profile_id}")
         else:
+            # Parse saved_at if provided, otherwise use now
+            saved_at = None
+            if data.saved_at:
+                try:
+                    # Remove timezone offset to make it compatible with SQLite
+                    saved_at_clean = data.saved_at.split('+')[0].split('Z')[0]
+                    saved_at = datetime.fromisoformat(saved_at_clean)
+                except:
+                    saved_at = datetime.now(timezone.utc)
+            else:
+                saved_at = datetime.now(timezone.utc)
+
             # Create new record
             profile_text_state = ProfileTextState(
                 text_id=data.text_id,
                 profile_id=profile_id,
                 account_id=data.account_id,
                 state_data=state_dict,
-                saved_at=data.saved_at or datetime.now(timezone.utc).isoformat(),
+                saved_at=saved_at,
             )
             db.add(profile_text_state)
             logger.info(f"Saved text state for text={data.text_id}, profile={profile_id}")
 
         db.commit()
+
+        logger.info(f"[TextState] Saved successfully: text_id={data.text_id}, profile_id={profile_id}")
 
         return {
             "status": "ok",
@@ -237,7 +262,13 @@ def _add_words_to_profile_vocabulary(
                 db.flush()
 
         db.commit()
-        logger.info(f"Added {added_count} new words, updated {updated_count} existing words for profile {profile_id}")
+        logger.info(f"[TextState] Vocabulary: added={added_count}, updated={updated_count}, total_words={len(words)}")
+
+        return {
+            "added": added_count,
+            "updated": updated_count,
+            "total": len(words)
+        }
 
     except Exception as e:
         logger.error(f"Error adding words to vocabulary: {e}", exc_info=True)

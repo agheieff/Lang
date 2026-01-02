@@ -312,18 +312,24 @@
             this.retryCount = 0;
             this.isConnecting = false;
         }
-        
+
         connect(textId, accountId) {
+            // SSE disabled - using text state system instead
+            console.log('[SSE] SSE connection disabled (using text state system)');
+            return;
+
+            // Old SSE connection code (disabled)
+            /*
             if (this.eventSource) {
                 this.eventSource.close();
             }
-            
+
             AppState.textId = textId;
             AppState.accountId = accountId;
             this.isConnecting = true;
-            
+
             const sseUrl = `/reading/sse?text_id=${textId}&account_id=${accountId}`;
-            
+
             try {
                 this.eventSource = new EventSource(sseUrl);
                 
@@ -358,11 +364,12 @@
                     const data = JSON.parse(event.data);
                     this.onNextReady(data);
                 });
-                
+
             } catch (error) {
                 console.error('[SSE] Connection error:', error);
                 this.handleConnectionError();
             }
+            */
         }
         
         handleConnectionError() {

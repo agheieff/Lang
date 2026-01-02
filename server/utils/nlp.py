@@ -272,11 +272,12 @@ def parse_word_items_from_response_blob(blob: Any) -> List[Dict[str, Any]]:
     return items
 
 
-def parse_csv_word_translations(text: str) -> List[Dict[str, str]]:
+def parse_csv_word_translations(text: str, lang: str = "en") -> List[Dict[str, str]]:
     """Parse CSV word translations from LLM response.
 
-    Expected format:
-    word|translation|pos|lemma|pinyin
+    Language-specific formats:
+    - Chinese (zh-CN, zh-TW): word|translation|pos|pinyin (no lemma, same as surface)
+    - Other languages: word|translation|pos|lemma|pronunciation
 
     For non-continuous words (e.g., German prefixes), use ... notation:
     ruf...an|call|VERB|anrufen|
@@ -285,6 +286,9 @@ def parse_csv_word_translations(text: str) -> List[Dict[str, str]]:
         return []
 
     items: List[Dict[str, str]] = []
+
+    # Chinese languages don't need lemma (same as surface)
+    is_chinese = lang.startswith("zh-")
 
     # Remove code fences if present
     cleaned = text.strip()
@@ -312,13 +316,25 @@ def parse_csv_word_translations(text: str) -> List[Dict[str, str]]:
         if first_col in ("word", "words", "surface"):
             continue
 
-        item = {
-            "surface": parts[0].strip(),
-            "translation": parts[1].strip() if len(parts) > 1 else "",
-            "pos": parts[2].strip() if len(parts) > 2 else "",
-            "lemma": parts[3].strip() if len(parts) > 3 else "",
-            "pinyin": parts[4].strip() if len(parts) > 4 else "",
-        }
+        if is_chinese:
+            # Chinese format: word|translation|pos|pinyin
+            surface = parts[0].strip()
+            item = {
+                "surface": surface,
+                "lemma": surface,  # For Chinese, lemma = surface
+                "translation": parts[1].strip() if len(parts) > 1 else "",
+                "pos": parts[2].strip() if len(parts) > 2 else "",
+                "pinyin": parts[3].strip() if len(parts) > 3 else "",
+            }
+        else:
+            # Other languages format: word|translation|pos|lemma|pronunciation
+            item = {
+                "surface": parts[0].strip(),
+                "translation": parts[1].strip() if len(parts) > 1 else "",
+                "pos": parts[2].strip() if len(parts) > 2 else "",
+                "lemma": parts[3].strip() if len(parts) > 3 else "",
+                "pinyin": parts[4].strip() if len(parts) > 4 else "",
+            }
         items.append(item)
 
     return items

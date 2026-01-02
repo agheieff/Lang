@@ -208,13 +208,22 @@
    */
   function setupNextButton() {
     const nextBtn = document.getElementById('next-text-btn');
-    if (!nextBtn) return;
+    console.log('[setupNextButton] Button found:', !!nextBtn, 'ArcadiaTextState:', !!window.ArcadiaTextState);
+
+    if (!nextBtn) {
+      console.error('[setupNextButton] Button NOT found!');
+      return;
+    }
 
     nextBtn.addEventListener('click', async function() {
+      console.log('[NextButton] Clicked!');
+
       // Save text state before moving to next text
       if (window.ArcadiaTextState) {
         const result = await window.ArcadiaTextState.saveState();
         console.log('[NextButton] State saved:', result);
+      } else {
+        console.error('[NextButton] window.ArcadiaTextState not available!');
       }
 
       try {
@@ -235,6 +244,8 @@
         console.error('Error:', error);
       }
     });
+
+    console.log('[setupNextButton] Handler attached successfully');
   }
 
   /**

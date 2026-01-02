@@ -208,7 +208,7 @@ async def _generate_word_translations(
             model=model,
         )
 
-        word_data = parse_csv_word_translations(response[0] if response else "")
+        word_data = parse_csv_word_translations(response[0] if response else "", lang)
 
         if not word_data:
             logger.warning(f"No word data parsed from LLM response")
