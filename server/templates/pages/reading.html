@@ -306,6 +306,16 @@
         e.preventDefault();
         e.stopPropagation();
 
+        // Get word data and track the click
+        const container = document.getElementById('reading-text');
+        if (container && container.wordData) {
+          const wordIndex = parseInt(word.getAttribute('data-word-index'));
+          const wordData = container.wordData[wordIndex];
+          if (wordData && typeof trackWordClick === 'function') {
+            trackWordClick(wordData);
+          }
+        }
+
         // Clear any pending hide
         if (hideTimeout) {
           clearTimeout(hideTimeout);

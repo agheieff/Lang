@@ -674,13 +674,13 @@
     
     function trackWordClick(wordData) {
         if (!AppState.textId || !AppState.accountId) return;
-        
+
         try {
             const sessionKey = `arc_current_session_${AppState.textId}`;
             initializeSessionData();
-            
+
             const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
-            
+
             // Initialize arrays if not present
             if (!sessionData.words) {
                 sessionData.words = [];
@@ -691,12 +691,14 @@
             if (!sessionData.full_translation_views) {
                 sessionData.full_translation_views = [];
             }
-            
-            // Add or update word interaction
+
+            const clickTimestamp = Date.now();
+
+            // Add or update word interaction in session data
             const existingWord = sessionData.words.find(
                 w => w.surface === wordData.surface && w.span_start === wordData.span_start
             );
-            
+
             if (existingWord) {
                 existingWord.clicked = true;
                 existingWord.click_count = (existingWord.click_count || 0) + 1;
@@ -709,26 +711,26 @@
                     span_end: wordData.span_end,
                     clicked: true,
                     click_count: 1,
-                    timestamp: Date.now()
+                    timestamp: clickTimestamp
                 });
             }
-            
+
             // Save updated session data
             localStorage.setItem(sessionKey, JSON.stringify(sessionData));
 
-            // Send to server
-            fetch('/reading/word-click', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    text_id: AppState.textId,
-                    word_data: wordData,
-                    session_data: sessionData
-                }),
-                keepalive: true
-            }).catch(err => console.error('Error sending word click:', err));
+            // Record click timestamp in TextState (sent to server on "Next Text")
+            const state = window.ArcadiaTextState?.getState();
+            if (state && state.words) {
+                const stateWord = state.words.find(
+                    w => w.surface === wordData.surface && w.span_start === wordData.span_start
+                );
+                if (stateWord && Array.isArray(stateWord.clicks)) {
+                    stateWord.clicks.push(clickTimestamp);
+
+                    // Save enriched state to localStorage
+                    localStorage.setItem(`arc_text_state_${AppState.textId}`, JSON.stringify(state));
+                }
+            }
 
         } catch (error) {
             console.error('Error tracking word click:', error);

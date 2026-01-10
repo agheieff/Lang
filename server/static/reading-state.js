@@ -35,7 +35,12 @@
                 State.profile_id = profileId ? parseInt(profileId) : null;
                 State.loaded_at = new Date().toISOString();
 
-                console.log('[TextState] Loaded and enriched:', State);
+                // Initialize clicks array for each word
+                if (State.words && Array.isArray(State.words)) {
+                    State.words.forEach(word => {
+                        word.clicks = [];
+                    });
+                }
             } else if (data.status === 'not_ready') {
                 console.warn('[TextState] Text state not ready yet:', data.message);
                 // Retry after a delay
@@ -59,8 +64,6 @@
         // Add saved_at timestamp
         State.saved_at = new Date().toISOString();
 
-        console.log('[TextState] Saving state with', State.words?.length || 0, 'words for text', State.text_id);
-
         try {
             const response = await fetch('/reading/log-text-state', {
                 method: 'POST',
@@ -74,7 +77,6 @@
             }
 
             const result = await response.json();
-            console.log('[TextState] Saved successfully:', result);
             return result;
         } catch (error) {
             console.error('[TextState] Save failed:', error);
@@ -102,6 +104,4 @@
         clearState,
         getState: () => State
     };
-
-    console.log('[TextState] Manager initialized');
 })();

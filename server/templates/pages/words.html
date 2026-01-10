@@ -42,6 +42,7 @@
             <th class="px-4 py-2 font-medium">Level</th>
             <th class="px-4 py-2 font-medium">Difficulty</th>
             <th class="px-4 py-2 font-medium">Interactions</th>
+            <th class="px-4 py-2 font-medium">Clicks</th>
             <th class="px-4 py-2 font-medium">Stability</th>
             <th class="px-4 py-2 font-medium">Next Due</th>
             <th class="px-4 py-2 font-medium">Action</th>
@@ -56,8 +57,10 @@
 </div>
 
 <script>
-// Track selected word IDs
+// Track selected word IDs and sort state
 let selectedWordIds = new Set();
+let currentSort = { column: 'lemma', direction: 'asc' }; // direction: 'asc' or 'desc'
+let allWords = []; // Store all words for sorting
 
 // Load words when page loads
 document.addEventListener('DOMContentLoaded', function() {
@@ -70,7 +73,145 @@ document.addEventListener('DOMContentLoaded', function() {
     clearTimeout(window.searchTimeout);
     window.searchTimeout = setTimeout(loadWords, 300);
   });
+
+  // Set up column sorting
+  setupColumnSorting();
 });
+
+function setupColumnSorting() {
+  const sortableColumns = {
+    'lemma': 'string',
+    'freq': 'number',
+    'level': 'string',
+    'difficulty': 'number',
+    'interactions': 'number',
+    'clicks': 'number',
+    'stability': 'number',
+    'nextDue': 'date'
+  };
+
+  // Select all th elements in the table header
+  const headers = document.querySelectorAll('thead th');
+  headers.forEach((th, index) => {
+    const headerText = th.textContent.trim().toLowerCase();
+    const columnKey = Object.keys(sortableColumns).find(key => {
+      if (key === 'nextDue') return headerText.includes('next due');
+      if (key === 'interactions') return headerText.includes('interactions');
+      if (key === 'difficulty') return headerText.includes('difficulty');
+      return headerText.includes(key);
+    });
+
+    if (columnKey) {
+      th.style.cursor = 'pointer';
+      th.classList.add('hover:bg-gray-100');
+      th.addEventListener('click', () => sortByColumn(columnKey, sortableColumns[columnKey]));
+    }
+  });
+}
+
+function sortByColumn(column, type) {
+  // Toggle direction if clicking same column
+  if (currentSort.column === column) {
+    currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    currentSort.column = column;
+    currentSort.direction = 'asc';
+  }
+
+  // Sort the filtered words
+  const hideNew = document.getElementById('hide-new').checked;
+  const minStab = document.getElementById('min-stab').value;
+  const search = document.getElementById('search').value.trim().toLowerCase();
+
+  const filtered = allWords.filter(it => {
+    if (hideNew && (!it || ((it.n || 0) === 0 && (Number(it.stability) || 0) <= 0))) return false;
+    if (search && (!String(it.lemma || '').toLowerCase().includes(search))) return false;
+    if (minStab && Number(it.stability || 0) < Number(minStab)) return false;
+    return true;
+  });
+
+  filtered.sort((a, b) => {
+    let aVal, bVal;
+
+    switch (column) {
+      case 'lemma':
+        aVal = String(a.lemma || '').toLowerCase();
+        bVal = String(b.lemma || '').toLowerCase();
+        break;
+      case 'freq':
+        aVal = a.freq_rank ?? 999999;
+        bVal = b.freq_rank ?? 999999;
+        break;
+      case 'level':
+        aVal = String(a.level_code || '');
+        bVal = String(b.level_code || '');
+        break;
+      case 'difficulty':
+        aVal = Number(a.p_click) || 0;
+        bVal = Number(b.p_click) || 0;
+        break;
+      case 'interactions':
+        aVal = Number(a.n) || 0;
+        bVal = Number(b.n) || 0;
+        break;
+      case 'clicks':
+        aVal = Number(a.p_click) || 0;
+        bVal = Number(b.p_click) || 0;
+        break;
+      case 'stability':
+        aVal = Number(a.stability) || 0;
+        bVal = Number(b.stability) || 0;
+        break;
+      case 'nextDue':
+        aVal = a.next_due_at ? new Date(a.next_due_at).getTime() : (currentSort.direction === 'asc' ? 9999999999999 : 0);
+        bVal = b.next_due_at ? new Date(b.next_due_at).getTime() : (currentSort.direction === 'asc' ? 9999999999999 : 0);
+        break;
+      default:
+        return 0;
+    }
+
+    if (type === 'number') {
+      return currentSort.direction === 'asc' ? aVal - bVal : bVal - aVal;
+    } else {
+      if (aVal < bVal) return currentSort.direction === 'asc' ? -1 : 1;
+      if (aVal > bVal) return currentSort.direction === 'asc' ? 1 : -1;
+      return 0;
+    }
+  });
+
+  renderWordsTable(filtered);
+  updateSortIndicators();
+}
+
+function updateSortIndicators() {
+  const headers = document.querySelectorAll('thead th');
+  headers.forEach(th => {
+    // Remove existing sort indicators
+    th.classList.remove('bg-blue-50', 'bg-blue-100');
+
+    // Remove old icons
+    const oldIcons = th.querySelectorAll('.sort-icon');
+    oldIcons.forEach(icon => icon.remove());
+
+    const headerText = th.textContent.trim().toLowerCase();
+
+    // Check if this is the current sort column
+    let isSortColumn = false;
+    if (currentSort.column === 'nextDue' && headerText.includes('next due')) isSortColumn = true;
+    else if (currentSort.column === 'interactions' && headerText.includes('interactions')) isSortColumn = true;
+    else if (currentSort.column === 'difficulty' && headerText.includes('difficulty')) isSortColumn = true;
+    else if (headerText.includes(currentSort.column)) isSortColumn = true;
+
+    if (isSortColumn && !headerText.includes('action') && !headerText.includes('select all')) {
+      th.classList.add('bg-blue-50');
+      const icon = document.createElement('span');
+      icon.className = 'sort-icon ml-1 text-xs';
+      icon.style.color = '#3b82f6'; // Blue-500
+      icon.textContent = currentSort.direction === 'asc' ? ' ▴' : ' ▾';
+      th.appendChild(icon);
+    }
+  });
+}
 
 async function loadWords() {
   const hideNew = document.getElementById('hide-new').checked;
@@ -85,12 +226,18 @@ async function loadWords() {
     const res = await fetch(`/srs/words?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
     if (!res.ok) return;
     const items = await res.json();
+    allWords = items; // Store all words for sorting
+
     const filtered = items.filter(it => {
       if (hideNew && (!it || ((it.n || 0) === 0 && (Number(it.stability) || 0) <= 0))) return false;
       if (search && (!String(it.lemma || '').toLowerCase().includes(search))) return false;
+      if (minStab && Number(it.stability || 0) < Number(minStab)) return false;
       return true;
     });
-    renderWordsTable(filtered);
+
+    // Apply initial sort (lemma is string type)
+    const sortTypes = { lemma: 'string', freq: 'number', level: 'string', difficulty: 'number', interactions: 'number', clicks: 'number', stability: 'number', nextDue: 'date' };
+    sortByColumn(currentSort.column, sortTypes[currentSort.column] || 'string');
   } catch (e) {
     // ignore
   }
@@ -132,6 +279,7 @@ function renderWordsTable(items) {
       <td class="px-4 py-2 text-xs"><span class="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">${escapeHtml(lvl)}</span></td>
       <td class="px-4 py-2 text-sm">${(p*100).toFixed(0)}%</td>
       <td class="px-4 py-2 text-sm">${n}</td>
+      <td class="px-4 py-2 text-sm">${p}</td>
       <td class="px-4 py-2 text-sm">${S.toFixed(1)}d</td>
       <td class="px-4 py-2 text-sm ${nextDue === 'Overdue' ? 'text-red-600 font-medium' : 'text-gray-600'}">${nextDue}</td>
       <td class="px-4 py-2 text-gray-400 text-xs">Edit</td>
