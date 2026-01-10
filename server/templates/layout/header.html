@@ -5,7 +5,7 @@
         Arcadia Lang
       </a>
 
-      {% if request.state.user and current_profile %}
+      {% if request.state.user %}
       <!-- Profile Switcher -->
       <div class="relative">
         <button class="flex items-center space-x-2 px-3 py-2 rounded-lg border border-gray-600 bg-gray-800 hover:bg-gray-700 transition-colors" onclick="toggleProfileMenu()">
@@ -130,8 +130,8 @@ async function switchProfile(profileId) {
     });
 
     if (response.ok) {
-      // Immediate redirect to reading page to ensure fresh state
-      window.location.href = '/reading';
+      // Reload current page to ensure fresh state
+      window.location.reload();
     }
   } catch (error) {
     console.error('Failed to switch profile:', error);

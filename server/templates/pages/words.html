@@ -2,9 +2,17 @@
 
 {% block content %}
 <div class="container mx-auto max-w-4xl p-4">
-  <div class="flex items-center gap-2 mb-4">
-    <h1 class="text-2xl font-bold">My Words</h1>
-    <span id="word-count" class="px-2 py-1 text-xs font-medium bg-gray-100 border border-gray-300 rounded">0</span>
+  <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center gap-2">
+      <h1 class="text-2xl font-bold">My Words</h1>
+      <span id="word-count" class="px-2 py-1 text-xs font-medium bg-gray-100 border border-gray-300 rounded">0</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <span id="selected-count" class="text-sm text-gray-600 hidden">0 selected</span>
+      <button id="delete-selected-btn" class="px-3 py-1.5 text-sm bg-red-600 hover:bg-red-700 text-white rounded hidden" onclick="deleteSelectedWords()">
+        Delete Selected
+      </button>
+    </div>
   </div>
 
   <div class="bg-white rounded-lg shadow-md p-4 mb-4">
@@ -26,6 +34,9 @@
       <table class="w-full text-sm text-left text-gray-700">
         <thead class="sticky top-0 bg-gray-50">
           <tr>
+            <th class="px-4 py-2 font-medium w-12">
+              <input id="select-all" type="checkbox" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2" onchange="toggleSelectAll(this)" />
+            </th>
             <th class="px-4 py-2 font-medium">Lemma</th>
             <th class="px-4 py-2 font-medium">Freq</th>
             <th class="px-4 py-2 font-medium">Level</th>
@@ -45,6 +56,9 @@
 </div>
 
 <script>
+// Track selected word IDs
+let selectedWordIds = new Set();
+
 // Load words when page loads
 document.addEventListener('DOMContentLoaded', function() {
   loadWords();
@@ -87,6 +101,7 @@ function renderWordsTable(items) {
   const countEl = document.getElementById('word-count');
   if (!tbody) return;
   tbody.innerHTML = '';
+
   const rows = (items || []).map(it => {
     const p = (Number(it.p_click) || 0);
     const S = (Number(it.stability) || 0);
@@ -103,9 +118,15 @@ function renderWordsTable(items) {
         else if (days === 0) nextDue = 'Today';
         else nextDue = `in ${days} days`;
     }
-    
+
     const tr = document.createElement('tr');
+    const isSelected = selectedWordIds.has(it.id);
+    tr.className = isSelected ? 'bg-blue-50' : '';
     tr.innerHTML = `
+      <td class="px-4 py-2">
+        <input type="checkbox" class="word-checkbox w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+          data-word-id="${it.id}" ${isSelected ? 'checked' : ''} onchange="toggleWordSelection(${it.id}, this.checked)" />
+      </td>
       <td class="px-4 py-2 whitespace-nowrap font-semibold text-gray-900">${escapeHtml(it.lemma || '')}</td>
       <td class="px-4 py-2 text-gray-500 text-xs">${freq}</td>
       <td class="px-4 py-2 text-xs"><span class="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">${escapeHtml(lvl)}</span></td>
@@ -119,6 +140,105 @@ function renderWordsTable(items) {
   });
   for (const r of rows) tbody.appendChild(r);
   if (countEl) countEl.textContent = String(rows.length);
+
+  // Update select all checkbox state
+  updateSelectAllState();
+}
+
+function toggleWordSelection(wordId, isSelected) {
+  if (isSelected) {
+    selectedWordIds.add(wordId);
+  } else {
+    selectedWordIds.delete(wordId);
+  }
+  updateSelectionUI();
+}
+
+function toggleSelectAll(checkbox) {
+  const checkboxes = document.querySelectorAll('.word-checkbox');
+  checkboxes.forEach(cb => {
+    cb.checked = checkbox.checked;
+    const wordId = parseInt(cb.getAttribute('data-word-id'));
+    if (checkbox.checked) {
+      selectedWordIds.add(wordId);
+    } else {
+      selectedWordIds.delete(wordId);
+    }
+  });
+
+  // Update row highlighting
+  const tbody = document.getElementById('words-table');
+  const rows = tbody.querySelectorAll('tr');
+  rows.forEach((row, index) => {
+    const checkbox = checkboxes[index];
+    if (checkbox && checkbox.checked) {
+      row.classList.add('bg-blue-50');
+    } else {
+      row.classList.remove('bg-blue-50');
+    }
+  });
+
+  updateSelectionUI();
+}
+
+function updateSelectAllState() {
+  const selectAllCheckbox = document.getElementById('select-all');
+  const checkboxes = document.querySelectorAll('.word-checkbox');
+  if (checkboxes.length === 0) {
+    selectAllCheckbox.checked = false;
+    selectAllCheckbox.indeterminate = false;
+    return;
+  }
+
+  const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+  const someChecked = Array.from(checkboxes).some(cb => cb.checked);
+
+  selectAllCheckbox.checked = allChecked;
+  selectAllCheckbox.indeterminate = someChecked && !allChecked;
+}
+
+function updateSelectionUI() {
+  const count = selectedWordIds.size;
+  const countEl = document.getElementById('selected-count');
+  const deleteBtn = document.getElementById('delete-selected-btn');
+
+  if (count > 0) {
+    countEl.textContent = `${count} selected`;
+    countEl.classList.remove('hidden');
+    deleteBtn.classList.remove('hidden');
+  } else {
+    countEl.classList.add('hidden');
+    deleteBtn.classList.add('hidden');
+  }
+
+  updateSelectAllState();
+}
+
+async function deleteSelectedWords() {
+  if (selectedWordIds.size === 0) return;
+
+  if (!confirm(`Are you sure you want to delete ${selectedWordIds.size} word(s)?`)) {
+    return;
+  }
+
+  try {
+    const response = await fetch('/srs/words', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word_ids: Array.from(selectedWordIds) })
+    });
+
+    if (response.ok) {
+      selectedWordIds.clear();
+      updateSelectionUI();
+      loadWords(); // Reload the word list
+    } else {
+      alert('Failed to delete words');
+    }
+  } catch (error) {
+    console.error('Error deleting words:', error);
+    alert('Failed to delete words');
+  }
 }
 
 function escapeHtml(s){

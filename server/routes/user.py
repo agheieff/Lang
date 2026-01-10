@@ -72,7 +72,23 @@ def stats_page(
     db: Session = Depends(get_db),
 ):
     t = _templates()
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id")
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
 
     from ..models import Language
 
@@ -95,7 +111,23 @@ def words_page(
     db: Session = Depends(get_db),
 ):
     t = _templates()
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id")
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
 
     from ..models import Language
 
@@ -149,11 +181,41 @@ def post_me_profile(
 
 @router.get("/profile/api")
 def get_profile_endpoint(
+    request: Request,
     account: Account = Depends(_get_current_account),
     db: Session = Depends(get_db),
 ):
     """Get current user profile."""
-    return _profile_data_to_dict(account, db)
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id")
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+
+    return {
+        "id": profile.id,
+        "account_id": profile.account_id,
+        "lang": profile.lang,
+        "target_lang": profile.target_lang,
+        "level_value": profile.level_value,
+        "text_length": profile.text_length,
+        "preferred_script": getattr(profile, "preferred_script", None),
+        "created_at": profile.created_at,
+    }
 
 
 @router.get("/languages")

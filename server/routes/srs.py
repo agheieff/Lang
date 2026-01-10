@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
-from typing import Optional
+from fastapi import APIRouter, Depends, Request
+from typing import Optional, List
+from pydantic import BaseModel
 from server.deps import get_current_account
 from server.db import get_db
 from server.models import Lexeme, Profile
@@ -19,13 +20,30 @@ def srs_urgent():
 
 @router.get("/srs/stats")
 def get_srs_stats(
+    request: Request = None,
     account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
     """Get SRS statistics."""
     from server.models import Profile, Lexeme, ProfileTextRead, ReadingText
 
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id") if request else None
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
     if not profile:
         return {
             "level_value": 0.0,
@@ -91,13 +109,30 @@ def get_srs_level():
 def get_srs_words(
     lang: Optional[str] = None,
     min_stability: Optional[float] = None,
+    request: Request = None,
     account: Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
     """Get SRS words for current user."""
     from server.models import Lexeme
 
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id") if request else None
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
     if not profile:
         return []
 
@@ -131,3 +166,34 @@ def get_srs_words(
         )
 
     return items
+
+
+class DeleteWordsRequest(BaseModel):
+    word_ids: List[int]
+
+
+@router.delete("/srs/words")
+def delete_words(
+    request: DeleteWordsRequest,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Delete selected words from user's vocabulary."""
+    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    if not profile:
+        return {"deleted": 0, "error": "No profile found"}
+
+    # Delete words that belong to this account and profile
+    deleted = (
+        db.query(Lexeme)
+        .filter(
+            Lexeme.id.in_(request.word_ids),
+            Lexeme.account_id == account.id,
+            Lexeme.profile_id == profile.id,
+        )
+        .delete(synchronize_session=False)
+    )
+
+    db.commit()
+
+    return {"deleted": deleted}
