@@ -9,8 +9,8 @@
       <!-- Profile Switcher -->
       <div class="relative">
         <button class="flex items-center space-x-2 px-3 py-2 rounded-lg border border-gray-600 bg-gray-800 hover:bg-gray-700 transition-colors" onclick="toggleProfileMenu()">
-          <span id="current-profile-flag">{{ current_profile.flag }}</span>
-          <span id="current-profile-name">{{ current_profile.name }}</span>
+          <span id="current-profile-flag"></span>
+          <span id="current-profile-name">Loading...</span>
           <span>▾</span>
           </button>
           <div class="absolute left-0 top-full mt-2 w-56 bg-white text-gray-800 rounded-lg shadow-lg border border-gray-200 py-2 hidden" id="profile-menu">
@@ -63,17 +63,43 @@
 {% if request.state.user %}
 <script>
 // Profile management
-let currentProfileId = {{ current_profile.id if current_profile else 'null' }};
+let currentProfileId = null;
+let profiles = [];
 
 async function loadProfiles() {
   try {
+    // Fetch current profile ID first
+    const profileResponse = await fetch('/profile/api');
+    if (profileResponse.ok) {
+      const profileData = await profileResponse.json();
+      currentProfileId = profileData.id;
+    }
+
+    // Then fetch all profiles
     const response = await fetch('/profile/list');
     const data = await response.json();
 
     if (data.profiles && data.profiles.length > 0) {
+      profiles = data.profiles;
+
+      // Find current profile
+      const currentProfile = profiles.find(p => p.id === currentProfileId);
+
+      // Update button
+      if (currentProfile) {
+        document.getElementById('current-profile-flag').textContent = currentProfile.flag;
+        document.getElementById('current-profile-name').textContent = currentProfile.name;
+      } else if (profiles.length > 0) {
+        // Fallback to first profile
+        const firstProfile = profiles[0];
+        document.getElementById('current-profile-flag').textContent = firstProfile.flag;
+        document.getElementById('current-profile-name').textContent = firstProfile.name;
+        currentProfileId = firstProfile.id;
+      }
+
       // Populate dropdown
       const profileList = document.getElementById('profile-list');
-      profileList.innerHTML = data.profiles.map(p => `
+      profileList.innerHTML = profiles.map(p => `
         <button
           onclick="switchProfile(${p.id})"
           class="w-full text-left px-4 py-2 hover:bg-gray-100 flex items-center justify-between ${p.id === currentProfileId ? 'bg-blue-50' : ''}"
@@ -85,6 +111,7 @@ async function loadProfiles() {
     }
   } catch (error) {
     console.error('Failed to load profiles:', error);
+    document.getElementById('current-profile-name').textContent = 'Error';
   }
 }
 
