@@ -38,6 +38,7 @@
               <input id="select-all" type="checkbox" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2" onchange="toggleSelectAll(this)" />
             </th>
             <th class="px-4 py-2 font-medium">Lemma</th>
+            <th class="px-4 py-2 font-medium">POS</th>
             <th class="px-4 py-2 font-medium">Freq</th>
             <th class="px-4 py-2 font-medium">Level</th>
             <th class="px-4 py-2 font-medium">Difficulty</th>
@@ -81,6 +82,7 @@ document.addEventListener('DOMContentLoaded', function() {
 function setupColumnSorting() {
   const sortableColumns = {
     'lemma': 'string',
+    'pos': 'string',
     'freq': 'number',
     'level': 'string',
     'difficulty': 'number',
@@ -137,6 +139,10 @@ function sortByColumn(column, type) {
       case 'lemma':
         aVal = String(a.lemma || '').toLowerCase();
         bVal = String(b.lemma || '').toLowerCase();
+        break;
+      case 'pos':
+        aVal = String(a.pos || '').toLowerCase();
+        bVal = String(b.pos || '').toLowerCase();
         break;
       case 'freq':
         aVal = a.freq_rank ?? 999999;
@@ -236,7 +242,7 @@ async function loadWords() {
     });
 
     // Apply initial sort (lemma is string type)
-    const sortTypes = { lemma: 'string', freq: 'number', level: 'string', difficulty: 'number', interactions: 'number', clicks: 'number', stability: 'number', nextDue: 'date' };
+    const sortTypes = { lemma: 'string', pos: 'string', freq: 'number', level: 'string', difficulty: 'number', interactions: 'number', clicks: 'number', stability: 'number', nextDue: 'date' };
     sortByColumn(currentSort.column, sortTypes[currentSort.column] || 'string');
   } catch (e) {
     // ignore
@@ -275,6 +281,7 @@ function renderWordsTable(items) {
           data-word-id="${it.id}" ${isSelected ? 'checked' : ''} onchange="toggleWordSelection(${it.id}, this.checked)" />
       </td>
       <td class="px-4 py-2 whitespace-nowrap font-semibold text-gray-900">${escapeHtml(it.lemma || '')}</td>
+      <td class="px-4 py-2 text-xs"><span class="px-2 py-0.5 rounded-full bg-gray-50 border border-gray-200 text-gray-600">${escapeHtml(it.pos || '')}</span></td>
       <td class="px-4 py-2 text-gray-500 text-xs">${freq}</td>
       <td class="px-4 py-2 text-xs"><span class="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">${escapeHtml(lvl)}</span></td>
       <td class="px-4 py-2 text-sm">${(p*100).toFixed(0)}%</td>

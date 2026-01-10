@@ -6,6 +6,9 @@ word|translation|pos|lemma|pronunciation
 Include pronunciation ONLY if helpful for learners (IPA for English, pinyin for Chinese, etc.).
 Leave pronunciation field empty if not applicable.
 
+IMPORTANT: Ignore all punctuation marks. Do NOT include commas, periods, question marks, exclamation marks,
+quotes, parentheses, or any other punctuation in the word list. Only include actual words.
+
 NOTE: For Chinese languages (zh-CN, zh-TW), use the 4-field format without lemma:
 word|translation|pos|pinyin
 (The lemma is always the same as the surface form for Chinese)

@@ -5,10 +5,13 @@ word|translation|pos|pinyin
 
 Note: For Chinese, the lemma is always the same as the word surface, so we omit it.
 
+IMPORTANT: Ignore all punctuation marks. Do NOT include commas, periods, question marks,
+exclamation marks, quotes, parentheses, or any Chinese punctuation marks (，。？！、；：「」『（））
+in the word list. Only include actual words.
+
 Tokenize into smallest meaningful units (words, not characters unless single-char words).
 For words with multiple characters like "吃饭", tokenize as one word.
 For compounds like "一个", tokenize as two words.
-Skip punctuation.
 Include all words in order, including duplicates.
 
 IMPORTANT: Measure words (量词) must be translated as:
