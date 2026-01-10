@@ -101,9 +101,9 @@
   <div class="bg-white rounded-lg shadow-md p-6 mb-6">
     <h2 class="text-xl font-bold mb-2">Reading Preferences</h2>
     <p class="text-gray-600 mb-4">Current topic weights and reading length. Use the message box below to adjust.</p>
-    
+
     <!-- Current topics display -->
-    <div id="topics-section" hx-get="/settings/topics?lang={{ current_profile.lang }}" hx-trigger="load" hx-select="unset">
+    <div id="topics-section" hx-get="/settings/topics" hx-trigger="load" hx-select="unset">
       <div class="animate-pulse space-y-3">
         <div class="h-8 bg-gray-100 rounded w-1/4"></div>
         <div class="flex gap-2">
@@ -113,12 +113,12 @@
         </div>
       </div>
     </div>
-    
+
     <!-- Preferences update via chat -->
     <div class="mt-6 border-t pt-4">
       <label class="block text-sm font-medium text-gray-700 mb-2">Update Preferences</label>
       <p class="text-sm text-gray-500 mb-3">
-        Describe what you want to change. Examples: "I'm interested in technology and science", 
+        Describe what you want to change. Examples: "I'm interested in technology and science",
         "Make texts shorter", "Less news, more fiction", "I want to read about Chinese history and culture"
       </p>
       <div class="flex gap-2">
@@ -140,20 +140,20 @@
       <div id="preferences-update-status" class="mt-2 text-sm"></div>
     </div>
   </div>
-  
+
   <script>
   let prefsPolling = null;
   let wasPolling = false;  // Track if we were actually polling
-  
+
   async function checkPrefsStatus() {
     const btn = document.getElementById('update-preferences-btn');
     const status = document.getElementById('preferences-update-status');
     const input = document.getElementById('preferences-message');
-    
+
     try {
       const resp = await fetch('/settings/preferences/status');
       const data = await resp.json();
-      
+
       if (data.updating) {
         // Still updating, keep polling
         wasPolling = true;
@@ -166,22 +166,22 @@
         // Done updating
         btn.disabled = false;
         btn.textContent = 'Update';
-        
+
         // Only show success if we were actually polling
         if (wasPolling) {
           wasPolling = false;
           status.textContent = 'Preferences updated!';
           status.className = 'mt-2 text-sm text-green-600';
           input.value = '';
-          
+
           // Reload topics section
           const topicsSection = document.getElementById('topics-section');
           if (topicsSection) {
-            const topicsResp = await fetch('/settings/topics?lang={{ current_profile.lang }}');
+            const topicsResp = await fetch('/settings/topics');
             topicsSection.innerHTML = await topicsResp.text();
             htmx.process(topicsSection);
           }
-          
+
           // Update text length
           if (data.text_length !== undefined) {
             const lengthInput = document.getElementById('text-length');
@@ -196,7 +196,7 @@
       return false;
     }
   }
-  
+
   function startPrefsPolling() {
     wasPolling = true;  // We started an update
     if (prefsPolling) clearInterval(prefsPolling);
@@ -208,33 +208,33 @@
       }
     }, 1500);
   }
-  
+
   async function updatePreferencesViaChat() {
     const input = document.getElementById('preferences-message');
     const btn = document.getElementById('update-preferences-btn');
     const status = document.getElementById('preferences-update-status');
     const message = (input.value || '').trim();
-    
+
     if (!message) {
       status.textContent = 'Please enter a message';
       status.className = 'mt-2 text-sm text-red-500';
       return;
     }
-    
+
     btn.disabled = true;
     btn.textContent = 'Updating...';
     status.textContent = 'Processing your request...';
     status.className = 'mt-2 text-sm text-gray-500';
-    
+
     try {
       const resp = await fetch('/settings/preferences/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: message })
       });
-      
+
       const data = await resp.json();
-      
+
       if (resp.ok && data.success) {
         if (data.status === 'updating') {
           // Start polling for completion
@@ -260,7 +260,7 @@
       btn.textContent = 'Update';
     }
   }
-  
+
   // Check on page load if an update is in progress
   document.addEventListener('DOMContentLoaded', async () => {
     const stillUpdating = await checkPrefsStatus();
@@ -273,98 +273,6 @@
     <p class="text-gray-600">No profile found. Create one on the <a href="/profile" class="text-blue-600 underline">Profile</a> page to configure preferences.</p>
   </div>
   {% endif %}
-
-  <!-- LLM Models Section -->
-  <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-    <div class="flex justify-between items-center mb-4">
-      <div>
-        <h2 class="text-xl font-bold">LLM Models</h2>
-        <p class="text-sm text-gray-600">Configure which models to use for text generation and translations.</p>
-      </div>
-      <button onclick="document.getElementById('add-model-form').classList.toggle('hidden')" 
-              class="text-sm text-blue-600 hover:text-blue-800 font-medium">
-        + Add Custom Model
-      </button>
-    </div>
-
-    <!-- Add Model Form (Hidden by default) -->
-    <div id="add-model-form" class="hidden bg-gray-50 p-4 rounded-lg mb-6 border border-gray-200">
-      <h4 class="font-medium mb-3 text-sm text-gray-700">Add Custom Model</h4>
-      <form hx-post="/api/models" hx-target="#models-list" hx-swap="innerHTML"
-            hx-headers='{"Content-Type": "application/json"}'
-            hx-ext="json-enc"
-            onsubmit="setTimeout(() => { this.reset(); document.getElementById('add-model-form').classList.add('hidden'); htmx.ajax('GET', '/settings/models', {target: '#models-list'}); }, 100)">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Display Name</label>
-            <input type="text" name="display_name" required placeholder="e.g. My Claude Model" 
-                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Provider</label>
-            <select name="provider" required class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-              <option value="openrouter">OpenRouter</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="local">Local (LM Studio, Ollama)</option>
-            </select>
-          </div>
-          <div class="md:col-span-2">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Model ID</label>
-            <input type="text" name="model_id" required placeholder="e.g. anthropic/claude-3-sonnet" 
-                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-            <p class="text-xs text-gray-500 mt-1">For OpenRouter, use format: provider/model-name</p>
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Base URL (Optional)</label>
-            <input type="text" name="base_url" placeholder="Leave empty for default" 
-                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">API Key</label>
-            <input type="password" name="api_key" placeholder="sk-..." 
-                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Max Tokens (Optional)</label>
-            <input type="number" name="max_tokens" placeholder="32768" 
-                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Priority (Lower = Higher)</label>
-            <input type="number" name="priority" value="100" min="1" 
-                   class="w-full px-3 py-2 border border-gray-300 rounded text-sm">
-          </div>
-        </div>
-        <div class="flex justify-end gap-2">
-          <button type="button" onclick="document.getElementById('add-model-form').classList.add('hidden')" 
-                  class="px-3 py-1.5 text-gray-600 hover:bg-gray-200 rounded text-sm">Cancel</button>
-          <button type="submit" class="px-3 py-1.5 bg-blue-600 text-white hover:bg-blue-700 rounded text-sm">Add Model</button>
-        </div>
-      </form>
-    </div>
-
-    <!-- Models List (loaded via JS due to HTMX swap issues) -->
-    <div id="models-list">
-      <div class="animate-pulse space-y-2">
-        <div class="h-20 bg-gray-100 rounded"></div>
-        <div class="h-20 bg-gray-100 rounded"></div>
-      </div>
-    </div>
-
-    <!-- Model Assignments -->
-    <div class="mt-6 pt-6 border-t border-gray-200">
-      <h3 class="text-lg font-medium text-gray-900 mb-4">Model Assignments</h3>
-      <p class="text-sm text-gray-600 mb-4">Choose which model to use for each task.</p>
-      <div id="model-assignments">
-        <div class="animate-pulse space-y-2">
-          <div class="h-12 bg-gray-100 rounded"></div>
-          <div class="h-12 bg-gray-100 rounded"></div>
-          <div class="h-12 bg-gray-100 rounded"></div>
-        </div>
-      </div>
-    </div>
-  </div>
 </div>
 
 <script>
@@ -386,53 +294,5 @@ function setupFormFeedback() {
 }
 
 document.addEventListener('DOMContentLoaded', setupFormFeedback);
-
-// Load models list via plain JS (HTMX swap has issues with nested hx-attributes)
-async function loadModelsList() {
-  const container = document.getElementById('models-list');
-  if (!container) return;
-  try {
-    const resp = await fetch('/settings/models');
-    const html = await resp.text();
-    container.innerHTML = html;
-    htmx.process(container);
-  } catch (e) {
-    container.innerHTML = '<div class="text-red-500">Failed to load models</div>';
-  }
-}
-document.addEventListener('DOMContentLoaded', loadModelsList);
-
-// Load model assignments via plain JS (same HTMX swap issue)
-async function loadModelAssignments() {
-  const container = document.getElementById('model-assignments');
-  if (!container) return;
-  try {
-    const resp = await fetch('/settings/models/assignments');
-    const html = await resp.text();
-    container.innerHTML = html;
-    htmx.process(container);
-  } catch (e) {
-    container.innerHTML = '<div class="text-red-500">Failed to load assignments</div>';
-  }
-}
-document.addEventListener('DOMContentLoaded', loadModelAssignments);
-
-// Reload lists after HTMX requests complete
-document.body.addEventListener('htmx:afterRequest', function(evt) {
-  if (evt.detail.target && evt.detail.target.id === 'models-list') {
-    loadModelsList();
-  }
-  if (evt.detail.target && evt.detail.target.id === 'model-assignments') {
-    // Reload after toggle between simple/advanced view
-    loadModelAssignments();
-  }
-  if (evt.detail.target && evt.detail.target.id === 'assignment-status') {
-    // Reload both after assignment change to update badges
-    loadModelsList();
-    loadModelAssignments();
-  }
-});
-
-
 </script>
 {% endblock %}

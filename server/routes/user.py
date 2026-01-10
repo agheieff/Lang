@@ -55,11 +55,27 @@ def settings_page(
     db: Session = Depends(get_db),
 ):
     t = _templates()
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id")
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
 
     context = {
         "title": "Settings",
-        "current_profile": profile or {},
+        "current_profile": profile,
     }
 
     return t.TemplateResponse(request, "pages/settings.html", context)
@@ -438,16 +454,33 @@ def get_preferences_status(
     }
 
 
-@router.get("/settings/topics")
+@router.get("/settings/topics", response_class=HTMLResponse)
 def get_current_topics(
     lang: Optional[str] = None,
+    request: Request = None,
     account: Account = Depends(_get_current_account),
     db: Session = Depends(get_db),
 ):
-    """Get current topic weights for profile."""
-    profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    """Get current topic weights for profile as HTML fragment."""
+    # Get active profile from cookie
+    active_profile_id = request.cookies.get("active_profile_id") if request else None
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            profile = None
+
+    # Fall back to first profile if no active profile specified
+    if profile is None:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
     if not profile:
-        return {"topics": []}
+        return '<p class="text-gray-500 text-sm">No profile found.</p>'
 
     topic_prefs = (
         db.query(ProfileTopicPref)
@@ -472,15 +505,30 @@ def get_current_topics(
         ]
     ]
 
-    return {"topics": all_topics}
+    # Format weights as nice labels
+    weight_labels = {
+        0.5: "Low",
+        1.0: "Normal",
+        2.0: "High",
+        3.0: "Very High",
+    }
+
+    topics_html = " ".join([
+        f'<span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium '
+        f'{"bg-blue-100 text-blue-800" if t["weight"] > 1 else "bg-gray-100 text-gray-800" if t["weight"] < 1 else "bg-green-100 text-green-800"}">'
+        f'{t["topic"].replace("_", " ").title()} ({weight_labels.get(t["weight"], f"{t["weight"]}x")})</span>'
+        for t in all_topics
+    ])
+
+    return f'<div class="flex flex-wrap gap-2">{topics_html}</div>'
 
 
-@router.get("/settings/tier")
+@router.get("/settings/tier", response_class=HTMLResponse)
 def get_tier_info(
     account: Account = Depends(_get_current_account),
     db: Session = Depends(get_db),
 ):
-    """Get subscription tier and usage info."""
+    """Get subscription tier and usage info as HTML fragment."""
     from ..models import UsageTracking
     from datetime import datetime, timezone
     from ..config import (
@@ -525,14 +573,40 @@ def get_tier_info(
         char_limit = TIER_SPENDING_LIMITS.get(tier, 0)
         text_limit = None
 
-    return {
-        "tier": tier_str,
-        "chars_used": chars_used,
-        "chars_limit": char_limit,
-        "texts_used": texts_used,
-        "text_limit": text_limit,
-        "chars_percentage": (chars_used / char_limit * 100) if char_limit else 0,
-    }
+    chars_percentage = (chars_used / char_limit * 100) if char_limit else 0
+
+    # Format values
+    chars_limit_str = f"{char_limit:,}" if char_limit else "∞"
+    texts_limit_str = str(text_limit) if text_limit else "∞"
+
+    # Return HTML fragment
+    return f"""
+    <div class="space-y-3">
+      <div class="flex items-center justify-between">
+        <span class="text-sm font-medium text-gray-700">Subscription Tier</span>
+        <span class="px-3 py-1 rounded-full text-sm font-medium
+              {'bg-purple-100 text-purple-800' if tier != SubscriptionTier.FREE else 'bg-gray-100 text-gray-800'}">
+          {tier_str}
+        </span>
+      </div>
+
+      <div>
+        <div class="flex justify-between text-sm mb-1">
+          <span class="text-gray-600">Characters This Month</span>
+          <span class="font-medium">{chars_used:,} / {chars_limit_str}</span>
+        </div>
+        {f'''<div class="w-full bg-gray-200 rounded-full h-2">
+          <div class="bg-blue-600 h-2 rounded-full transition-all duration-300"
+               style="width: {min(chars_percentage, 100)}%"></div>
+        </div>''' if char_limit else ''}
+      </div>
+
+      <div class="flex justify-between text-sm">
+        <span class="text-gray-600">Texts Generated</span>
+        <span class="font-medium">{texts_used} / {texts_limit_str}</span>
+      </div>
+    </div>
+    """
 
 
 # Profile Management
