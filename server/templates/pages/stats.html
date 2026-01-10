@@ -8,9 +8,9 @@
     <!-- Level -->
     <div class="bg-white rounded-lg shadow-md p-6">
       <h2 class="text-lg font-semibold mb-4 text-gray-800">Your Level</h2>
-      <div class="text-3xl font-bold text-blue-600">{{ "%.1f"|format(profile.level_value or 0) }}</div>
-      <div class="text-sm text-gray-600 mt-2">Level Code: {{ profile.level_code or 'Unknown' }}</div>
-      <div class="text-xs text-gray-500 mt-1">Uncertainty: {{ "%.2f"|format(profile.level_var or 1.0) }}</div>
+      <div id="level-value" class="text-3xl font-bold text-blue-600">-</div>
+      <div id="level-code" class="text-sm text-gray-600 mt-2">Level Code: Unknown</div>
+      <div id="level-var" class="text-xs text-gray-500 mt-1">Uncertainty: -</div>
     </div>
 
     <!-- Progress -->
@@ -19,15 +19,15 @@
       <div class="space-y-3">
         <div class="flex justify-between items-center">
           <span class="text-gray-600">Total Words</span>
-          <span class="font-bold text-gray-900">{{ stats.total_words or 0 }}</span>
+          <span id="total-words" class="font-bold text-gray-900">-</span>
         </div>
         <div class="flex justify-between items-center">
           <span class="text-gray-600">Texts Read</span>
-          <span class="font-bold text-gray-900">{{ stats.texts_read or 0 }}</span>
+          <span id="texts-read" class="font-bold text-gray-900">-</span>
         </div>
         <div class="flex justify-between items-center">
           <span class="text-gray-600">Words per Text</span>
-          <span class="font-bold text-gray-900">{{ stats.words_per_text or 0 }}</span>
+          <span id="words-per-text" class="font-bold text-gray-900">-</span>
         </div>
       </div>
     </div>
@@ -35,17 +35,8 @@
     <!-- Words by Level -->
     <div class="bg-white rounded-lg shadow-md p-6">
       <h2 class="text-lg font-semibold mb-4 text-gray-800">Words by Level</h2>
-      <div class="space-y-2">
-        {% if stats.words_by_level %}
-          {% for level, count in stats.words_by_level.items()|sort(attribute='0') %}
-            <div class="flex justify-between items-center text-sm">
-              <span class="text-gray-700">{{ level }}</span>
-              <span class="font-semibold text-gray-900">{{ count }}</span>
-            </div>
-          {% endfor %}
-        {% else %}
-          <p class="text-gray-500 text-sm">No words yet. Start reading to build your vocabulary!</p>
-        {% endif %}
+      <div id="words-by-level" class="space-y-2">
+        <p class="text-gray-500 text-sm">Loading...</p>
       </div>
     </div>
   </div>
@@ -54,7 +45,7 @@
   <div class="mt-6 bg-white rounded-lg shadow-md p-6">
     <h2 class="text-lg font-semibold mb-4 text-gray-800">Language Settings</h2>
     <div class="text-sm text-gray-600">
-      <p><strong>Learning:</strong> {{ lang|upper }}</p>
+      <p><strong>Learning:</strong> <span id="lang-display">{{ lang|upper }}</span></p>
       <p><strong>Target:</strong> English</p>
     </div>
   </div>
@@ -68,6 +59,31 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (res.ok) {
       const stats = await res.json();
       console.log('Stats loaded:', stats);
+
+      // Update level
+      document.getElementById('level-value').textContent = stats.level_value?.toFixed(1) || '0.0';
+      document.getElementById('level-code').textContent = `Level Code: ${stats.level_code || 'Unknown'}`;
+      document.getElementById('level-var').textContent = `Uncertainty: ${stats.level_var?.toFixed(2) || '1.00'}`;
+
+      // Update progress
+      document.getElementById('total-words').textContent = stats.total_words || 0;
+      document.getElementById('texts-read').textContent = stats.texts_read || 0;
+      const wordsPerText = stats.texts_read > 0 ? (stats.total_words / stats.texts_read).toFixed(1) : '0';
+      document.getElementById('words-per-text').textContent = wordsPerText;
+
+      // Update words by level
+      const wordsByLevelEl = document.getElementById('words-by-level');
+      if (stats.words_by_level && Object.keys(stats.words_by_level).length > 0) {
+        const sortedLevels = Object.entries(stats.words_by_level).sort((a, b) => a[0].localeCompare(b[0]));
+        wordsByLevelEl.innerHTML = sortedLevels.map(([level, count]) => `
+          <div class="flex justify-between items-center text-sm">
+            <span class="text-gray-700">${level}</span>
+            <span class="font-semibold text-gray-900">${count}</span>
+          </div>
+        `).join('');
+      } else {
+        wordsByLevelEl.innerHTML = '<p class="text-gray-500 text-sm">No words yet. Start reading to build your vocabulary!</p>';
+      }
     }
   } catch (e) {
     console.error('Error loading stats:', e);
