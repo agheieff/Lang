@@ -504,22 +504,107 @@ def get_current_topics(
         ]
     ]
 
-    # Format weights as nice labels
-    weight_labels = {
-        0.5: "Low",
-        1.0: "Normal",
-        2.0: "High",
-        3.0: "Very High",
-    }
+    # Helper function to get color classes for weight
+    def get_weight_color(weight: float) -> str:
+        """Get Tailwind color class for weight."""
+        if weight <= 0.5:
+            return "bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200"
+        elif weight == 1.0:
+            return "bg-blue-50 text-blue-700 border-blue-300 hover:bg-blue-100"
+        elif weight == 2.0:
+            return "bg-purple-50 text-purple-700 border-purple-300 hover:bg-purple-100"
+        else:  # 3.0
+            return "bg-yellow-50 text-yellow-700 border-yellow-300 hover:bg-yellow-100"
 
     topics_html = " ".join([
-        f'<span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium '
-        f'{"bg-blue-100 text-blue-800" if t["weight"] > 1 else "bg-gray-100 text-gray-800" if t["weight"] < 1 else "bg-green-100 text-green-800"}">'
-        f'{t["topic"].replace("_", " ").title()} ({weight_labels.get(t["weight"], f"{t["weight"]}x")})</span>'
+        f'<button data-topic="{t["topic"]}" '
+        f'class="{get_weight_color(t["weight"])} inline-flex items-center px-3 py-1 rounded-full text-sm font-medium border cursor-pointer hover:shadow-md transition-all duration-200 select-none" '
+        f'title="Left-click to increase, right-click to decrease">'
+        f'{t["topic"].replace("_", " ").title()} {t["weight"]}x</button>'
         for t in all_topics
     ])
 
     return f'<div class="flex flex-wrap gap-2">{topics_html}</div>'
+
+
+@router.post("/settings/topics/update", response_class=HTMLResponse)
+async def update_topic_weight(
+    request: Request,
+    topic: str = Body(..., embed=True),
+    direction: str = Body(..., embed=True),
+    account: Account = Depends(_get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Update a single topic weight for the current profile.
+
+    Args:
+        topic: Topic name (e.g., "science", "fiction")
+        direction: "increase" or "decrease"
+
+    Returns:
+        Updated topic weight as HTML fragment
+    """
+    # Get active profile
+    active_profile_id = request.cookies.get("active_profile_id")
+    profile = None
+
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            pass
+
+    if not profile:
+        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+
+    if not profile:
+        return '<p class="text-red-500 text-sm">No profile found.</p>'
+
+    # Validate topic
+    from ..services.recommendation import AVAILABLE_TOPICS
+    if topic not in AVAILABLE_TOPICS:
+        return '<p class="text-red-500 text-sm">Invalid topic.</p>'
+
+    # Get or create preference
+    pref = db.query(ProfileTopicPref).filter(
+        ProfileTopicPref.profile_id == profile.id,
+        ProfileTopicPref.topic == topic
+    ).first()
+
+    # Weight cycle: 0.5 → 1.0 → 2.0 → 3.0 → 0.5
+    WEIGHT_CYCLE = [0.5, 1.0, 2.0, 3.0]
+
+    if pref:
+        current_idx = WEIGHT_CYCLE.index(pref.weight) if pref.weight in WEIGHT_CYCLE else 1
+    else:
+        current_idx = 1  # Default to 1.0
+        pref = ProfileTopicPref(
+            profile_id=profile.id,
+            topic=topic,
+            weight=1.0
+        )
+        db.add(pref)
+
+    # Calculate new weight
+    if direction == "increase":
+        new_idx = (current_idx + 1) % len(WEIGHT_CYCLE)
+    else:  # decrease
+        new_idx = (current_idx - 1) % len(WEIGHT_CYCLE)
+
+    pref.weight = WEIGHT_CYCLE[new_idx]
+    db.commit()
+
+    # Return updated topics HTML fragment
+    # Reuse the existing get_current_topics logic
+    return get_current_topics(
+        lang=profile.lang,
+        request=request,
+        account=account,
+        db=db
+    )
 
 
 @router.get("/settings/tier", response_class=HTMLResponse)

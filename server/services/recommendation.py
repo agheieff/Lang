@@ -38,10 +38,10 @@ AVAILABLE_TOPICS = [
 ]
 
 
-def select_topic_for_profile(db: Session, profile: Profile) -> Optional[str]:
+def select_topic_for_profile(db: Session, profile: Profile) -> str:
     """Select a topic based on profile preferences with weighted random.
 
-    Returns None if no preferences set (will randomize).
+    Returns random topic if no preferences set.
     """
     topic_prefs = (
         db.query(ProfileTopicPref)
@@ -50,8 +50,10 @@ def select_topic_for_profile(db: Session, profile: Profile) -> Optional[str]:
     )
 
     if not topic_prefs:
-        # No preferences set - return None to trigger randomization
-        return None
+        # No preferences set - return random topic
+        selected = random.choice(AVAILABLE_TOPICS)
+        logger.debug(f"No topic prefs for profile {profile.id}, selected random '{selected}'")
+        return selected
 
     # Weighted random selection based on preference weights
     topics = [pref.topic for pref in topic_prefs]

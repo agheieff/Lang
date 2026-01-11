@@ -66,7 +66,7 @@ def update_frequency_from_text(
                 gwf.total_occurrences += word_info.get('occurrences', 1)
                 gwf.updated_at = datetime.now(timezone.utc)
             else:
-                # Use merge to handle potential race conditions
+                # Create new record - handle race conditions with try/except
                 new_gwf = GlobalWordFrequency(
                     lang=lang,
                     lemma=lemma,
@@ -75,7 +75,22 @@ def update_frequency_from_text(
                     total_occurrences=word_info.get('occurrences', 1),
                     frequency_percentile=0.0
                 )
-                db.merge(new_gwf)
+                try:
+                    db.add(new_gwf)
+                    db.flush()  # Try to insert immediately
+                except Exception:
+                    # Race condition: another thread inserted it first
+                    db.rollback()
+                    # Query the existing record and update it
+                    gwf = db.query(GlobalWordFrequency).filter(
+                        GlobalWordFrequency.lang == lang,
+                        GlobalWordFrequency.lemma == lemma,
+                        GlobalWordFrequency.pos == pos
+                    ).first()
+                    if gwf:
+                        gwf.text_count += 1
+                        gwf.total_occurrences += word_info.get('occurrences', 1)
+                        gwf.updated_at = datetime.now(timezone.utc)
 
         db.commit()
 
