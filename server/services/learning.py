@@ -47,32 +47,111 @@ def get_ci_target(
         return 0.85  # Most challenging for expert
 
 
-def update_level_from_text(
+def adjust_profile_level_from_reading(
     db: Session,
     profile: Profile,
     text_id: int,
-    interactions: List[Dict],
-) -> Tuple[float, float]:
-    """Update user level based on text interactions."""
-    try:
-        total_words = len(interactions)
-        if total_words == 0:
-            return profile.level_value, profile.level_var
+    words: List[Dict],
+) -> Tuple[float, float, str]:
+    """ELO-style automatic level adjustment based on reading performance.
 
-        clicked_words = sum(1 for i in interactions if i.get("clicked", False))
-        click_rate = clicked_words / total_words
+    Uses multiple signals:
+    1. Word lookup rate (primary signal)
+    2. SRS performance feedback (secondary)
+    3. Text difficulty vs user level
+
+    Returns:
+        (new_level_value, new_level_var, adjustment_reason)
+
+    Adjustment is gradual (±0.1-0.2 per text) to prevent dramatic swings.
+    """
+    try:
+        if not words:
+            return profile.level_value, profile.level_var, "no_words"
 
         current_level = profile.level_value
         current_var = profile.level_var
 
-        # Bayesian update
-        if click_rate > 0.3:  # Too many clicks, decrease level
-            level_delta = -0.1 * (click_rate - 0.3)
-        else:  # Good performance, increase level
-            level_delta = 0.05 * (0.3 - click_rate)
+        # === Signal 1: Word lookup rate ===
+        total_words = len(words)
+        clicked_words = sum(1 for w in words if w.get("clicks") and len(w.get("clicks", [])) > 0)
+        click_rate = clicked_words / total_words if total_words > 0 else 0
 
+        # === Signal 2: SRS performance ===
+        # Check if clicked words were already familiar or unfamiliar
+        familiar_clicked = 0  # Familiar words still being clicked (bad sign)
+        unfamiliar_not_clicked = 0  # Unfamiliar words not clicked (good sign)
+
+        for word in words:
+            clicks = word.get("clicks", [])
+            was_clicked = len(clicks) > 0
+            lemma = word.get("lemma")
+
+            if not lemma:
+                continue
+
+            # Get lexeme for this word
+            lexeme = (
+                db.query(Lexeme)
+                .filter(
+                    Lexeme.account_id == profile.account_id,
+                    Lexeme.profile_id == profile.id,
+                    Lexeme.lang == word.get("lang", profile.lang),
+                    Lexeme.lemma == lemma,
+                    Lexeme.pos == word.get("pos", "NOUN"),
+                )
+                .first()
+            )
+
+            if lexeme:
+                # Familiar word (>0.7) but still clicked
+                if lexeme.familiarity > 0.7 and was_clicked:
+                    familiar_clicked += 1
+                # Unfamiliar word (<0.3) and not clicked (already knew it)
+                elif lexeme.familiarity < 0.3 and not was_clicked:
+                    unfamiliar_not_clicked += 1
+
+        # === Calculate adjustment ===
+        level_delta = 0.0
+        reason_parts = []
+
+        # Primary: Click rate adjustment
+        if click_rate <= 0.2:
+            # Very easy - increase level
+            level_delta += 0.15
+            reason_parts.append(f"easy({click_rate:.0%})")
+        elif click_rate <= 0.4:
+            # Just right - small increase
+            level_delta += 0.05
+            reason_parts.append(f"good({click_rate:.0%})")
+        elif click_rate <= 0.6:
+            # Challenging - small decrease
+            level_delta -= 0.05
+            reason_parts.append(f"challenging({click_rate:.0%})")
+        else:
+            # Too hard - decrease level
+            level_delta -= 0.15
+            reason_parts.append(f"hard({click_rate:.0%})")
+
+        # Secondary: SRS feedback adjustment
+        if familiar_clicked > 0:
+            # Forgetting familiar words - reduce level
+            srs_penalty = -0.05 * familiar_clicked
+            level_delta += srs_penalty
+            reason_parts.append(f"forgetting({familiar_clicked})")
+
+        if unfamiliar_not_clicked > 2:
+            # Already knows many unfamiliar words - increase level
+            srs_bonus = 0.03 * unfamiliar_not_clicked
+            level_delta += srs_bonus
+            reason_parts.append(f"known({unfamiliar_not_clicked})")
+
+        # Clamp adjustment to prevent swings
+        level_delta = max(-0.2, min(0.2, level_delta))
+
+        # Apply adjustment
         new_level = max(0.0, min(10.0, current_level + level_delta))
-        new_var = max(0.1, current_var * 0.95)  # Decrease uncertainty
+        new_var = min(2.0, max(0.1, current_var + 0.05))  # Slightly increase uncertainty
 
         # Update profile
         profile.level_value = new_level
@@ -80,14 +159,17 @@ def update_level_from_text(
 
         db.commit()
 
+        reason = ", ".join(reason_parts) if reason_parts else "neutral"
         logger.info(
-            f"Updated level for profile {profile.id}: {current_level}->{new_level}"
+            f"[Level] Profile {profile.id}: {current_level:.2f} → {new_level:.2f} "
+            f"({level_delta:+.2f}) [{reason}]"
         )
-        return new_level, new_var
+
+        return new_level, new_var, reason
 
     except Exception as e:
-        logger.error(f"Error updating level: {e}")
-        return profile.level_value, profile.level_var
+        logger.error(f"Error adjusting level: {e}", exc_info=True)
+        return profile.level_value, profile.level_var, "error"
 
 
 # Lexeme Functions

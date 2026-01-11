@@ -25,6 +25,7 @@ from server.models import (
 from server.services.text_state_builder import get_text_state
 from server.services.srs import batch_update_lexemes_from_text_state
 from server.services.rating import save_rating
+from server.services.learning import adjust_profile_level_from_reading
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["text_state"])
@@ -152,6 +153,17 @@ def log_text_state(
                 words=data.words,
             )
             logger.info(f"[TextState] SRS updated: {srs_result}")
+
+            # Adjust profile level based on reading performance (ELO-style)
+            profile = db.query(Profile).filter(Profile.id == profile_id).first()
+            if profile:
+                new_level, new_var, reason = adjust_profile_level_from_reading(
+                    db=db,
+                    profile=profile,
+                    text_id=data.text_id,
+                    words=data.words,
+                )
+                logger.info(f"[TextState] Level adjusted: {new_level:.2f}±{new_var:.2f} ({reason})")
 
             # Save rating if provided
             if data.rating is not None and data.account_id is not None:

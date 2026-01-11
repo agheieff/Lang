@@ -35,4 +35,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # Ensure deps/env are synced before running
 uv sync
 
+# Set default environment variables if not set
+export ARC_STARTUP_LANGS="${ARC_STARTUP_LANGS:-zh-CN}"
+export ARC_STARTUP_TEXTS_PER_LANG="${ARC_STARTUP_TEXTS_PER_LANG:-5}"
+
 exec uv run uvicorn server.main:app --reload --port "$PORT"

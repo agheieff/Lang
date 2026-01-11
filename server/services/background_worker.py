@@ -19,9 +19,10 @@ from server.services.content import generate_text_content, generate_translations
 logger = logging.getLogger(__name__)
 
 # Worker configuration
-WORKER_INTERVAL_SECONDS = 300  # 5 minutes
+WORKER_INTERVAL_SECONDS = 60  # 1 minute (reduced from 5 minutes for faster generation)
 MAX_GENERATION_CONCURRENCY = 3  # Max parallel text generations
 MAX_RETRIES = 3  # Max retry attempts for failed translations
+URGENT_POOL_THRESHOLD = 2  # If pool has <= this many texts, generate multiple per gap
 
 # In-memory lock tracking for active generations
 # Format: {profile_id: lock_acquired_timestamp}
@@ -144,6 +145,7 @@ async def fill_gaps(db: Session, gaps: List) -> None:
     """Generate texts to fill detected pool gaps.
 
     Filters out profiles that are already being generated to prevent duplicates.
+    When pool is very low (<= URGENT_POOL_THRESHOLD texts), generates 2-3 texts per gap.
     """
     if not gaps:
         return
@@ -166,12 +168,50 @@ async def fill_gaps(db: Session, gaps: List) -> None:
         logger.debug("No available gaps to fill (all locked)")
         return
 
-    # Limit concurrent generations
+    # Check pool size for each gap to determine how many texts to generate
+    generation_tasks = []
+
+    for gap in available_gaps[:MAX_GENERATION_CONCURRENCY]:
+        # Count existing ready texts for this language pair
+        from server.models import ReadingText
+
+        ready_count = (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.lang == gap.lang,
+                ReadingText.target_lang == gap.target_lang,
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
+            )
+            .count()
+        )
+
+        # Determine how many texts to generate for this gap
+        if ready_count <= URGENT_POOL_THRESHOLD:
+            # Pool is very low - generate 2-3 texts
+            texts_to_generate = min(3, MAX_GENERATION_CONCURRENCY)
+            logger.info(
+                f"Urgent gap for {gap.lang}->{gap.target_lang}: "
+                f"only {ready_count} texts, generating {texts_to_generate}"
+            )
+        else:
+            # Normal generation - 1 text per gap
+            texts_to_generate = 1
+            logger.debug(
+                f"Normal gap for {gap.lang}->{gap.target_lang}: "
+                f"{ready_count} texts, generating 1"
+            )
+
+        # Add generation tasks
+        for i in range(texts_to_generate):
+            generation_tasks.append((gap, i))
+
+    # Limit total concurrent generations
     semaphore = asyncio.Semaphore(MAX_GENERATION_CONCURRENCY)
     tasks = []
 
-    for gap in available_gaps[:MAX_GENERATION_CONCURRENCY]:
-        task = _generate_text_for_gap(db, gap, semaphore)
+    for gap, index in generation_tasks[:MAX_GENERATION_CONCURRENCY]:
+        task = _generate_text_for_gap(db, gap, semaphore, index)
         tasks.append(task)
 
     if tasks:
@@ -181,7 +221,7 @@ async def fill_gaps(db: Session, gaps: List) -> None:
 
 
 async def _generate_text_for_gap(
-    db: Session, gap, semaphore: asyncio.Semaphore
+    db: Session, gap, semaphore: asyncio.Semaphore, index: int = 0
 ) -> None:
     """Generate a text for a specific pool gap."""
     profile_id = gap.profile_id

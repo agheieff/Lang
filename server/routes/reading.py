@@ -292,6 +292,299 @@ def get_text_status(
     }
 
 
+@router.post("/reading/generate-now")
+def generate_text_now(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Trigger immediate text generation for current profile.
+
+    Called when there are no ready texts available.
+    Generates 1-3 texts depending on pool size.
+    Returns immediately with generation status.
+    """
+    import asyncio
+    from server.services.content import generate_text_content, generate_translations
+    from server.services.recommendation import select_topic_for_profile, select_diverse_topic
+
+    account_id = _get_account_id(request)
+    if not account_id:
+        return JSONResponse(
+            {"status": "error", "message": "Not authenticated"},
+            status_code=401,
+        )
+
+    # Get active profile
+    active_profile_id = request.cookies.get("active_profile_id")
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account_id
+            ).first()
+        except ValueError:
+            profile = None
+    else:
+        profile = _get_profile_for_account(db, account_id)
+
+    if not profile:
+        return JSONResponse(
+            {"status": "error", "message": "No profile found"},
+            status_code=404,
+        )
+
+    # Check if there are already texts being generated for this profile
+    from server.services.background_worker import _get_locked_profile_ids
+    locked_ids = _get_locked_profile_ids()
+    if profile.id in locked_ids:
+        return JSONResponse({
+            "status": "generating",
+            "message": "Text generation already in progress"
+        })
+
+    # Count existing ready texts
+    ready_count = (
+        db.query(ReadingText)
+        .filter(
+            ReadingText.lang == profile.lang,
+            ReadingText.target_lang == profile.target_lang,
+            ReadingText.words_complete == True,
+            ReadingText.sentences_complete == True,
+        )
+        .count()
+    )
+
+    # Determine how many texts to generate
+    from server.services.background_worker import URGENT_POOL_THRESHOLD
+    if ready_count <= URGENT_POOL_THRESHOLD:
+        texts_to_generate = min(3, 3)  # Generate up to 3 texts
+    else:
+        texts_to_generate = 1
+
+    logger.info(
+        f"On-demand generation for profile {profile.id}: "
+        f"{profile.lang}->{profile.target_lang}, "
+        f"generating {texts_to_generate} texts (current pool: {ready_count})"
+    )
+
+    # Trigger background generation (fire and forget)
+    async def generate_in_background():
+        try:
+            from server.services.background_worker import (
+                _acquire_generation_lock,
+                _release_generation_lock
+            )
+
+            # Acquire lock
+            if not _acquire_generation_lock(profile.id):
+                logger.warning(f"Could not acquire lock for on-demand generation")
+                return
+
+            try:
+                for i in range(texts_to_generate):
+                    # Select topic
+                    preferred_topic = select_topic_for_profile(db, profile)
+                    selected_topic = select_diverse_topic(db, profile, preferred_topic)
+
+                    logger.info(f"On-demand generation {i+1}/{texts_to_generate}: topic={selected_topic}")
+
+                    # Generate text
+                    text_obj = await generate_text_content(
+                        account_id=profile.account_id,
+                        profile_id=profile.id,
+                        lang=profile.lang,
+                        target_lang=profile.target_lang,
+                        profile=profile,
+                        topic=selected_topic,
+                    )
+
+                    if not text_obj:
+                        logger.error(f"Failed to generate text {i+1}/{texts_to_generate}")
+                        continue
+
+                    # Generate translations
+                    success = await generate_translations(
+                        text_id=text_obj.id,
+                        lang=profile.lang,
+                        target_lang=profile.target_lang,
+                    )
+
+                    if success:
+                        logger.info(f"On-demand generation {i+1}/{texts_to_generate} completed: text_id={text_obj.id}")
+                    else:
+                        logger.error(f"On-demand generation {i+1}/{texts_to_generate} failed translations")
+
+            finally:
+                _release_generation_lock(profile.id)
+
+        except Exception as e:
+            logger.error(f"Error in on-demand generation: {e}", exc_info=True)
+
+    # Start background task
+    asyncio.create_task(generate_in_background())
+
+    return JSONResponse({
+        "status": "generating",
+        "message": f"Generating {texts_to_generate} text(s) in the background",
+        "texts_to_generate": texts_to_generate,
+        "current_pool_size": ready_count,
+    })
+
+
+@router.get("/reading/next")
+def get_next_text(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Get the next text for reading.
+
+    If no ready text is available, triggers on-demand generation.
+    Returns:
+    - 200 with text_id if a ready text is available
+    - 202 with generating status if generation was triggered
+    - 404 if no profile found
+    """
+    account_id = _get_account_id(request)
+    if not account_id:
+        return JSONResponse(
+            {"status": "error", "message": "Not authenticated"},
+            status_code=401,
+        )
+
+    # Get active profile
+    active_profile_id = request.cookies.get("active_profile_id")
+    if active_profile_id:
+        try:
+            profile = db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account_id
+            ).first()
+        except ValueError:
+            profile = None
+    else:
+        profile = _get_profile_for_account(db, account_id)
+
+    if not profile:
+        return JSONResponse(
+            {"status": "error", "message": "No profile found"},
+            status_code=404,
+        )
+
+    # Try to select best text
+    next_text = select_best_text(db, profile)
+
+    if next_text:
+        # Mark text as current and record that it was read
+        profile.current_text_id = next_text.id
+
+        # Mark previous text as read if exists
+        if profile.current_text_id and profile.current_text_id != next_text.id:
+            existing_read = db.query(ProfileTextRead).filter(
+                ProfileTextRead.profile_id == profile.id,
+                ProfileTextRead.text_id == profile.current_text_id
+            ).first()
+
+            if not existing_read:
+                read_record = ProfileTextRead(
+                    profile_id=profile.id,
+                    text_id=profile.current_text_id,
+                    read_at=datetime.now(timezone.utc),
+                )
+                db.add(read_record)
+
+        db.commit()
+
+        return JSONResponse({
+            "status": "ready",
+            "text_id": next_text.id,
+            "title": next_text.title,
+            "topic": next_text.topic,
+        })
+    else:
+        # No ready text - trigger on-demand generation
+        import asyncio
+        from server.services.content import generate_text_content, generate_translations
+        from server.services.recommendation import select_topic_for_profile, select_diverse_topic
+
+        # Check if already generating
+        from server.services.background_worker import _get_locked_profile_ids, URGENT_POOL_THRESHOLD
+        locked_ids = _get_locked_profile_ids()
+
+        if profile.id in locked_ids:
+            return JSONResponse({
+                "status": "generating",
+                "message": "Text generation already in progress",
+                "text_id": None,
+            }, status_code=202)
+
+        # Count existing texts
+        ready_count = (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.lang == profile.lang,
+                ReadingText.target_lang == profile.target_lang,
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
+            )
+            .count()
+        )
+
+        # Determine how many to generate
+        texts_to_generate = min(3, 3) if ready_count <= URGENT_POOL_THRESHOLD else 1
+
+        logger.info(
+            f"[NextText] No ready text for profile {profile.id}, "
+            f"triggering generation of {texts_to_generate} text(s)"
+        )
+
+        # Trigger background generation
+        async def generate_in_background():
+            try:
+                from server.services.background_worker import (
+                    _acquire_generation_lock,
+                    _release_generation_lock
+                )
+
+                if not _acquire_generation_lock(profile.id):
+                    return
+
+                try:
+                    for i in range(texts_to_generate):
+                        preferred_topic = select_topic_for_profile(db, profile)
+                        selected_topic = select_diverse_topic(db, profile, preferred_topic)
+
+                        text_obj = await generate_text_content(
+                            account_id=profile.account_id,
+                            profile_id=profile.id,
+                            lang=profile.lang,
+                            target_lang=profile.target_lang,
+                            profile=profile,
+                            topic=selected_topic,
+                        )
+
+                        if text_obj:
+                            await generate_translations(
+                                text_id=text_obj.id,
+                                lang=profile.lang,
+                                target_lang=profile.target_lang,
+                            )
+                            logger.info(f"[NextText] Generated text {text_obj.id}")
+                finally:
+                    _release_generation_lock(profile.id)
+
+            except Exception as e:
+                logger.error(f"[NextText] Generation error: {e}", exc_info=True)
+
+        asyncio.create_task(generate_in_background())
+
+        return JSONResponse({
+            "status": "generating",
+            "message": f"Generating {texts_to_generate} text(s)",
+            "text_id": None,
+            "texts_to_generate": texts_to_generate,
+        }, status_code=202)
+
+
 # @router.post("/reading/word-click")  # DISABLED - using new reading-text-log system
 def word_click(
     data: WordClickRequest,
