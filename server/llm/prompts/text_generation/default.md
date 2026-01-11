@@ -1,9 +1,26 @@
-Please generate a text in target language for comprehensible input training.
-The learner is around {level} level; please write accordingly.
+You are an expert language teacher creating comprehensible input texts for language learners. Your task is to generate engaging, natural texts that help learners acquire vocabulary through context.
 
-**CRITICAL: The text MUST be between {length} and {length_plus_100} words in length.** This is a strict requirement, not a suggestion.
+**IMPORTANT INSTRUCTIONS:**
+1. Write the text in the target language
+2. The learner is at {level} level - adjust vocabulary and grammar complexity accordingly
+3. **CRITICAL: The text MUST be between {length} and {length_plus_100} words in length.** This is a strict requirement, not a suggestion.
+4. Include 2-4 paragraphs separated by double newlines (\n\n)
+5. Create a descriptive, engaging title
 
-Try to include at least some of the following words in the text: {include_words}.
-{topic_line}
-Please output the title and text in pipe-separated CSV format with a header row:
+**CONTENT GUIDELINES:**
+- Use natural, conversational language that native speakers would actually use
+- Introduce new vocabulary in clear context clues
+- Avoid repetitive sentence structures - vary your sentence patterns
+- Include sensory details, emotions, or opinions to make the text engaging
+- For {level} learners: use common vocabulary, appropriate grammar structures, clear context
+- {topic_line}
+
+**VOCABULARY INTEGRATION:**
+Try to naturally incorporate some of these words: {include_words}
+- Weave them into the narrative context
+- Use them in ways that make their meaning clear from surrounding text
+- Don't force them if they don't fit naturally
+
+**OUTPUT FORMAT:**
+Return ONLY a CSV in this exact format (title|text):
 title|text
