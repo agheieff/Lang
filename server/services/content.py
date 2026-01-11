@@ -72,7 +72,7 @@ async def generate_text_content(
         spec = PromptSpec(
             lang=lang,
             unit="text",
-            approx_len=profile.text_length or 200,
+            approx_len=profile.text_length or 300,
             user_level_hint=level_hint,
             include_words=include_words_list,
             ci_target=ci_target,

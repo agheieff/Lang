@@ -1,7 +1,9 @@
 Please generate a text in Chinese (Simplified) for comprehensible input training.
 Write it in simplified Chinese characters (简体字).
 The learner is around {level} level, please try to make the text correspond to that.
-Please try to make the text around {length} characters long.
+
+**CRITICAL: The text MUST be between {length} and {length_plus_100} characters in length.** This is a strict requirement, not a suggestion. Count Chinese characters (not words).
+
 Try to include at least some of the following words in the text: {include_words}. Gently reinforce target words in context and keep the language natural and engaging.
 Separate paragraphs with double newlines (\n\n).
 {topic_line}
