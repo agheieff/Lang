@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Set
 
 from sqlalchemy.orm import Session
 from server.db import SessionLocal
@@ -47,6 +47,7 @@ async def generate_text_content(
     lang: str,
     target_lang: str,
     profile: Profile,
+    target_words: Optional[Set[str]] = None,
 ) -> Optional[ReadingText]:
     """Generate text content using LLM."""
     try:
@@ -54,12 +55,21 @@ async def generate_text_content(
         words = _get_word_list_from_profile(profile)
         level_hint = _compose_level_hint(profile.level_value, profile.level_code)
 
+        # Use target words if provided
+        include_words_list = None
+        if target_words:
+            include_words_list = list(target_words)[:5]  # Limit to 5 words
+            logger.info(
+                f"Generating text with target words: {include_words_list} "
+                f"for profile {profile_id}"
+            )
+
         spec = PromptSpec(
             lang=lang,
             unit="text",
             approx_len=profile.text_length or 200,
             user_level_hint=level_hint,
-            include_words=None,
+            include_words=include_words_list,
             ci_target=ci_target,
         )
 
@@ -118,7 +128,7 @@ async def generate_text_content(
                 ci_target=ci_target,
                 request_sent_at=datetime.now(timezone.utc),
                 generated_at=datetime.now(timezone.utc),
-                prompt_words={},
+                prompt_words=set(include_words_list) if include_words_list else set(),
                 prompt_level_hint=level_hint,
                 translation_attempts=0,
                 words_complete=False,

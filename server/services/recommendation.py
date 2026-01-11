@@ -159,6 +159,47 @@ def compute_vocabulary_overlap_score(
     return coverage * 0.7 + density * 0.3
 
 
+def select_target_words_from_urgent(
+    urgent_lexemes: List[Tuple[Lexeme, float]],
+    count: int = 5,
+) -> List[Dict]:
+    """Select diverse target words from urgent lexemes.
+
+    Strategy:
+    - Pick top N words by urgency
+    - Diversify by POS (avoid 5 nouns)
+    - Prefer words with higher variance (more uncertain)
+
+    Returns list of dicts with {lemma, pos, urgency}
+    """
+    selected = []
+    pos_counts = {}
+
+    for lexeme, urgency in urgent_lexemes:
+        if len(selected) >= count:
+            break
+
+        pos = lexeme.pos or "UNKNOWN"
+
+        # Limit POS diversity (max 2 of same POS)
+        if pos_counts.get(pos, 0) >= 2:
+            continue
+
+        selected.append({
+            "lemma": lexeme.lemma,
+            "pos": pos,
+            "urgency": urgency,
+        })
+        pos_counts[pos] = pos_counts.get(pos, 0) + 1
+
+    logger.info(
+        f"Selected {len(selected)} target words from {len(urgent_lexemes)} urgent lexemes: "
+        f"{[w['lemma'] for w in selected]}"
+    )
+
+    return selected
+
+
 def compute_text_features(db: Session, text: ReadingText) -> TextFeatures:
     """Extract features from a ReadingText."""
     try:
@@ -264,11 +305,10 @@ def build_profile_request(db: Session, profile: Profile) -> TextRequest:
         # Target words from SRS (urgent lexemes)
         urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=20)
         if urgent_lexemes:
-            request.target_words = {lex.lemma for lex, _ in urgent_lexemes[:5]}
-            request.target_words_data = [
-                {"lemma": lex.lemma, "pos": lex.pos, "urgency": urgency}
-                for lex, urgency in urgent_lexemes[:5]
-            ]
+            # Use POS-diversified selection
+            target_words_data = select_target_words_from_urgent(urgent_lexemes, count=5)
+            request.target_words = {w["lemma"] for w in target_words_data}
+            request.target_words_data = target_words_data
             logger.info(
                 f"Profile {profile.id}: target_words={request.target_words}, "
                 f"count={len(request.target_words)}"

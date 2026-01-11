@@ -96,6 +96,9 @@ async def _generate_text_for_gap(
                 f"Generating text for profile {profile.id}: {profile.lang}->{profile.target_lang}"
             )
 
+            # Extract target words from gap if available
+            target_words = gap.target_words if hasattr(gap, 'target_words') else None
+
             # Generate text content
             text_obj = await generate_text_content(
                 account_id=profile.account_id,
@@ -103,6 +106,7 @@ async def _generate_text_for_gap(
                 lang=profile.lang,
                 target_lang=profile.target_lang,
                 profile=profile,
+                target_words=target_words,
             )
 
             if not text_obj:
@@ -276,12 +280,21 @@ async def startup_generation(
                 try:
                     logger.info(f"Startup generation for profile {profile.id}")
 
+                    # Get urgent lexemes for target words
+                    from server.services.recommendation import get_urgent_lexemes_for_profile
+                    urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=20)
+                    target_words = {lex.lemma for lex, _ in urgent_lexemes[:5]} if urgent_lexemes else None
+
+                    if target_words:
+                        logger.info(f"Startup generation with target words: {target_words}")
+
                     text_obj = await generate_text_content(
                         account_id=profile.account_id,
                         profile_id=profile.id,
                         lang=profile.lang,
                         target_lang=profile.target_lang,
                         profile=profile,
+                        target_words=target_words,
                     )
 
                     if text_obj:
