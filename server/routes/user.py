@@ -16,7 +16,7 @@ from server.auth import Account  # type: ignore
 from server.llm.client import chat_complete
 
 from ..deps import get_current_account as _get_current_account
-from ..db import get_db
+from ..db import get_db, db_transaction
 from ..models import Profile, ProfileTopicPref
 
 logger = logging.getLogger(__name__)
@@ -180,17 +180,16 @@ def post_me_profile(
     """Create or update user profile (alias for compatibility with templates)."""
     profile = db.query(Profile).filter(Profile.account_id == account.id).first()
 
-    if profile:
-        for key, value in profile_data.items():
-            if hasattr(profile, key) and key not in ["id", "account_id", "created_at"]:
-                setattr(profile, key, value)
-        db.commit()
-        db.refresh(profile)
-    else:
-        profile = Profile(account_id=account.id, **profile_data)
-        db.add(profile)
-        db.commit()
-        db.refresh(profile)
+    with db_transaction(db):
+        if profile:
+            for key, value in profile_data.items():
+                if hasattr(profile, key) and key not in ["id", "account_id", "created_at"]:
+                    setattr(profile, key, value)
+            db.refresh(profile)
+        else:
+            profile = Profile(account_id=account.id, **profile_data)
+            db.add(profile)
+            db.refresh(profile)
 
     return _profile_data_to_dict(account, db)
 

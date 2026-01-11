@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from server.db import get_db
+from server.db import get_db, db_transaction
 from server.models import (
     TextState,
     ProfileTextState,
@@ -24,6 +24,7 @@ from server.models import (
 )
 from server.services.text_state_builder import get_text_state
 from server.services.srs import batch_update_lexemes_from_text_state
+from server.services.rating import save_rating
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["text_state"])
@@ -58,6 +59,9 @@ class TextStateLog(BaseModel):
     profile_id: Optional[int] = None
     loaded_at: Optional[str] = None
     saved_at: Optional[str] = None
+
+    # User rating (binary like/dislike)
+    rating: Optional[int] = None  # -1 (dislike) or 1 (like)
 
     # Status info
     status: Optional[str] = None
@@ -126,76 +130,83 @@ def log_text_state(
         # Convert to dict for storage
         state_dict = data.model_dump()
 
-        # Add all words from this text to profile's vocabulary
-        result = _add_words_to_profile_vocabulary(
-            db=db,
-            account_id=data.account_id,
-            profile_id=profile_id,
-            text_id=data.text_id,
-            lang=data.lang,
-            words=data.words,
-        )
-
-        logger.info(f"[TextState] Vocabulary added: {result}")
-
-        # Update SRS values from click data
-        srs_result = batch_update_lexemes_from_text_state(
-            db=db,
-            account_id=data.account_id,
-            profile_id=profile_id,
-            text_id=data.text_id,
-            words=data.words,
-        )
-        logger.info(f"[TextState] SRS updated: {srs_result}")
-
-        # Create or update profile text state
-        existing = (
-            db.query(ProfileTextState)
-            .filter(
-                ProfileTextState.text_id == data.text_id,
-                ProfileTextState.profile_id == profile_id,
-            )
-            .first()
-        )
-
-        if existing:
-            # Update existing record
-            existing.state_data = state_dict
-            existing.account_id = data.account_id
-            if data.saved_at:
-                # Parse ISO string to datetime (strip timezone for simplicity)
-                try:
-                    # Remove timezone offset to make it compatible with SQLite
-                    saved_at_clean = data.saved_at.split('+')[0].split('Z')[0]
-                    existing.saved_at = datetime.fromisoformat(saved_at_clean)
-                except:
-                    existing.saved_at = datetime.now(timezone.utc)
-            logger.info(f"Updated text state for text={data.text_id}, profile={profile_id}")
-        else:
-            # Parse saved_at if provided, otherwise use now
-            saved_at = None
-            if data.saved_at:
-                try:
-                    # Remove timezone offset to make it compatible with SQLite
-                    saved_at_clean = data.saved_at.split('+')[0].split('Z')[0]
-                    saved_at = datetime.fromisoformat(saved_at_clean)
-                except:
-                    saved_at = datetime.now(timezone.utc)
-            else:
-                saved_at = datetime.now(timezone.utc)
-
-            # Create new record
-            profile_text_state = ProfileTextState(
-                text_id=data.text_id,
-                profile_id=profile_id,
+        with db_transaction(db):
+            # Add all words from this text to profile's vocabulary
+            result = _add_words_to_profile_vocabulary(
+                db=db,
                 account_id=data.account_id,
-                state_data=state_dict,
-                saved_at=saved_at,
+                profile_id=profile_id,
+                text_id=data.text_id,
+                lang=data.lang,
+                words=data.words,
             )
-            db.add(profile_text_state)
-            logger.info(f"Saved text state for text={data.text_id}, profile={profile_id}")
 
-        db.commit()
+            logger.info(f"[TextState] Vocabulary added: {result}")
+
+            # Update SRS values from click data
+            srs_result = batch_update_lexemes_from_text_state(
+                db=db,
+                account_id=data.account_id,
+                profile_id=profile_id,
+                text_id=data.text_id,
+                words=data.words,
+            )
+            logger.info(f"[TextState] SRS updated: {srs_result}")
+
+            # Save rating if provided
+            if data.rating is not None and data.account_id is not None:
+                try:
+                    save_rating(db, data.account_id, data.text_id, data.rating, profile_id)
+                    logger.info(f"[TextState] Rating saved: {data.rating}")
+                except ValueError as e:
+                    logger.error(f"[TextState] Invalid rating: {e}")
+
+            # Create or update profile text state
+            existing = (
+                db.query(ProfileTextState)
+                .filter(
+                    ProfileTextState.text_id == data.text_id,
+                    ProfileTextState.profile_id == profile_id,
+                )
+                .first()
+            )
+
+            if existing:
+                # Update existing record
+                existing.state_data = state_dict
+                existing.account_id = data.account_id
+                if data.saved_at:
+                    # Parse ISO string to datetime (strip timezone for simplicity)
+                    try:
+                        # Remove timezone offset to make it compatible with SQLite
+                        saved_at_clean = data.saved_at.split('+')[0].split('Z')[0]
+                        existing.saved_at = datetime.fromisoformat(saved_at_clean)
+                    except:
+                        existing.saved_at = datetime.now(timezone.utc)
+                logger.info(f"Updated text state for text={data.text_id}, profile={profile_id}")
+            else:
+                # Parse saved_at if provided, otherwise use now
+                saved_at = None
+                if data.saved_at:
+                    try:
+                        # Remove timezone offset to make it compatible with SQLite
+                        saved_at_clean = data.saved_at.split('+')[0].split('Z')[0]
+                        saved_at = datetime.fromisoformat(saved_at_clean)
+                    except:
+                        saved_at = datetime.now(timezone.utc)
+                else:
+                    saved_at = datetime.now(timezone.utc)
+
+                # Create new record
+                profile_text_state = ProfileTextState(
+                    text_id=data.text_id,
+                    profile_id=profile_id,
+                    account_id=data.account_id,
+                    state_data=state_dict,
+                    saved_at=saved_at,
+                )
+                db.add(profile_text_state)
+                logger.info(f"Saved text state for text={data.text_id}, profile={profile_id}")
 
         logger.info(f"[TextState] Saved successfully: text_id={data.text_id}, profile_id={profile_id}")
 
@@ -208,7 +219,6 @@ def log_text_state(
 
     except Exception as e:
         logger.error(f"Error logging text state: {e}", exc_info=True)
-        db.rollback()
         return JSONResponse(
             {"status": "error", "message": str(e)},
             status_code=500,
@@ -310,3 +320,22 @@ def get_text_status(
     except Exception as e:
         logger.error(f"Error checking text status: {e}")
         return {"status": "error", "ready": False}
+
+
+@router.get("/reading/{text_id}/rating")
+def get_text_rating(
+    text_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Get current user's rating for a text."""
+    account_id = getattr(request.state, "account_id", None)
+    if not account_id:
+        return JSONResponse(
+            {"status": "error", "message": "Not authenticated"},
+            status_code=401,
+        )
+
+    from server.services.rating import get_user_rating
+    rating = get_user_rating(db, account_id, text_id)
+    return {"status": "ok", "rating": rating}

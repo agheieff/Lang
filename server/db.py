@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 import logging
 from typing import Generator
@@ -64,6 +65,18 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+@contextmanager
+def db_transaction(db: Session):
+    """Context manager for safe database transactions with automatic rollback on errors."""
+    try:
+        yield
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Transaction failed, rolled back: {e}", exc_info=True)
+        raise
 
 
 # ---- Database Initialization ----

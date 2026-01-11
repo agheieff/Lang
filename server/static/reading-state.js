@@ -35,6 +35,7 @@
                 State.account_id = accountId ? parseInt(accountId) : null;
                 State.profile_id = profileId ? parseInt(profileId) : null;
                 State.loaded_at = new Date().toISOString();
+                State.rating = null;
 
                 // Initialize clicks array for each word
                 if (State.words && Array.isArray(State.words)) {

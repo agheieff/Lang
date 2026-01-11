@@ -515,6 +515,38 @@ class ProfileTextRead(Base):
     )
 
 
+class TextRating(Base):
+    """User ratings for texts - binary like/dislike keyed by (account_id, text_id)."""
+
+    __tablename__ = "text_ratings"
+    __table_args__ = (
+        UniqueConstraint("account_id", "text_id", name="uq_text_rating_account_text"),
+        Index("ix_tr_account_id", "account_id"),
+        Index("ix_tr_text_id", "text_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    text_id: Mapped[int] = mapped_column(
+        ForeignKey("reading_texts.id", ondelete="CASCADE"), index=True
+    )
+    profile_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+
+    # Binary rating: +1 (like) or -1 (dislike)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class ProfileTextQueue(Base):
     """Cached text queue for a profile - maintains ordered list of recommended texts."""
 

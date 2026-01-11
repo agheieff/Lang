@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set, Tuple
@@ -21,6 +22,155 @@ from server.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Available topics for text generation
+AVAILABLE_TOPICS = [
+    "fiction",
+    "news",
+    "science",
+    "technology",
+    "history",
+    "daily_life",
+    "culture",
+    "sports",
+    "business",
+]
+
+
+def select_topic_for_profile(db: Session, profile: Profile) -> Optional[str]:
+    """Select a topic based on profile preferences with weighted random.
+
+    Returns None if no preferences set (will randomize).
+    """
+    topic_prefs = (
+        db.query(ProfileTopicPref)
+        .filter(ProfileTopicPref.profile_id == profile.id)
+        .all()
+    )
+
+    if not topic_prefs:
+        # No preferences set - return None to trigger randomization
+        return None
+
+    # Weighted random selection based on preference weights
+    topics = [pref.topic for pref in topic_prefs]
+    weights = [pref.weight for pref in topic_prefs]
+
+    selected = random.choices(topics, weights=weights, k=1)[0]
+    logger.debug(f"Selected topic '{selected}' for profile {profile.id} from preferences")
+    return selected
+
+
+def get_topic_coverage(db: Session, lang: str, target_lang: str) -> Dict[str, int]:
+    """Get count of ready texts per topic for a language pair."""
+    from server.models import ReadingText
+
+    coverage = {topic: 0 for topic in AVAILABLE_TOPICS}
+    coverage["other"] = 0  # For texts with no/unknown topic
+
+    texts = (
+        db.query(ReadingText)
+        .filter(
+            ReadingText.lang == lang,
+            ReadingText.target_lang == target_lang,
+            ReadingText.words_complete == True,
+            ReadingText.sentences_complete == True,
+        )
+        .all()
+    )
+
+    for text in texts:
+        if text.topic:
+            topics = text.topic.split(",")
+            for t in topics:
+                t = t.strip()
+                if t in coverage:
+                    coverage[t] += 1
+                else:
+                    coverage["other"] += 1
+        else:
+            coverage["other"] += 1
+
+    return coverage
+
+
+def select_diverse_topic(db: Session, profile: Profile, preferred_topic: Optional[str] = None) -> str:
+    """Select a topic considering both preference and pool diversity.
+
+    Strategy:
+    - 70% chance to use preferred topic (if set)
+    - 30% chance to pick an underrepresented topic (fewer texts in pool)
+    """
+    coverage = get_topic_coverage(db, profile.lang, profile.target_lang)
+
+    # Find topics with minimal coverage
+    min_coverage = min(coverage.values())
+    underrepresented = [t for t, count in coverage.items() if count == min_coverage]
+
+    # Decide whether to use preference or prioritize diversity
+    if preferred_topic and random.random() < 0.7:
+        # Use preferred topic
+        return preferred_topic
+    else:
+        # Pick from underrepresented topics
+        selected = random.choice(underrepresented)
+        logger.info(
+            f"Diversity selection: chose '{selected}' (has {min_coverage} texts) "
+            f"over preference '{preferred_topic}'"
+        )
+        return selected
+
+
+def check_urgent_word_coverage(
+    db: Session,
+    profile: Profile,
+    urgent_words: Set[str],
+    min_coverage: int = 3,
+) -> bool:
+    """Check if urgent words are already covered in existing texts.
+
+    Returns True if we have sufficient coverage (don't need to generate more).
+    """
+    if not urgent_words:
+        return False
+
+    from server.models import ReadingWordGloss
+
+    # Count how many urgent words appear in ready texts
+    covered_words = set()
+
+    # Check word glosses for ready texts
+    glosses = (
+        db.query(ReadingWordGloss.lemma)
+        .filter(
+            ReadingWordGloss.lang == profile.lang,
+            ReadingWordGloss.lemma.in_(urgent_words),
+        )
+        .distinct()
+        .all()
+    )
+
+    covered_words = {g[0] for g in glosses}
+
+    coverage_ratio = len(covered_words) / len(urgent_words) if urgent_words else 0
+
+    logger.info(
+        f"Urgent word coverage: {len(covered_words)}/{len(urgent_words)} "
+        f"({coverage_ratio:.1%}) - need {min_coverage} texts per word"
+    )
+
+    # If we have good coverage (enough texts contain these words), don't generate
+    return coverage_ratio >= 0.5  # At least 50% of urgent words covered
+
+
+def _ensure_timezone_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Ensure a datetime is timezone-aware. Convert naive datetimes to UTC."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 @dataclass
@@ -303,16 +453,24 @@ def build_profile_request(db: Session, profile: Profile) -> TextRequest:
             request.max_length = int(profile.text_length * 1.5)
 
         # Target words from SRS (urgent lexemes)
+        # Reduced count and randomized to add more variety
+        import random
         urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=20)
-        if urgent_lexemes:
-            # Use POS-diversified selection
-            target_words_data = select_target_words_from_urgent(urgent_lexemes, count=5)
-            request.target_words = {w["lemma"] for w in target_words_data}
-            request.target_words_data = target_words_data
-            logger.info(
-                f"Profile {profile.id}: target_words={request.target_words}, "
-                f"count={len(request.target_words)}"
-            )
+        if urgent_lexemes and random.random() < 0.7:  # 70% chance to include target words
+            # Use fewer target words (2-3) for more variety
+            target_count = random.choice([0, 2, 3])  # Sometimes 0 (no specific targets)
+            if target_count > 0:
+                target_words_data = select_target_words_from_urgent(urgent_lexemes, count=target_count)
+                request.target_words = {w["lemma"] for w in target_words_data}
+                request.target_words_data = target_words_data
+                logger.info(
+                    f"Profile {profile.id}: target_words={request.target_words}, "
+                    f"count={len(request.target_words)}"
+                )
+            else:
+                request.target_words = set()
+                request.target_words_data = []
+                logger.debug(f"Profile {profile.id}: no target words (randomized)")
         else:
             request.target_words = set()
             request.target_words_data = []
@@ -340,7 +498,7 @@ def compute_similarity_score(
     try:
         total_score = 0.0
 
-        # 1. Difficulty distance (weight: 3.0)
+        # 1. Difficulty distance (weight: 3.0) - PRIMARY FACTOR
         diff_distance = abs(text_features.difficulty - request.difficulty_target)
         if diff_distance > request.difficulty_tolerance:
             diff_penalty = 100.0  # Outside tolerance, very bad
@@ -374,7 +532,8 @@ def compute_similarity_score(
             )
         total_score += length_penalty
 
-        # 4. Target word coverage (weight: 1.5)
+        # 4. Target word coverage (weight: 0.5) - REDUCED from 1.5
+        # This is a "nice to have", not a requirement
         if request.target_words:
             covered_words = (
                 request.target_words & text_features.target_words_density.keys()
@@ -384,20 +543,24 @@ def compute_similarity_score(
                 if request.target_words
                 else 0.0
             )
-            word_penalty = (1.0 - coverage) * 1.5
+            word_penalty = (1.0 - coverage) * 0.5
             total_score += word_penalty
 
-        # 5. Urgency vocabulary overlap (weight: 2.5)
+        # 5. Urgency vocabulary overlap (weight: 0.5) - REDUCED from 2.5
+        # This is a bonus factor, should not drive generation
         if urgency_vocab_score > 0:
-            # Invert: high overlap = low penalty
-            urgency_penalty = (1.0 - urgency_vocab_score) * 2.5
+            # Invert: high overlap = low penalty (bonus)
+            urgency_penalty = (1.0 - urgency_vocab_score) * 0.5
             total_score += urgency_penalty
 
         # 6. Quality bonus (negative penalty = reward)
-        if text_features.rating_avg >= 4.0:
+        # Binary scale: rating_avg from -1.0 to 1.0
+        if text_features.rating_avg >= 0.5:  # 75%+ likes
             total_score -= 0.5
-        elif text_features.rating_avg >= 3.0:
+        elif text_features.rating_avg >= 0.0:  # 50%+ likes
             total_score -= 0.2
+        elif text_features.rating_avg <= -0.5:  # 75%+ dislikes - penalize
+            total_score += 1.0
 
         return total_score
 
@@ -422,14 +585,15 @@ def get_unread_texts_for_profile(
         # Check reread cooldown
         if profile.reread_cooldown_days is not None:
             # None = never, 0 = always allow
-            cutoff_date = datetime.now(timezone.utc) - timedelta(
+            # Use naive UTC datetime for SQLite compatibility
+            cutoff_date_naive = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
                 days=profile.reread_cooldown_days
             )
             recent_reads = (
                 db.query(ProfileTextRead)
                 .filter(
                     ProfileTextRead.profile_id == profile.id,
-                    ProfileTextRead.last_read_at >= cutoff_date,
+                    ProfileTextRead.last_read_at >= cutoff_date_naive,
                 )
                 .all()
             )
@@ -573,6 +737,11 @@ def get_text_from_queue(db: Session, profile: Profile) -> Optional[ReadingText]:
 def detect_pool_gaps(db: Session, threshold: float = 3.0) -> List[TextRequest]:
     """Detect gaps in the text pool where generation is needed.
 
+    Only generates if:
+    1. No texts exist for this language pair, OR
+    2. Best matching text score > threshold AND we have minimal coverage
+    3. Urgent words are NOT already covered in existing texts (fixes urgency loop)
+
     Returns list of TextRequest objects representing missing content.
     """
     try:
@@ -587,14 +756,40 @@ def detect_pool_gaps(db: Session, threshold: float = 3.0) -> List[TextRequest]:
 
             if not scored_texts:
                 # No texts at all for this language pair
+                logger.info(f"[Gap] No texts for {profile.lang}->{profile.target_lang}")
                 gaps.append(request)
                 continue
 
             # Check if best match is good enough
             best_score = scored_texts[0][1]
-            if best_score > threshold:
-                # Pool has texts but none match well enough
-                gaps.append(request)
+
+            # Also check if we have minimal coverage (at least 5 decent texts with score < 5.0)
+            decent_match_count = sum(1 for _, score in scored_texts if score < 5.0)
+
+            # Check if urgent words are already covered (fixes urgency loop)
+            urgent_words_covered = False
+            if request.target_words:
+                urgent_words_covered = check_urgent_word_coverage(
+                    db, profile, request.target_words
+                )
+
+            if best_score > threshold and decent_match_count < 5:
+                # Pool has texts but insufficient good coverage
+                if urgent_words_covered:
+                    logger.info(
+                        f"[NoGap] Urgent words already covered, skipping generation "
+                        f"despite score {best_score:.2f}"
+                    )
+                else:
+                    logger.info(
+                        f"[Gap] Best score {best_score:.2f} > {threshold}, "
+                        f"only {decent_match_count} decent texts for {profile.lang}"
+                    )
+                    gaps.append(request)
+            else:
+                logger.debug(
+                    f"[NoGap] Best score {best_score:.2f}, {decent_match_count} decent texts"
+                )
 
         return gaps
 

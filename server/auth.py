@@ -361,6 +361,12 @@ class SQLAlchemyRepo(AuthRepository):
                 .first()
             ):
                 raise ValueError("email already registered")
+
+            # Check if this is the first account - make it admin
+            is_first_account = session.query(Account).count() == 0
+            if is_first_account:
+                subscription_tier = "admin"
+
             account = Account(
                 email=email.strip().lower(),
                 password_hash=password_hash,

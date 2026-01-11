@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict, Set
 
 from sqlalchemy.orm import Session
 from sqlalchemy import not_, exists
+from sqlalchemy.sql import select, update
 
 from server.db import SessionLocal
 from server.services.recommendation import detect_pool_gaps
@@ -20,6 +22,66 @@ logger = logging.getLogger(__name__)
 WORKER_INTERVAL_SECONDS = 300  # 5 minutes
 MAX_GENERATION_CONCURRENCY = 3  # Max parallel text generations
 MAX_RETRIES = 3  # Max retry attempts for failed translations
+
+# In-memory lock tracking for active generations
+# Format: {profile_id: lock_acquired_timestamp}
+_generating_locks: Dict[int, float] = {}
+GENERATION_LOCK_TIMEOUT = 600  # 10 minutes - prevent stuck locks
+
+
+def _acquire_generation_lock(profile_id: int) -> bool:
+    """Try to acquire a generation lock for a profile.
+
+    Returns True if lock was acquired, False if already locked.
+    """
+    global _generating_locks
+
+    now = time.time()
+
+    # Clean up expired locks
+    expired = [
+        pid for pid, timestamp in _generating_locks.items()
+        if now - timestamp > GENERATION_LOCK_TIMEOUT
+    ]
+    for pid in expired:
+        del _generating_locks[pid]
+        logger.warning(f"Cleaned up expired generation lock for profile {pid}")
+
+    # Check if profile is already being generated
+    if profile_id in _generating_locks:
+        logger.debug(f"Profile {profile_id} is already being generated, skipping")
+        return False
+
+    # Acquire lock
+    _generating_locks[profile_id] = now
+    logger.debug(f"Acquired generation lock for profile {profile_id}")
+    return True
+
+
+def _release_generation_lock(profile_id: int) -> None:
+    """Release a generation lock for a profile."""
+    global _generating_locks
+
+    if profile_id in _generating_locks:
+        del _generating_locks[profile_id]
+        logger.debug(f"Released generation lock for profile {profile_id}")
+
+
+def _get_locked_profile_ids() -> Set[int]:
+    """Get set of profile IDs that are currently locked."""
+    global _generating_locks
+
+    now = time.time()
+
+    # Clean up expired locks first
+    expired = [
+        pid for pid, timestamp in _generating_locks.items()
+        if now - timestamp > GENERATION_LOCK_TIMEOUT
+    ]
+    for pid in expired:
+        del _generating_locks[pid]
+
+    return set(_generating_locks.keys())
 
 
 async def background_worker():
@@ -41,14 +103,33 @@ async def maintenance_cycle():
     logger.info("Starting maintenance cycle")
 
     with SessionLocal() as db:
-        # Step 1: Detect pool gaps
-        gaps = detect_pool_gaps(db, threshold=3.0)
+        # Check if pool is already saturated before detecting gaps
+        from server.models import ReadingText, Profile
 
-        if gaps:
-            logger.info(f"Found {len(gaps)} pool gaps")
-            await fill_gaps(db, gaps)
+        total_ready = (
+            db.query(ReadingText)
+            .filter(
+                ReadingText.words_complete == True,
+                ReadingText.sentences_complete == True,
+            )
+            .count()
+        )
+        active_profiles = db.query(Profile).filter(Profile.preferences_updating == False).count()
+
+        # If we have 20+ ready texts per active profile, don't generate more
+        if active_profiles > 0 and total_ready >= (20 * active_profiles):
+            logger.info(
+                f"Pool saturated: {total_ready} ready texts for {active_profiles} profiles, skipping generation"
+            )
         else:
-            logger.debug("No pool gaps detected")
+            # Step 1: Detect pool gaps
+            gaps = detect_pool_gaps(db, threshold=3.0)
+
+            if gaps:
+                logger.info(f"Found {len(gaps)} pool gaps")
+                await fill_gaps(db, gaps)
+            else:
+                logger.debug("No pool gaps detected")
 
         # Step 2: Retry failed translations
         await retry_failed_translations(db)
@@ -60,15 +141,36 @@ async def maintenance_cycle():
 
 
 async def fill_gaps(db: Session, gaps: List) -> None:
-    """Generate texts to fill detected pool gaps."""
+    """Generate texts to fill detected pool gaps.
+
+    Filters out profiles that are already being generated to prevent duplicates.
+    """
     if not gaps:
+        return
+
+    # Get currently locked profile IDs
+    locked_profile_ids = _get_locked_profile_ids()
+
+    # Filter out gaps for locked profiles
+    available_gaps = [
+        gap for gap in gaps
+        if gap.profile_id not in locked_profile_ids
+    ]
+
+    if len(available_gaps) < len(gaps):
+        logger.info(
+            f"Filtered out {len(gaps) - len(available_gaps)} gaps due to active generation"
+        )
+
+    if not available_gaps:
+        logger.debug("No available gaps to fill (all locked)")
         return
 
     # Limit concurrent generations
     semaphore = asyncio.Semaphore(MAX_GENERATION_CONCURRENCY)
     tasks = []
 
-    for gap in gaps[:MAX_GENERATION_CONCURRENCY]:
+    for gap in available_gaps[:MAX_GENERATION_CONCURRENCY]:
         task = _generate_text_for_gap(db, gap, semaphore)
         tasks.append(task)
 
@@ -82,53 +184,74 @@ async def _generate_text_for_gap(
     db: Session, gap, semaphore: asyncio.Semaphore
 ) -> None:
     """Generate a text for a specific pool gap."""
-    async with semaphore:
-        try:
-            # Get profile for this gap
-            from server.models import Profile
+    profile_id = gap.profile_id
 
-            profile = db.query(Profile).filter(Profile.id == gap.profile_id).first()
-            if not profile:
-                logger.warning(f"Profile {gap.profile_id} not found for gap generation")
-                return
+    # Try to acquire generation lock
+    if not _acquire_generation_lock(profile_id):
+        logger.debug(f"Could not acquire lock for profile {profile_id}, skipping")
+        return
 
-            logger.info(
-                f"Generating text for profile {profile.id}: {profile.lang}->{profile.target_lang}"
-            )
+    try:
+        async with semaphore:
+            try:
+                # Get profile for this gap
+                from server.models import Profile
 
-            # Extract target words from gap if available
-            target_words = gap.target_words if hasattr(gap, 'target_words') else None
+                profile = db.query(Profile).filter(Profile.id == profile_id).first()
+                if not profile:
+                    logger.warning(f"Profile {profile_id} not found for gap generation")
+                    return
 
-            # Generate text content
-            text_obj = await generate_text_content(
-                account_id=profile.account_id,
-                profile_id=profile.id,
-                lang=profile.lang,
-                target_lang=profile.target_lang,
-                profile=profile,
-                target_words=target_words,
-            )
-
-            if not text_obj:
-                logger.error(f"Failed to generate text for profile {profile.id}")
-                return
-
-            # Generate translations
-            success = await generate_translations(
-                text_id=text_obj.id,
-                lang=profile.lang,
-                target_lang=profile.target_lang,
-            )
-
-            if success:
                 logger.info(
-                    f"Successfully generated text {text_obj.id} for profile {profile.id}"
+                    f"Generating text for profile {profile.id}: {profile.lang}->{profile.target_lang}"
                 )
-            else:
-                logger.warning(f"Generated text {text_obj.id} but translations failed")
 
-        except Exception as e:
-            logger.error(f"Error generating text for gap: {e}", exc_info=True)
+                # Extract target words from gap if available
+                target_words = gap.target_words if hasattr(gap, 'target_words') else None
+
+                # Select topic with diversity consideration
+                from server.services.recommendation import (
+                    select_topic_for_profile,
+                    select_diverse_topic,
+                )
+
+                preferred_topic = select_topic_for_profile(db, profile)
+                selected_topic = select_diverse_topic(db, profile, preferred_topic)
+
+                # Generate text content
+                text_obj = await generate_text_content(
+                    account_id=profile.account_id,
+                    profile_id=profile.id,
+                    lang=profile.lang,
+                    target_lang=profile.target_lang,
+                    profile=profile,
+                    target_words=target_words,
+                    topic=selected_topic,
+                )
+
+                if not text_obj:
+                    logger.error(f"Failed to generate text for profile {profile.id}")
+                    return
+
+                # Generate translations
+                success = await generate_translations(
+                    text_id=text_obj.id,
+                    lang=profile.lang,
+                    target_lang=profile.target_lang,
+                )
+
+                if success:
+                    logger.info(
+                        f"Successfully generated text {text_obj.id} for profile {profile.id}"
+                    )
+                else:
+                    logger.warning(f"Generated text {text_obj.id} but translations failed")
+
+            except Exception as e:
+                logger.error(f"Error generating text for gap: {e}", exc_info=True)
+    finally:
+        # Always release the lock when done
+        _release_generation_lock(profile_id)
 
 
 async def retry_failed_translations(db: Session) -> None:
@@ -222,10 +345,11 @@ def cleanup_old_texts(db: Session) -> None:
         logger.info(f"Hidden {len(unread_texts)} old unread texts")
 
     # Remove very low-rated texts permanently
+    # Binary scale: < -0.5 means 75%+ disliked
     low_rated_texts = (
         db.query(ReadingText)
         .filter(
-            ReadingText.rating_avg < 2.0,
+            ReadingText.rating_avg < -0.5,  # was 2.0 for 5-star scale
             ReadingText.rating_count >= 3,  # At least 3 ratings
         )
         .all()
@@ -281,12 +405,21 @@ async def startup_generation(
                     logger.info(f"Startup generation for profile {profile.id}")
 
                     # Get urgent lexemes for target words
-                    from server.services.recommendation import get_urgent_lexemes_for_profile
+                    from server.services.recommendation import (
+                        get_urgent_lexemes_for_profile,
+                        select_topic_for_profile,
+                        select_diverse_topic,
+                    )
                     urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=20)
                     target_words = {lex.lemma for lex, _ in urgent_lexemes[:5]} if urgent_lexemes else None
 
                     if target_words:
                         logger.info(f"Startup generation with target words: {target_words}")
+
+                    # Select topic with diversity consideration
+                    preferred_topic = select_topic_for_profile(db, profile)
+                    selected_topic = select_diverse_topic(db, profile, preferred_topic)
+                    logger.info(f"Startup generation with topic: {selected_topic}")
 
                     text_obj = await generate_text_content(
                         account_id=profile.account_id,
@@ -295,6 +428,7 @@ async def startup_generation(
                         target_lang=profile.target_lang,
                         profile=profile,
                         target_words=target_words,
+                        topic=selected_topic,
                     )
 
                     if text_obj:

@@ -35,22 +35,48 @@
       </div>
 
       <!-- Action buttons -->
-      <div class="mt-8 pt-6 border-t flex justify-between items-center">
-        <button
-          id="translation-toggle"
-          type="button"
-          class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-          aria-expanded="false"
-        >
-          Show Translation
-        </button>
-        <button
-          id="next-text-btn"
-          type="button"
-          class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg"
-        >
-          Next Text
-        </button>
+      <div class="mt-8 pt-6 border-t">
+        <div class="flex justify-between items-center mb-4">
+          <button
+            id="translation-toggle"
+            type="button"
+            class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+            aria-expanded="false"
+          >
+            Show Translation
+          </button>
+          <div class="flex items-center space-x-2">
+            <button
+              id="dislike-btn"
+              type="button"
+              class="rating-btn px-4 py-2 border rounded-lg hover:bg-gray-50"
+              data-rating="-1"
+              aria-pressed="false"
+            >
+              <span class="text-lg">👎</span>
+              <span class="ml-1 text-sm">Dislike</span>
+            </button>
+            <button
+              id="like-btn"
+              type="button"
+              class="rating-btn px-4 py-2 border rounded-lg hover:bg-gray-50"
+              data-rating="1"
+              aria-pressed="false"
+            >
+              <span class="text-lg">👍</span>
+              <span class="ml-1 text-sm">Like</span>
+            </button>
+          </div>
+        </div>
+        <div class="flex justify-end">
+          <button
+            id="next-text-btn"
+            type="button"
+            class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg"
+          >
+            Next Text
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -497,6 +523,74 @@
 })();
 </script>
 
+<!-- Rating functionality -->
+<script>
+(function() {
+  'use strict';
+
+  let currentRating = null;
+
+  function initRatingButtons() {
+    const likeBtn = document.getElementById('like-btn');
+    const dislikeBtn = document.getElementById('dislike-btn');
+    if (!likeBtn || !dislikeBtn) {
+      console.warn('[Rating] Buttons not found');
+      return;
+    }
+
+    loadUserRating();
+    likeBtn.addEventListener('click', () => handleRatingClick(1));
+    dislikeBtn.addEventListener('click', () => handleRatingClick(-1));
+  }
+
+  async function loadUserRating() {
+    const textId = document.getElementById('reading-text')?.getAttribute('data-text-id');
+    if (!textId || textId === 'None' || textId === 'null') {
+      console.warn('[Rating] No valid text_id found');
+      return;
+    }
+
+    try {
+      const response = await fetch(`/reading/${textId}/rating`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.status === 'ok') {
+          setRatingState(data.rating);
+        }
+      }
+    } catch (e) {
+      console.warn('[Rating] Failed to load rating:', e);
+    }
+  }
+
+  function handleRatingClick(rating) {
+    // Toggle: if clicking same rating, clear it
+    setRatingState(currentRating === rating ? null : rating);
+    updateTextStateRating();
+  }
+
+  function setRatingState(rating) {
+    currentRating = rating;
+    document.getElementById('like-btn').setAttribute('aria-pressed', rating === 1);
+    document.getElementById('dislike-btn').setAttribute('aria-pressed', rating === -1);
+  }
+
+  function updateTextStateRating() {
+    const state = window.ArcadiaTextState?.getState();
+    if (state) {
+      state.rating = currentRating;
+    }
+  }
+
+  // Initialize when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initRatingButtons);
+  } else {
+    initRatingButtons();
+  }
+})();
+</script>
+
 <style>
 .interactive-word {
   cursor: pointer;
@@ -523,6 +617,38 @@
 
 #word-tooltip:hover {
   pointer-events: auto;
+}
+
+/* Rating button styles */
+.rating-btn {
+  border-color: #d1d5db;
+  background: white;
+  color: #374151;
+  transition: all 0.15s;
+}
+
+.rating-btn:hover {
+  background: #f9fafb;
+  border-color: #9ca3af;
+}
+
+.rating-btn[aria-pressed="true"] {
+  background: #eff6ff;
+  border-color: #3b82f6;
+  color: #1e40af;
+  font-weight: 500;
+}
+
+.rating-btn[aria-pressed="true"][data-rating="1"] {
+  background: #dcfce7;
+  border-color: #22c55e;
+  color: #15803d;
+}
+
+.rating-btn[aria-pressed="true"][data-rating="-1"] {
+  background: #fee2e2;
+  border-color: #ef4444;
+  color: #b91c1c;
 }
 </style>
 {% endblock %}

@@ -309,7 +309,7 @@ def batch_update_lexemes_from_text_state(
         current_time: Timestamp for updates
 
     Returns:
-        Summary dict with updated/clicked/total counts
+        Summary dict with updated/clicked/total/failed counts
     """
     if not current_time:
         current_time = datetime.now(timezone.utc)
@@ -317,103 +317,132 @@ def batch_update_lexemes_from_text_state(
     updated = 0
     clicked = 0
     total = 0
+    failed = 0
+    failures = []
 
     for word_data in words:
-        surface = word_data.get("surface", "")
-        lemma = word_data.get("lemma") or surface
-        pos = word_data.get("pos", "UNKNOWN")
-        lang = word_data.get("lang", "zh-CN")
+        try:
+            surface = word_data.get("surface", "")
+            lemma = word_data.get("lemma") or surface
+            pos = word_data.get("pos", "UNKNOWN")
+            lang = word_data.get("lang", "zh-CN")
 
-        # Find or create lexeme
-        lexeme = (
-            db.query(Lexeme)
-            .filter(
-                Lexeme.account_id == account_id,
-                Lexeme.profile_id == profile_id,
-                Lexeme.lang == lang,
-                Lexeme.lemma == lemma,
-                Lexeme.pos == pos,
+            # Find or create lexeme
+            lexeme = (
+                db.query(Lexeme)
+                .filter(
+                    Lexeme.account_id == account_id,
+                    Lexeme.profile_id == profile_id,
+                    Lexeme.lang == lang,
+                    Lexeme.lemma == lemma,
+                    Lexeme.pos == pos,
+                )
+                .first()
             )
-            .first()
-        )
 
-        if not lexeme:
-            logger.warning(f"Lexeme not found for {lemma}/{pos}, skipping SRS update")
-            continue
+            if not lexeme:
+                logger.warning(f"Lexeme not found for {lemma}/{pos}, skipping SRS update")
+                continue
 
-        total += 1
+            total += 1
 
-        # Initialize SRS values if needed
-        if lexeme.familiarity is None:
-            initialize_lexeme_srs(lexeme)
+            # Initialize SRS values if needed
+            if lexeme.familiarity is None:
+                initialize_lexeme_srs(lexeme)
 
-        # Apply time decay ONCE per word (not per click)
-        apply_time_decay(lexeme, current_time)
+            # Apply time decay ONCE per word (not per click)
+            apply_time_decay(lexeme, current_time)
 
-        # Process clicks
-        click_count = len(word_data.get("clicks", []))
+            # Process clicks
+            click_count = len(word_data.get("clicks", []))
 
-        if click_count > 0:
-            # User clicked - apply negative signal scaled by click count
-            old_fam = lexeme.familiarity
+            if click_count > 0:
+                # User clicked - apply negative signal scaled by click count
+                old_fam = lexeme.familiarity
 
-            # Scale the learning effect by number of clicks
-            # Multiple clicks on same word = stronger negative signal
-            learning_effect = LEARNING_RATE_CLICK * min(click_count, 3)  # Cap at 3x
+                # Scale the learning effect by number of clicks
+                # Multiple clicks on same word = stronger negative signal
+                learning_effect = LEARNING_RATE_CLICK * min(click_count, 3)  # Cap at 3x
 
-            if lexeme.familiarity is not None:
-                lexeme.familiarity = max(0.0, lexeme.familiarity - learning_effect)
+                if lexeme.familiarity is not None:
+                    lexeme.familiarity = max(0.0, lexeme.familiarity - learning_effect)
 
-                # Increase variance (we're less certain after unexpected clicks)
-                if lexeme.familiarity_variance is not None:
-                    lexeme.familiarity_variance = min(0.25, lexeme.familiarity_variance + VARIANCE_REDUCTION * click_count)
+                    # Increase variance (we're less certain after unexpected clicks)
+                    if lexeme.familiarity_variance is not None:
+                        lexeme.familiarity_variance = min(0.25, lexeme.familiarity_variance + VARIANCE_REDUCTION * click_count)
 
-                logger.debug(
-                    f"Click ({click_count}x) on lexeme {lexeme.id}: {old_fam:.2f}→{lexeme.familiarity:.2f}, "
-                    f"var={lexeme.familiarity_variance:.2f}"
-                )
+                    logger.debug(
+                        f"Click ({click_count}x) on lexeme {lexeme.id}: {old_fam:.2f}→{lexeme.familiarity:.2f}, "
+                        f"var={lexeme.familiarity_variance:.2f}"
+                    )
 
-            # Update interaction tracking
-            lexeme.clicks = (lexeme.clicks or 0) + click_count
-            lexeme.last_clicked_at = current_time
-            clicked += 1
-        else:
-            # No clicks - apply positive signal (they know it)
-            old_fam = lexeme.familiarity
+                # Update interaction tracking
+                lexeme.clicks = (lexeme.clicks or 0) + click_count
+                lexeme.last_clicked_at = current_time
+                clicked += 1
+            else:
+                # No clicks - apply positive signal (they know it)
+                old_fam = lexeme.familiarity
 
-            if lexeme.familiarity is not None:
-                lexeme.familiarity = min(1.0, lexeme.familiarity + LEARNING_RATE_NO_CLICK)
+                if lexeme.familiarity is not None:
+                    lexeme.familiarity = min(1.0, lexeme.familiarity + LEARNING_RATE_NO_CLICK)
 
-                # Decrease variance (we're more confident after successful non-click)
-                if lexeme.familiarity_variance is not None:
-                    lexeme.familiarity_variance = max(0.05, lexeme.familiarity_variance - VARIANCE_REDUCTION * 0.5)
+                    # Decrease variance (we're more confident after successful non-click)
+                    if lexeme.familiarity_variance is not None:
+                        lexeme.familiarity_variance = max(0.05, lexeme.familiarity_variance - VARIANCE_REDUCTION * 0.5)
 
-                logger.debug(
-                    f"No-click on lexeme {lexeme.id}: {old_fam:.2f}→{lexeme.familiarity:.2f}, "
-                    f"var={lexeme.familiarity_variance:.2f}"
-                )
+                    logger.debug(
+                        f"No-click on lexeme {lexeme.id}: {old_fam:.2f}→{lexeme.familiarity:.2f}, "
+                        f"var={lexeme.familiarity_variance:.2f}"
+                    )
 
-        # Always update exposure tracking
-        lexeme.exposures = (lexeme.exposures or 0) + 1
-        lexeme.last_seen_at = current_time
+            # Always update exposure tracking
+            lexeme.exposures = (lexeme.exposures or 0) + 1
+            lexeme.last_seen_at = current_time
 
-        # Update decay_rate based on click patterns
-        _update_decay_rate(lexeme, was_clicked=(click_count > 0))
+            # Update decay_rate based on click patterns
+            _update_decay_rate(lexeme, was_clicked=(click_count > 0))
 
-        # Calculate next review time
-        lexeme.next_due_at = calculate_next_review(lexeme)
+            # Calculate next review time
+            lexeme.next_due_at = calculate_next_review(lexeme)
 
-        updated += 1
+            updated += 1
 
-    db.commit()
+        except Exception as e:
+            failed += 1
+            error_info = {
+                "word": word_data.get("lemma", word_data.get("surface", "unknown")),
+                "error": str(e),
+            }
+            failures.append(error_info)
+            logger.error(f"Error updating lexeme {word_data.get('lemma')}: {e}", exc_info=True)
+
+    # Commit only successful updates
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error(f"Error committing SRS batch update: {e}", exc_info=True)
+        db.rollback()
+        return {
+            "updated": 0,
+            "clicked": 0,
+            "total": 0,
+            "failed": len(words),
+            "failures": failures,
+        }
 
     logger.info(
         f"SRS batch update: account={account_id}, profile={profile_id}, "
-        f"text={text_id}, updated={updated}, clicked={clicked}, total={total}"
+        f"text={text_id}, updated={updated}, clicked={clicked}, total={total}, failed={failed}"
     )
+
+    if failed > 0:
+        logger.warning(f"SRS batch update had {failed} failures: {failures}")
 
     return {
         "updated": updated,
         "clicked": clicked,
         "total": total,
+        "failed": failed,
+        "failures": failures,
     }

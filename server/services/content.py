@@ -48,6 +48,7 @@ async def generate_text_content(
     target_lang: str,
     profile: Profile,
     target_words: Optional[Set[str]] = None,
+    topic: Optional[str] = None,
 ) -> Optional[ReadingText]:
     """Generate text content using LLM."""
     try:
@@ -63,6 +64,10 @@ async def generate_text_content(
                 f"Generating text with target words: {include_words_list} "
                 f"for profile {profile_id}"
             )
+
+        # Log topic if provided
+        if topic:
+            logger.info(f"Generating text with topic: {topic} for profile {profile_id}")
 
         spec = PromptSpec(
             lang=lang,
@@ -124,6 +129,7 @@ async def generate_text_content(
                 target_lang=target_lang,
                 content=content,
                 title=title,
+                topic=topic,  # Add topic field
                 source="llm",
                 ci_target=ci_target,
                 request_sent_at=datetime.now(timezone.utc),

@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
-from server.db import get_db
+from server.db import get_db, db_transaction
 from server.models import (
     Profile,
     ReadingText,
@@ -207,34 +207,33 @@ def reading_next(
         if not profile or not profile.current_text_id:
             return JSONResponse({"status": "error", "message": "No current text"})
 
-        # Mark current text as read
-        existing = (
-            db.query(ProfileTextRead)
-            .filter(
-                ProfileTextRead.profile_id == profile.id,
-                ProfileTextRead.text_id == profile.current_text_id,
+        with db_transaction(db):
+            # Mark current text as read
+            existing = (
+                db.query(ProfileTextRead)
+                .filter(
+                    ProfileTextRead.profile_id == profile.id,
+                    ProfileTextRead.text_id == profile.current_text_id,
+                )
+                .first()
             )
-            .first()
-        )
 
-        if existing:
-            existing.read_count += 1
-            existing.last_read_at = datetime.now(timezone.utc)
-        else:
-            read_entry = ProfileTextRead(
-                profile_id=profile.id,
-                text_id=profile.current_text_id,
-                read_count=1,
-            )
-            db.add(read_entry)
+            if existing:
+                existing.read_count += 1
+                existing.last_read_at = datetime.now(timezone.utc)
+            else:
+                read_entry = ProfileTextRead(
+                    profile_id=profile.id,
+                    text_id=profile.current_text_id,
+                    read_count=1,
+                )
+                db.add(read_entry)
 
-        # Select next text
-        next_text = select_best_text(db, profile)
+            # Select next text
+            next_text = select_best_text(db, profile)
 
-        if next_text:
-            profile.current_text_id = next_text.id
-
-        db.commit()
+            if next_text:
+                profile.current_text_id = next_text.id
 
         return JSONResponse(
             {
@@ -245,7 +244,6 @@ def reading_next(
         )
 
     except Exception as e:
-        db.rollback()
         return JSONResponse({"status": "error", "message": str(e)})
 
 

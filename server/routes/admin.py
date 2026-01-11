@@ -57,7 +57,8 @@ def admin_texts_page(
     # Calculate summary stats
     total_count = len(texts)
     ready_count = sum(1 for t in texts if t.is_ready)
-    failed_count = sum(1 for t in texts if t.translation_attempts >= 3)
+    # Failed = not ready AND 3+ translation attempts
+    failed_count = sum(1 for t in texts if t.translation_attempts >= 3 and not t.is_ready)
     pending_count = total_count - ready_count - failed_count
 
     # By language stats

@@ -36,8 +36,18 @@ def get_current_account(
         logger.warning("Authentication failed: Invalid token format")
         raise HTTPException(401, "Invalid token format")
 
+    # Minimum token length validation (JWT tokens are typically 100+ chars)
+    if len(token) < 20:
+        logger.warning(f"Authentication failed: Token too short (length: {len(token)})")
+        raise HTTPException(401, "Invalid token format")
+
+    # Invalid character detection (prevent injection attacks)
+    if "\n" in token or "\r" in token or "\0" in token:
+        logger.warning("Authentication failed: Token contains invalid characters")
+        raise HTTPException(401, "Invalid token format")
+
     try:
-        # Decode and validate JWT token
+        # Decode and validate JWT token (includes algorithm and expiration validation)
         data = decode_token(token, _JWT_SECRET, ["HS256"])
         if not data or "sub" not in data:
             logger.warning("Authentication failed: Invalid token payload")
@@ -53,9 +63,23 @@ def get_current_account(
             logger.warning(f"Authentication failed: Invalid account ID: {account_id}")
             raise HTTPException(401, "Invalid account ID")
 
+        # Defense in depth: check expiration explicitly
+        if "exp" in data:
+            try:
+                from datetime import datetime, timezone
+                exp_timestamp = int(data["exp"])
+                if datetime.now(timezone.utc).timestamp() > exp_timestamp:
+                    logger.warning("Authentication failed: Token expired")
+                    raise HTTPException(401, "Token expired")
+            except (ValueError, TypeError):
+                logger.warning("Authentication failed: Invalid expiration format")
+                raise HTTPException(401, "Invalid token")
+
     except ValueError as e:
         logger.warning(f"Authentication failed: Invalid account ID format: {e}")
         raise HTTPException(401, "Invalid account ID format")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"Authentication failed: Token validation error: {e}")
         raise HTTPException(401, "Invalid token")
