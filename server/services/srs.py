@@ -62,8 +62,17 @@ def apply_time_decay(lexeme: Lexeme, current_time: Optional[datetime] = None) ->
     if not lexeme.last_seen_at:
         return
 
+    # Ensure both datetimes are timezone-aware
+    last_seen = lexeme.last_seen_at
+    if last_seen.tzinfo is None:
+        # If naive, assume it's UTC
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+
     # Calculate days since last exposure
-    days_since_seen = (current_time - lexeme.last_seen_at).total_seconds() / 86400.0
+    days_since_seen = (current_time - last_seen).total_seconds() / 86400.0
 
     if days_since_seen <= 0:
         return
@@ -241,17 +250,55 @@ def batch_update_lexemes_from_text_state(
         if lexeme.familiarity is None:
             initialize_lexeme_srs(lexeme)
 
+        # Apply time decay ONCE per word (not per click)
+        apply_time_decay(lexeme, current_time)
+
         # Process clicks
         click_count = len(word_data.get("clicks", []))
 
         if click_count > 0:
-            # User clicked - apply negative signal
-            for _ in range(click_count):
-                update_lexeme_from_click(lexeme, db, current_time)
+            # User clicked - apply negative signal scaled by click count
+            old_fam = lexeme.familiarity
+
+            # Scale the learning effect by number of clicks
+            # Multiple clicks on same word = stronger negative signal
+            learning_effect = LEARNING_RATE_CLICK * min(click_count, 3)  # Cap at 3x
+
+            if lexeme.familiarity is not None:
+                lexeme.familiarity = max(0.0, lexeme.familiarity - learning_effect)
+
+                # Increase variance (we're less certain after unexpected clicks)
+                if lexeme.familiarity_variance is not None:
+                    lexeme.familiarity_variance = min(0.25, lexeme.familiarity_variance + VARIANCE_REDUCTION * click_count)
+
+                logger.debug(
+                    f"Click ({click_count}x) on lexeme {lexeme.id}: {old_fam:.2f}→{lexeme.familiarity:.2f}, "
+                    f"var={lexeme.familiarity_variance:.2f}"
+                )
+
+            # Update interaction tracking
+            lexeme.clicks = (lexeme.clicks or 0) + click_count
+            lexeme.last_clicked_at = current_time
             clicked += 1
         else:
             # No clicks - apply positive signal (they know it)
-            update_lexeme_from_exposure(lexeme, db, current_time)
+            old_fam = lexeme.familiarity
+
+            if lexeme.familiarity is not None:
+                lexeme.familiarity = min(1.0, lexeme.familiarity + LEARNING_RATE_NO_CLICK)
+
+                # Decrease variance (we're more confident after successful non-click)
+                if lexeme.familiarity_variance is not None:
+                    lexeme.familiarity_variance = max(0.05, lexeme.familiarity_variance - VARIANCE_REDUCTION * 0.5)
+
+                logger.debug(
+                    f"No-click on lexeme {lexeme.id}: {old_fam:.2f}→{lexeme.familiarity:.2f}, "
+                    f"var={lexeme.familiarity_variance:.2f}"
+                )
+
+        # Always update exposure tracking
+        lexeme.exposures = (lexeme.exposures or 0) + 1
+        lexeme.last_seen_at = current_time
 
         # Calculate next review time
         lexeme.next_due_at = calculate_next_review(lexeme)

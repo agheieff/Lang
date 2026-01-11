@@ -18,8 +18,9 @@
         const accountId = document.getElementById('reading-text')?.getAttribute('data-account-id');
         const profileId = document.getElementById('reading-text')?.getAttribute('data-profile-id');
 
-        if (!textId) {
-            console.warn('[TextState] No text_id found');
+        // Check for missing or invalid text_id (including string "None")
+        if (!textId || textId === 'None' || textId === 'null') {
+            console.warn('[TextState] No valid text_id found - demo mode or no text generated yet');
             return;
         }
 

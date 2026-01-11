@@ -78,9 +78,12 @@ class SaveSessionRequest(BaseModel):
 
 
 # Demo text for when no texts are available
-DEMO_TEXT = """Hola! Welcome to your reading practice.
-This is a simple demo text to get you started.
-The full text generation system will be available soon."""
+DEMO_TEXT = """Generating your first text...
+
+Please wait while we create a personalized reading text for you.
+This usually takes 30-60 seconds.
+
+You can refresh this page to check if your text is ready."""
 
 
 @router.get("/reading", response_class=HTMLResponse)
