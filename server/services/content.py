@@ -128,7 +128,7 @@ async def generate_text_content(
                 ci_target=ci_target,
                 request_sent_at=datetime.now(timezone.utc),
                 generated_at=datetime.now(timezone.utc),
-                prompt_words=set(include_words_list) if include_words_list else set(),
+                prompt_words=list(include_words_list) if include_words_list else [],
                 prompt_level_hint=level_hint,
                 translation_attempts=0,
                 words_complete=False,
