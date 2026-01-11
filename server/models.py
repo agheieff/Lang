@@ -607,6 +607,9 @@ class Lexeme(Base):
 
     # Familiarity (computed)
     familiarity: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    familiarity_variance: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    decay_rate: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    decay_variance: Mapped[Optional[float]] = mapped_column(Float, default=None)
     last_seen: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=None
     )

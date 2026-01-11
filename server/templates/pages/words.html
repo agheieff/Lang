@@ -44,6 +44,10 @@
             <th class="px-4 py-2 font-medium">Difficulty</th>
             <th class="px-4 py-2 font-medium">Interactions</th>
             <th class="px-4 py-2 font-medium">Clicks</th>
+            <th class="px-4 py-2 font-medium">Familiarity</th>
+            <th class="px-4 py-2 font-medium">Fam Var</th>
+            <th class="px-4 py-2 font-medium">Decay</th>
+            <th class="px-4 py-2 font-medium">Decay Var</th>
             <th class="px-4 py-2 font-medium">Stability</th>
             <th class="px-4 py-2 font-medium">Next Due</th>
             <th class="px-4 py-2 font-medium">Action</th>
@@ -88,6 +92,9 @@ function setupColumnSorting() {
     'difficulty': 'number',
     'interactions': 'number',
     'clicks': 'number',
+    'familiarity': 'number',
+    'fam': 'number',
+    'decay': 'number',
     'stability': 'number',
     'nextDue': 'date'
   };
@@ -163,6 +170,18 @@ function sortByColumn(column, type) {
       case 'clicks':
         aVal = Number(a.p_click) || 0;
         bVal = Number(b.p_click) || 0;
+        break;
+      case 'familiarity':
+        aVal = Number(a.familiarity) ?? (currentSort.direction === 'asc' ? -999 : 0);
+        bVal = Number(b.familiarity) ?? (currentSort.direction === 'asc' ? -999 : 0);
+        break;
+      case 'fam':
+        aVal = Number(a.familiarity_variance) ?? (currentSort.direction === 'asc' ? 999 : 0);
+        bVal = Number(b.familiarity_variance) ?? (currentSort.direction === 'asc' ? 999 : 0);
+        break;
+      case 'decay':
+        aVal = Number(a.decay_rate) ?? (currentSort.direction === 'asc' ? 999 : 0);
+        bVal = Number(b.decay_rate) ?? (currentSort.direction === 'asc' ? 999 : 0);
         break;
       case 'stability':
         aVal = Number(a.stability) || 0;
@@ -242,7 +261,7 @@ async function loadWords() {
     });
 
     // Apply initial sort (lemma is string type)
-    const sortTypes = { lemma: 'string', pos: 'string', freq: 'number', level: 'string', difficulty: 'number', interactions: 'number', clicks: 'number', stability: 'number', nextDue: 'date' };
+    const sortTypes = { lemma: 'string', pos: 'string', freq: 'number', level: 'string', difficulty: 'number', interactions: 'number', clicks: 'number', familiarity: 'number', fam: 'number', decay: 'number', stability: 'number', nextDue: 'date' };
     sortByColumn(currentSort.column, sortTypes[currentSort.column] || 'string');
   } catch (e) {
     // ignore
@@ -287,6 +306,10 @@ function renderWordsTable(items) {
       <td class="px-4 py-2 text-sm">${(p*100).toFixed(0)}%</td>
       <td class="px-4 py-2 text-sm">${n}</td>
       <td class="px-4 py-2 text-sm">${p}</td>
+      <td class="px-4 py-2 text-sm">${it.familiarity != null ? it.familiarity.toFixed(2) : '—'}</td>
+      <td class="px-4 py-2 text-sm">${it.familiarity_variance != null ? it.familiarity_variance.toFixed(3) : '—'}</td>
+      <td class="px-4 py-2 text-sm">${it.decay_rate != null ? it.decay_rate.toFixed(3) : '—'}</td>
+      <td class="px-4 py-2 text-sm">${it.decay_variance != null ? it.decay_variance.toFixed(3) : '—'}</td>
       <td class="px-4 py-2 text-sm">${S.toFixed(1)}d</td>
       <td class="px-4 py-2 text-sm ${nextDue === 'Overdue' ? 'text-red-600 font-medium' : 'text-gray-600'}">${nextDue}</td>
       <td class="px-4 py-2 text-gray-400 text-xs">Edit</td>

@@ -23,6 +23,7 @@ from server.models import (
     Lexeme,
 )
 from server.services.text_state_builder import get_text_state
+from server.services.srs import batch_update_lexemes_from_text_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["text_state"])
@@ -136,6 +137,16 @@ def log_text_state(
         )
 
         logger.info(f"[TextState] Vocabulary added: {result}")
+
+        # Update SRS values from click data
+        srs_result = batch_update_lexemes_from_text_state(
+            db=db,
+            account_id=data.account_id,
+            profile_id=profile_id,
+            text_id=data.text_id,
+            words=data.words,
+        )
+        logger.info(f"[TextState] SRS updated: {srs_result}")
 
         # Create or update profile text state
         existing = (

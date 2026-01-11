@@ -162,6 +162,10 @@ def get_srs_words(
                 "level_code": lex.level_code,
                 "freq_rank": lex.frequency_rank,
                 "next_due_at": lex.next_due_at.isoformat() if lex.next_due_at else None,
+                "familiarity": lex.familiarity,
+                "familiarity_variance": lex.familiarity_variance,
+                "decay_rate": lex.decay_rate,
+                "decay_variance": lex.decay_variance,
             }
         )
 
