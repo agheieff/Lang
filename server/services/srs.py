@@ -29,6 +29,10 @@ LEARNING_RATE_CLICK = 0.3  # How much a click affects familiarity
 LEARNING_RATE_NO_CLICK = 0.1  # How much a no-click affects familiarity
 VARIANCE_REDUCTION = 0.05  # How much variance decreases per interaction
 
+DECAY_MIN = 0.01  # Minimum decay rate (1% per day - long-lived memories)
+DECAY_MAX = 0.5  # Maximum decay rate (50% per day - quickly forgotten)
+DECAY_ADJUSTMENT_RATE = 0.02  # How much to adjust decay_rate per update
+
 
 def initialize_lexeme_srs(lexeme: Lexeme) -> None:
     """Initialize SRS values for a new lexeme based on existing click/exposure data."""
@@ -51,6 +55,50 @@ def initialize_lexeme_srs(lexeme: Lexeme) -> None:
     logger.debug(
         f"Initialized SRS for lexeme {lexeme.id}: "
         f"familiarity={lexeme.familiarity:.2f}±{lexeme.familiarity_variance:.2f}"
+    )
+
+
+def _update_decay_rate(lexeme: Lexeme, was_clicked: bool) -> None:
+    """Update decay_rate based on user interaction patterns.
+
+    - High click ratio → user forgets quickly → increase decay_rate
+    - Low click ratio → user remembers well → decrease decay_rate
+    - Adjusts gradually based on DECAY_ADJUSTMENT_RATE
+    - Decreases decay_variance over time as we get more data
+    """
+    if lexeme.decay_rate is None:
+        lexeme.decay_rate = DEFAULT_DECAY_RATE
+    if lexeme.decay_variance is None:
+        lexeme.decay_variance = DEFAULT_DECAY_VARIANCE
+
+    # Calculate overall click ratio
+    if lexeme.exposures > 0:
+        click_ratio = lexeme.clicks / lexeme.exposures
+    else:
+        click_ratio = 0.0
+
+    # Expected click ratio based on current familiarity
+    # If familiarity is high, we expect low clicks. If low, expect high clicks.
+    expected_click_ratio = 1.0 - (lexeme.familiarity or 0.5)
+
+    # Adjust decay_rate based on actual vs expected clicks
+    # If user clicks more than expected → increase decay (they forget faster)
+    # If user clicks less than expected → decrease decay (they remember longer)
+    if click_ratio > expected_click_ratio:
+        # User clicking more than expected - increase decay rate
+        lexeme.decay_rate = min(DECAY_MAX, lexeme.decay_rate + DECAY_ADJUSTMENT_RATE)
+    elif click_ratio < expected_click_ratio:
+        # User clicking less than expected - decrease decay rate
+        lexeme.decay_rate = max(DECAY_MIN, lexeme.decay_rate - DECAY_ADJUSTMENT_RATE)
+
+    # Decrease decay_variance as we get more data points
+    data_confidence = min(1.0, sqrt(lexeme.exposures) * 0.1)
+    lexeme.decay_variance = max(0.01, 0.25 * (1.0 - data_confidence))
+
+    logger.debug(
+        f"Updated decay_rate for lexeme {lexeme.id}: "
+        f"click_ratio={click_ratio:.2f}, expected={expected_click_ratio:.2f}, "
+        f"decay_rate={lexeme.decay_rate:.3f}±{lexeme.decay_variance:.2f}"
     )
 
 
@@ -299,6 +347,9 @@ def batch_update_lexemes_from_text_state(
         # Always update exposure tracking
         lexeme.exposures = (lexeme.exposures or 0) + 1
         lexeme.last_seen_at = current_time
+
+        # Update decay_rate based on click patterns
+        _update_decay_rate(lexeme, was_clicked=(click_count > 0))
 
         # Calculate next review time
         lexeme.next_due_at = calculate_next_review(lexeme)

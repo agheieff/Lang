@@ -157,7 +157,7 @@ def get_srs_words(
                 "lemma": lex.lemma,
                 "pos": lex.pos,
                 "n": lex.exposures,
-                "p_click": lex.clicks,
+                "click_count": lex.clicks,
                 "stability": lex.stability,
                 "level_code": lex.level_code,
                 "freq_rank": lex.frequency_rank,
