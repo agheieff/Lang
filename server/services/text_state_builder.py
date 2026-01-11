@@ -20,6 +20,34 @@ from server.models import (
 )
 
 
+def _update_global_frequency(db: Session, text: ReadingText, words: list) -> None:
+    """Update global word frequency tracking after words are added.
+
+    Called asynchronously to avoid blocking the main flow.
+    """
+    try:
+        from server.services.global_frequency import update_frequency_from_text
+
+        # Build vocabulary list from words
+        text_vocab = [
+            {
+                'lemma': w['lemma'],
+                'pos': w.get('pos', 'NOUN'),
+                'occurrences': 1
+            }
+            for w in words
+            if w.get('lemma')
+        ]
+
+        if text_vocab:
+            update_frequency_from_text(db, text.lang, text_vocab)
+    except Exception as e:
+        # Don't let frequency tracking errors break the main flow
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error updating global frequency: {e}")
+
+
 def create_text_state(db: Session, text: ReadingText) -> TextState:
     """Create initial text state when text is first generated."""
     state = TextState(
@@ -86,6 +114,12 @@ def add_words_to_state(db: Session, text_id: int) -> TextState:
     _check_and_mark_ready(db, state)
 
     db.commit()
+
+    # Update global frequency tracking
+    text = db.query(ReadingText).filter(ReadingText.id == text_id).first()
+    if text:
+        _update_global_frequency(db, text, words)
+
     return state
 
 
@@ -164,6 +198,10 @@ def add_translations_to_state(db: Session, text_id: int) -> TextState:
     state.has_translations = True
     state.state_data["sentence_count"] = len(translations)
     state.state_data["paragraph_count"] = len(paragraphs_with_sentences)
+
+    # Add full text translation (all sentences combined)
+    full_translation = " ".join([t.translated_text for t in translations if t.translated_text])
+    state.state_data["full_translation"] = full_translation
 
     # Flag the JSON field as modified so SQLAlchemy persists it
     flag_modified(state, "state_data")

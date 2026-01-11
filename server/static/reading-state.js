@@ -43,6 +43,10 @@
                         word.clicks = [];
                     });
                 }
+
+                // Save state to localStorage for access by other scripts
+                localStorage.setItem(`arc_text_state_${textId}`, JSON.stringify(State));
+                console.log('[TextState] Loaded and cached in localStorage');
             } else if (data.status === 'not_ready') {
                 console.warn('[TextState] Text state not ready yet:', data.message);
                 // Retry after a delay
@@ -65,6 +69,18 @@
 
         // Add saved_at timestamp
         State.saved_at = new Date().toISOString();
+
+        // Merge session data (including full_translation_views) into state before saving
+        if (State.text_id) {
+            const sessionKey = `arc_current_session_${State.text_id}`;
+            const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
+
+            // Include full_translation_views from session data
+            if (sessionData.full_translation_views && Array.isArray(sessionData.full_translation_views)) {
+                State.full_translation_views = sessionData.full_translation_views;
+                console.log(`[TextState] Merged ${sessionData.full_translation_views.length} translation views`);
+            }
+        }
 
         try {
             const response = await fetch('/reading/log-text-state', {

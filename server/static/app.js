@@ -197,13 +197,35 @@
 
             const textEl = $('translation-text');
             if (textEl && (!textEl.textContent.trim() || textEl.textContent === 'Translation not yet available.')) {
-                textEl.textContent = 'Loading translation...';
-
-                // Fetch sentence translations and combine them
+                // First, check if full_translation is available in the text state
                 const mainTextEl = $('reading-text');
                 const textId = mainTextEl ? mainTextEl.dataset.textId : null;
 
                 if (textId) {
+                    // Try to get from text state first
+                    const stateKey = `arc_text_state_${textId}`;
+                    const textState = JSON.parse(localStorage.getItem(stateKey) || '{}');
+
+                    if (textState.full_translation) {
+                        // Translation available in state
+                        textEl.textContent = textState.full_translation;
+                        console.log('[Translation] Loaded from text state');
+                        return;
+                    }
+
+                    // Not in state, try session cache
+                    const sessionKey = `arc_current_session_${textId}`;
+                    const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
+
+                    if (sessionData.full_translation) {
+                        textEl.textContent = sessionData.full_translation;
+                        console.log('[Translation] Loaded from session cache');
+                        return;
+                    }
+
+                    // Not cached, fetch from server
+                    textEl.textContent = 'Loading translation...';
+
                     try {
                         const res = await fetchWithTimeout(`/reading/${textId}/translations?unit=sentence`, {
                             headers: { 'Accept': 'application/json' }
@@ -220,10 +242,9 @@
                                     textEl.textContent = fullTranslation;
 
                                     // Cache it in session data for persistence
-                                    const sessionKey = `arc_current_session_${textId}`;
-                                    const sessionData = JSON.parse(localStorage.getItem(sessionKey) || '{}');
                                     sessionData.full_translation = fullTranslation;
                                     localStorage.setItem(sessionKey, JSON.stringify(sessionData));
+                                    console.log('[Translation] Fetched from server and cached');
                                     return;
                                 }
                             }

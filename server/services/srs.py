@@ -34,16 +34,22 @@ DECAY_MAX = 0.5  # Maximum decay rate (50% per day - quickly forgotten)
 DECAY_ADJUSTMENT_RATE = 0.02  # How much to adjust decay_rate per update
 
 
-def calculate_urgency_score(lexeme: Lexeme, current_time: Optional[datetime] = None) -> float:
+def calculate_urgency_score(
+    lexeme: Lexeme,
+    current_time: Optional[datetime] = None,
+    frequency_percentile: float = 0.5,
+) -> float:
     """Calculate urgency score combining time and familiarity.
 
     Returns 0.0-1.0 where higher = more urgent review needed.
 
-    Formula: time_urgency × familiarity_weight × variance_boost
+    Formula: time_urgency × familiarity_weight × variance_boost × exposure_weight × frequency_weight
 
     - Time urgency: exponential decay from due date (1.0 at due, 0.1 at 7 days)
     - Familiarity weight: unfamiliar words get higher priority (1 - familiarity)
     - Variance boost: uncertain words get priority boost
+    - Exposure weight: ramp up over first 4 exposures (prevents one-off words from dominating)
+    - Frequency weight: rare words (bottom 20%) get reduced weight
     """
     if not current_time:
         current_time = datetime.now(timezone.utc)
@@ -72,12 +78,26 @@ def calculate_urgency_score(lexeme: Lexeme, current_time: Optional[datetime] = N
     # Variance boost: uncertain words get priority
     variance_boost = 1.0 + ((lexeme.familiarity_variance or 0.0) * 2.0)
 
-    urgency = time_urgency * familiarity_weight * variance_boost
+    # Exposure weight: ramp up over first 4 exposures
+    # 1 exposure → 25%, 2 → 50%, 3 → 75%, 4+ → 100%
+    exposure_weight = min(1.0, (lexeme.exposures or 0) / 4.0)
+
+    # Frequency weight: rare words (bottom 20%) get reduced weight
+    frequency_weight = min(1.0, frequency_percentile / 0.2)
+
+    urgency = (
+        time_urgency *
+        familiarity_weight *
+        variance_boost *
+        exposure_weight *
+        frequency_weight
+    )
 
     logger.debug(
         f"Urgency for lexeme {lexeme.id} ({lexeme.lemma}): "
         f"time={time_urgency:.2f}, fam_weight={familiarity_weight:.2f}, "
-        f"variance_boost={variance_boost:.2f}, urgency={urgency:.2f}"
+        f"variance_boost={variance_boost:.2f}, exposure_weight={exposure_weight:.2f}, "
+        f"frequency_weight={frequency_weight:.2f}, urgency={urgency:.2f}"
     )
 
     return min(1.0, max(0.0, urgency))
@@ -446,3 +466,81 @@ def batch_update_lexemes_from_text_state(
         "failed": failed,
         "failures": failures,
     }
+
+
+def get_urgent_lexemes_percentile(
+    db: Session,
+    profile,
+    current_time: Optional[datetime] = None,
+) -> list:
+    """Get urgent lexemes using percentile-based banding.
+
+    Returns: List of (lexeme, urgency_score, band) tuples
+    Bands: 'critical', 'high', 'medium', 'low'
+
+    Percentile bands:
+    - Critical: top 10% most urgent
+    - High: next 20%
+    - Medium: next 30%
+    - Low: remaining 40%
+    """
+    try:
+        from server.services.global_frequency import get_word_frequency
+        from server.models import Profile
+
+        if isinstance(profile, int):
+            profile = db.get(Profile, profile)
+        if not profile:
+            return []
+
+        # Get all due lexemes for this profile
+        all_due = db.query(Lexeme).filter(
+            Lexeme.account_id == profile.account_id,
+            Lexeme.profile_id == profile.id,
+            Lexeme.lang == profile.lang,
+            Lexeme.next_due_at.is_not(None),
+        ).all()
+
+        if not all_due:
+            return []
+
+        # Calculate urgency with frequency weighting
+        scored = []
+        for lex in all_due:
+            freq_pct = get_word_frequency(
+                db,
+                lex.lang,
+                lex.lemma,
+                lex.pos or "NOUN"
+            )
+            urgency = calculate_urgency_score(lex, current_time, freq_pct)
+            scored.append((lex, urgency))
+
+        # Sort by urgency (descending)
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        # Assign to percentile bands
+        total = len(scored)
+        bands = []
+
+        critical_count = int(total * 0.10)  # Top 10%
+        high_count = int(total * 0.20)      # Next 20%
+        medium_count = int(total * 0.30)    # Next 30%
+
+        for i, (lex, urgency) in enumerate(scored):
+            if i < critical_count:
+                band = 'critical'
+            elif i < critical_count + high_count:
+                band = 'high'
+            elif i < critical_count + high_count + medium_count:
+                band = 'medium'
+            else:
+                band = 'low'
+
+            bands.append((lex, urgency, band))
+
+        return bands
+
+    except Exception as e:
+        logger.error(f"Error getting percentile lexemes: {e}", exc_info=True)
+        return []

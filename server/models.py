@@ -491,6 +491,33 @@ class TextVocabulary(Base):
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class GlobalWordFrequency(Base):
+    """Track word frequency across all texts for rarity detection."""
+
+    __tablename__ = "global_word_frequency"
+    __table_args__ = (
+        UniqueConstraint("lang", "lemma", "pos", name="uq_gwf_lang_lemma_pos"),
+        Index("ix_gwf_lang", "lang"),
+        Index("ix_gwf_frequency_percentile", "frequency_percentile"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lang: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    lemma: Mapped[str] = mapped_column(String(100), nullable=False)
+    pos: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    # Frequency metrics
+    text_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_occurrences: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    frequency_percentile: Mapped[float] = mapped_column(Float, default=0.0)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
 class ProfileTextRead(Base):
     """Tracks which texts a profile has read."""
 

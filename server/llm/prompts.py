@@ -140,6 +140,7 @@ def build_reading_prompt(spec: PromptSpec) -> List[Dict[str, str]]:
         "text",
         level=level,
         length=str(spec.approx_len),
+        length_plus_100=str(spec.approx_len + 100),
         include_words=", ".join(spec.include_words or []),
         topic_line=topic_line,
     )

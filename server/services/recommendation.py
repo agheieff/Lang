@@ -350,6 +350,73 @@ def select_target_words_from_urgent(
     return selected
 
 
+def select_target_words_from_bands(
+    banded_lexemes: list,
+    count: int = 3,
+) -> List[Dict]:
+    """Select target words using weighted band selection.
+
+    Band probabilities:
+    - Critical: 50% selection chance
+    - High: 30%
+    - Medium: 15%
+    - Low: 5%
+
+    Returns: List of selected word dicts with {lemma, pos, urgency, band}
+    """
+    import random
+
+    selected = []
+    pos_counts = {}
+    attempts = 0
+    max_attempts = count * 10  # Prevent infinite loops
+
+    while len(selected) < count and attempts < max_attempts:
+        attempts += 1
+
+        # Choose band based on probability weights
+        band = random.choices(
+            ['critical', 'high', 'medium', 'low'],
+            weights=[0.50, 0.30, 0.15, 0.05],
+            k=1
+        )[0]
+
+        # Get available lexemes in this band
+        band_lexemes = [(l, u, b) for l, u, b in banded_lexemes if b == band]
+
+        if not band_lexemes:
+            continue
+
+        # Pick random lexeme from band
+        lex, urgency, _ = random.choice(band_lexemes)
+
+        # Check POS diversity (max 2 per POS)
+        pos = lex.pos or "UNKNOWN"
+        if pos_counts.get(pos, 0) >= 2:
+            continue
+
+        # Check if already selected
+        if any(s['lemma'] == lex.lemma for s in selected):
+            continue
+
+        # Add to selection
+        selected.append({
+            "lemma": lex.lemma,
+            "pos": pos,
+            "urgency": urgency,
+            "band": band,
+        })
+        pos_counts[pos] = pos_counts.get(pos, 0) + 1
+
+    band_info = ", ".join(set(w.get("band", "unknown") for w in selected)) if selected else "none"
+    logger.info(
+        f"Selected {len(selected)} target words from bands [{band_info}]: "
+        f"{[w['lemma'] for w in selected]}"
+    )
+
+    return selected
+
+
 def compute_text_features(db: Session, text: ReadingText) -> TextFeatures:
     """Extract features from a ReadingText."""
     try:
@@ -452,20 +519,24 @@ def build_profile_request(db: Session, profile: Profile) -> TextRequest:
             request.min_length = int(profile.text_length * 0.5)
             request.max_length = int(profile.text_length * 1.5)
 
-        # Target words from SRS (urgent lexemes)
-        # Reduced count and randomized to add more variety
+        # Target words from SRS - using percentile banding
         import random
-        urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=20)
-        if urgent_lexemes and random.random() < 0.7:  # 70% chance to include target words
+        from server.services.srs import get_urgent_lexemes_percentile
+
+        banded_lexemes = get_urgent_lexemes_percentile(db, profile)
+
+        if banded_lexemes and random.random() < 0.7:  # 70% chance to include target words
             # Use fewer target words (2-3) for more variety
             target_count = random.choice([0, 2, 3])  # Sometimes 0 (no specific targets)
             if target_count > 0:
-                target_words_data = select_target_words_from_urgent(urgent_lexemes, count=target_count)
+                target_words_data = select_target_words_from_bands(banded_lexemes, count=target_count)
                 request.target_words = {w["lemma"] for w in target_words_data}
                 request.target_words_data = target_words_data
+
+                band_info = ", ".join(set(w.get("band", "unknown") for w in target_words_data))
                 logger.info(
-                    f"Profile {profile.id}: target_words={request.target_words}, "
-                    f"count={len(request.target_words)}"
+                    f"Profile {profile.id}: selected {len(request.target_words)} words "
+                    f"from bands [{band_info}]"
                 )
             else:
                 request.target_words = set()
