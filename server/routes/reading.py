@@ -78,12 +78,23 @@ class SaveSessionRequest(BaseModel):
 
 
 # Demo text for when no texts are available
-DEMO_TEXT = """Generating your first text...
+DEMO_TEXT = """🔄 Generating texts...
 
-Please wait while we create a personalized reading text for you.
-This usually takes 30-60 seconds.
+We're creating personalized reading texts for you. This takes 45-90 seconds.
 
-You can refresh this page to check if your text is ready."""
+The system works in the background:
+• Startup generation: 5 texts immediately
+• Background worker: runs every 60 seconds
+• On-demand: triggers when you click "Next Text" with empty queue
+
+What's happening:
+• Texts are shared across all users with your language pair
+• Topics vary: fiction, news, science, technology, history, daily_life, culture, sports, business
+• Difficulty adapts to your level automatically
+
+Current status: Waiting for generation to complete...
+
+💡 Click "Next Text" to trigger immediate generation, or just refresh this page in a minute."""
 
 
 @router.get("/reading", response_class=HTMLResponse)
