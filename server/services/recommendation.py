@@ -16,6 +16,8 @@ from server.models import (
     ProfileTopicPref,
     ProfileTextRead,
     ProfileTextQueue,
+    Lexeme,
+    ReadingWordGloss,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,7 @@ class TextRequest:
 
     # Target words to practice
     target_words: Set[str] = field(default_factory=set)
+    target_words_data: List[Dict] = field(default_factory=list)  # Full data with urgency
 
     # Length preference
     min_length: int = 100
@@ -76,6 +79,84 @@ class TextRequest:
 
     # Quality thresholds
     min_rating: float = 0.0  # ignore texts with rating below this
+
+
+def get_urgent_lexemes_for_profile(
+    db: Session,
+    profile: Profile,
+    limit: int = 20,
+    current_time: Optional[datetime] = None,
+) -> List[Tuple[Lexeme, float]]:
+    """Get lexemes needing review, sorted by urgency.
+
+    Returns list of (lexeme, urgency_score) tuples.
+    """
+    from server.services.srs import calculate_urgency_score
+
+    if not current_time:
+        current_time = datetime.now(timezone.utc)
+
+    lexemes = (
+        db.query(Lexeme)
+        .filter(
+            Lexeme.account_id == profile.account_id,
+            Lexeme.profile_id == profile.id,
+            Lexeme.lang == profile.lang,
+            Lexeme.next_due_at.is_not(None),
+        )
+        .all()
+    )
+
+    scored = [(lex, calculate_urgency_score(lex, current_time)) for lex in lexemes]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    logger.info(
+        f"Found {len(scored)} urgent lexemes for profile {profile.id}, "
+        f"returning top {min(limit, len(scored))}"
+    )
+
+    return scored[:limit]
+
+
+def compute_vocabulary_overlap_score(
+    db: Session,
+    text_id: int,
+    urgent_lexemes_with_scores: List[Tuple[Lexeme, float]],
+) -> float:
+    """Calculate vocabulary overlap score with urgent words.
+
+    Returns 0.0-1.0 where higher = better match.
+
+    Combines coverage (how much urgent vocab is covered) with
+    density (urgent words per total unique words).
+    """
+    glosses = (
+        db.query(ReadingWordGloss.lemma, ReadingWordGloss.pos)
+        .filter(ReadingWordGloss.text_id == text_id)
+        .distinct()
+        .all()
+    )
+
+    text_vocab = {(lemma, pos) for lemma, pos in glosses}
+
+    if not text_vocab:
+        return 0.0
+
+    total_urgency = sum(score for _, score in urgent_lexemes_with_scores)
+
+    if total_urgency == 0:
+        return 0.0
+
+    matched_urgency = sum(
+        score for (lex, score) in urgent_lexemes_with_scores
+        if (lex.lemma, lex.pos) in text_vocab
+    )
+
+    coverage = matched_urgency / total_urgency
+    density = matched_urgency / max(1, len(text_vocab))
+
+    # Weight coverage 70%, density 30%
+    return coverage * 0.7 + density * 0.3
 
 
 def compute_text_features(db: Session, text: ReadingText) -> TextFeatures:
@@ -180,10 +261,21 @@ def build_profile_request(db: Session, profile: Profile) -> TextRequest:
             request.min_length = int(profile.text_length * 0.5)
             request.max_length = int(profile.text_length * 1.5)
 
-        # Target words (from SRS data - words that need review)
-        # TODO: Implement proper SRS-based word selection
-        # For now, return empty set
-        request.target_words = set()
+        # Target words from SRS (urgent lexemes)
+        urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=20)
+        if urgent_lexemes:
+            request.target_words = {lex.lemma for lex, _ in urgent_lexemes[:5]}
+            request.target_words_data = [
+                {"lemma": lex.lemma, "pos": lex.pos, "urgency": urgency}
+                for lex, urgency in urgent_lexemes[:5]
+            ]
+            logger.info(
+                f"Profile {profile.id}: target_words={request.target_words}, "
+                f"count={len(request.target_words)}"
+            )
+        else:
+            request.target_words = set()
+            request.target_words_data = []
 
         return request
 
@@ -197,7 +289,9 @@ def build_profile_request(db: Session, profile: Profile) -> TextRequest:
 
 
 def compute_similarity_score(
-    text_features: TextFeatures, request: TextRequest
+    text_features: TextFeatures,
+    request: TextRequest,
+    urgency_vocab_score: float = 0.0,
 ) -> float:
     """Compute similarity score between text and request.
 
@@ -253,7 +347,13 @@ def compute_similarity_score(
             word_penalty = (1.0 - coverage) * 1.5
             total_score += word_penalty
 
-        # 5. Quality bonus (negative penalty = reward)
+        # 5. Urgency vocabulary overlap (weight: 2.5)
+        if urgency_vocab_score > 0:
+            # Invert: high overlap = low penalty
+            urgency_penalty = (1.0 - urgency_vocab_score) * 2.5
+            total_score += urgency_penalty
+
+        # 6. Quality bonus (negative penalty = reward)
         if text_features.rating_avg >= 4.0:
             total_score -= 0.5
         elif text_features.rating_avg >= 3.0:
@@ -315,11 +415,24 @@ def get_unread_texts_for_profile(
         # Build request
         request = build_profile_request(db, profile)
 
+        # Get urgent lexemes for vocabulary matching
+        urgent_lexemes = get_urgent_lexemes_for_profile(db, profile, limit=10)
+
         # Score all texts
         scored_texts = []
         for text in available_texts:
             features = compute_text_features(db, text)
-            score = compute_similarity_score(features, request)
+
+            # Calculate vocabulary overlap with urgent words
+            vocab_overlap = 0.0
+            if urgent_lexemes:
+                vocab_overlap = compute_vocabulary_overlap_score(
+                    db, text.id, urgent_lexemes
+                )
+
+            score = compute_similarity_score(
+                features, request, urgency_vocab_score=vocab_overlap
+            )
             scored_texts.append((text, score))
 
         # Sort by score (lowest = best)

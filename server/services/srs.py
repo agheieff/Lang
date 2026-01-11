@@ -34,6 +34,55 @@ DECAY_MAX = 0.5  # Maximum decay rate (50% per day - quickly forgotten)
 DECAY_ADJUSTMENT_RATE = 0.02  # How much to adjust decay_rate per update
 
 
+def calculate_urgency_score(lexeme: Lexeme, current_time: Optional[datetime] = None) -> float:
+    """Calculate urgency score combining time and familiarity.
+
+    Returns 0.0-1.0 where higher = more urgent review needed.
+
+    Formula: time_urgency × familiarity_weight × variance_boost
+
+    - Time urgency: exponential decay from due date (1.0 at due, 0.1 at 7 days)
+    - Familiarity weight: unfamiliar words get higher priority (1 - familiarity)
+    - Variance boost: uncertain words get priority boost
+    """
+    if not current_time:
+        current_time = datetime.now(timezone.utc)
+
+    # Time urgency: exponential decay from due date
+    if lexeme.next_due_at:
+        # Ensure timezone-aware
+        due_at = lexeme.next_due_at
+        if due_at.tzinfo is None:
+            due_at = due_at.replace(tzinfo=timezone.utc)
+
+        days_until_due = (due_at - current_time).total_seconds() / 86400.0
+
+        if days_until_due <= 0:
+            time_urgency = 1.0  # Overdue - maximum urgency
+        else:
+            # Decay over 7 days: 1.0 at due, 0.1 at 7 days past due
+            time_urgency = max(0.1, exp(-0.33 * days_until_due))
+    else:
+        time_urgency = 0.5  # Default: medium urgency
+
+    # Familiarity weight: unfamiliar words get higher priority
+    familiarity = lexeme.familiarity or 0.5
+    familiarity_weight = 1.0 - familiarity
+
+    # Variance boost: uncertain words get priority
+    variance_boost = 1.0 + ((lexeme.familiarity_variance or 0.0) * 2.0)
+
+    urgency = time_urgency * familiarity_weight * variance_boost
+
+    logger.debug(
+        f"Urgency for lexeme {lexeme.id} ({lexeme.lemma}): "
+        f"time={time_urgency:.2f}, fam_weight={familiarity_weight:.2f}, "
+        f"variance_boost={variance_boost:.2f}, urgency={urgency:.2f}"
+    )
+
+    return min(1.0, max(0.0, urgency))
+
+
 def initialize_lexeme_srs(lexeme: Lexeme) -> None:
     """Initialize SRS values for a new lexeme based on existing click/exposure data."""
     # Calculate initial familiarity from historical data
