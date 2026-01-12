@@ -45,6 +45,20 @@ def _get_profile_for_account(db: Session, account_id: int) -> Optional[Profile]:
     return db.query(Profile).filter(Profile.account_id == account_id).first()
 
 
+def _get_active_profile(request: Request, db: Session, account_id: int) -> Optional[Profile]:
+    """Get active profile from cookie, falling back to first profile."""
+    active_profile_id = request.cookies.get("active_profile_id")
+    if active_profile_id:
+        try:
+            return db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account_id
+            ).first()
+        except ValueError:
+            pass
+    return _get_profile_for_account(db, account_id)
+
+
 # Pydantic models for request validation
 class WordInteraction(BaseModel):
     surface: str
@@ -103,32 +117,13 @@ def reading_page(
     db: Session = Depends(get_db),
 ):
     """Reading practice page."""
-
-    # Get current user
     account_id = _get_account_id(request)
-
     if account_id is None:
         return HTMLResponse(
             "<div><h1>Please log in</h1><p><a href='/login'>Login</a></p></div>"
         )
 
-    # Check for active profile from cookie
-    active_profile_id = request.cookies.get("active_profile_id")
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account_id
-            ).first()
-        except ValueError:
-            profile = None
-    else:
-        profile = None
-
-    # Fall back to first profile if no active profile specified
-    if profile is None:
-        profile = _get_profile_for_account(db, account_id)
-
+    profile = _get_active_profile(request, db, account_id)
     if profile is None:
         return HTMLResponse(
             "<div><h1>No profile</h1><p><a href='/profile'>Create a profile</a></p></div>"
@@ -325,19 +320,7 @@ def generate_text_now(
             status_code=401,
         )
 
-    # Get active profile
-    active_profile_id = request.cookies.get("active_profile_id")
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account_id
-            ).first()
-        except ValueError:
-            profile = None
-    else:
-        profile = _get_profile_for_account(db, account_id)
-
+    profile = _get_active_profile(request, db, account_id)
     if not profile:
         return JSONResponse(
             {"status": "error", "message": "No profile found"},
@@ -462,19 +445,7 @@ def get_next_text(
             status_code=401,
         )
 
-    # Get active profile
-    active_profile_id = request.cookies.get("active_profile_id")
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account_id
-            ).first()
-        except ValueError:
-            profile = None
-    else:
-        profile = _get_profile_for_account(db, account_id)
-
+    profile = _get_active_profile(request, db, account_id)
     if not profile:
         return JSONResponse(
             {"status": "error", "message": "No profile found"},

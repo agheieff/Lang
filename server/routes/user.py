@@ -25,6 +25,48 @@ router = APIRouter(tags=["user"])
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
+# Language info mapping (centralized - also in auth.py middleware)
+LANG_INFO = {
+    "es": {"flag": "🇪🇸", "name": "Spanish"},
+    "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+    "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+    "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
+    "zh-Hans": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+    "zh-Hant": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
+    "en": {"flag": "🇬🇧", "name": "English"},
+    "fr": {"flag": "🇫🇷", "name": "French"},
+    "de": {"flag": "🇩🇪", "name": "German"},
+    "ja": {"flag": "🇯🇵", "name": "Japanese"},
+    "ko": {"flag": "🇰🇷", "name": "Korean"},
+}
+
+
+def _get_lang_info(lang: str) -> dict:
+    """Get language info with fallback for unknown codes."""
+    info = LANG_INFO.get(lang)
+    if not info:
+        if lang.startswith("zh-"):
+            info = {"flag": "🌏", "name": f"Chinese ({lang.split('-')[1].upper()})"}
+        elif lang == "zh":
+            info = {"flag": "🇨🇳", "name": "Chinese"}
+        else:
+            info = {"flag": "🌐", "name": lang.upper()}
+    return info
+
+
+def _get_active_profile(request: Request, account: Account, db: Session) -> Optional[Profile]:
+    """Get active profile from cookie, falling back to first profile."""
+    active_profile_id = request.cookies.get("active_profile_id")
+    if active_profile_id:
+        try:
+            return db.query(Profile).filter(
+                Profile.id == int(active_profile_id),
+                Profile.account_id == account.id
+            ).first()
+        except ValueError:
+            pass
+    return db.query(Profile).filter(Profile.account_id == account.id).first()
+
 
 def _templates() -> Jinja2Templates:
     try:
@@ -55,30 +97,11 @@ def settings_page(
     db: Session = Depends(get_db),
 ):
     t = _templates()
-
-    # Get active profile from cookie
-    active_profile_id = request.cookies.get("active_profile_id")
-    profile = None
-
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account.id
-            ).first()
-        except ValueError:
-            profile = None
-
-    # Fall back to first profile if no active profile specified
-    if profile is None:
-        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
-
-    context = {
+    profile = _get_active_profile(request, account, db)
+    return t.TemplateResponse(request, "pages/settings.html", {
         "title": "Settings",
-        "current_profile": profile,
-    }
-
-    return t.TemplateResponse(request, "pages/settings.html", context)
+        "current_profile": profile
+    })
 
 
 @router.get("/stats", response_class=HTMLResponse)
@@ -88,36 +111,13 @@ def stats_page(
     db: Session = Depends(get_db),
 ):
     t = _templates()
-
-    # Get active profile from cookie
-    active_profile_id = request.cookies.get("active_profile_id")
-    profile = None
-
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account.id
-            ).first()
-        except ValueError:
-            profile = None
-
-    # Fall back to first profile if no active profile specified
-    if profile is None:
-        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    profile = _get_active_profile(request, account, db)
 
     from ..models import Language
-
     default_lang = db.query(Language).filter(Language.code == "es").first()
-    lang_code = (
-        profile.lang if profile else (default_lang.code if default_lang else "en")
-    )
+    lang_code = profile.lang if profile else (default_lang.code if default_lang else "en")
 
-    return t.TemplateResponse(
-        request,
-        "pages/stats.html",
-        {"title": "Statistics", "lang": lang_code},
-    )
+    return t.TemplateResponse(request, "pages/stats.html", {"title": "Statistics", "lang": lang_code})
 
 
 @router.get("/words", response_class=HTMLResponse)
@@ -127,36 +127,13 @@ def words_page(
     db: Session = Depends(get_db),
 ):
     t = _templates()
-
-    # Get active profile from cookie
-    active_profile_id = request.cookies.get("active_profile_id")
-    profile = None
-
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account.id
-            ).first()
-        except ValueError:
-            profile = None
-
-    # Fall back to first profile if no active profile specified
-    if profile is None:
-        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
+    profile = _get_active_profile(request, account, db)
 
     from ..models import Language
-
     default_lang = db.query(Language).filter(Language.code == "es").first()
-    lang_code = (
-        profile.lang if profile else (default_lang.code if default_lang else "en")
-    )
+    lang_code = profile.lang if profile else (default_lang.code if default_lang else "en")
 
-    return t.TemplateResponse(
-        request,
-        "pages/words.html",
-        {"title": "My Words", "lang": lang_code},
-    )
+    return t.TemplateResponse(request, "pages/words.html", {"title": "My Words", "lang": lang_code})
 
 
 # API Endpoints (merged from profile.py and settings.py)
@@ -201,23 +178,7 @@ def get_profile_endpoint(
     db: Session = Depends(get_db),
 ):
     """Get current user profile."""
-    # Get active profile from cookie
-    active_profile_id = request.cookies.get("active_profile_id")
-    profile = None
-
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account.id
-            ).first()
-        except ValueError:
-            profile = None
-
-    # Fall back to first profile if no active profile specified
-    if profile is None:
-        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
-
+    profile = _get_active_profile(request, account, db)
     if not profile:
         raise HTTPException(404, "Profile not found")
 
@@ -461,23 +422,7 @@ def get_current_topics(
     db: Session = Depends(get_db),
 ):
     """Get current topic weights for profile as HTML fragment."""
-    # Get active profile from cookie
-    active_profile_id = request.cookies.get("active_profile_id") if request else None
-    profile = None
-
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account.id
-            ).first()
-        except ValueError:
-            profile = None
-
-    # Fall back to first profile if no active profile specified
-    if profile is None:
-        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
-
+    profile = _get_active_profile(request, account, db) if request else db.query(Profile).filter(Profile.account_id == account.id).first()
     if not profile:
         return '<p class="text-gray-500 text-sm">No profile found.</p>'
 
@@ -544,22 +489,7 @@ async def update_topic_weight(
     Returns:
         Updated topic weight as HTML fragment
     """
-    # Get active profile
-    active_profile_id = request.cookies.get("active_profile_id")
-    profile = None
-
-    if active_profile_id:
-        try:
-            profile = db.query(Profile).filter(
-                Profile.id == int(active_profile_id),
-                Profile.account_id == account.id
-            ).first()
-        except ValueError:
-            pass
-
-    if not profile:
-        profile = db.query(Profile).filter(Profile.account_id == account.id).first()
-
+    profile = _get_active_profile(request, account, db)
     if not profile:
         return '<p class="text-red-500 text-sm">No profile found.</p>'
 
@@ -702,36 +632,9 @@ def list_profiles(
     """Get all profiles for the current user."""
     profiles = db.query(Profile).filter(Profile.account_id == account.id).all()
 
-    # Language code to flag and display name mapping
-    lang_info = {
-        "es": {"flag": "🇪🇸", "name": "Spanish"},
-        "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
-        "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},  # Legacy code fallback
-        "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
-        "zh-Hans": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},  # Another legacy fallback
-        "zh-Hant": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},  # Another legacy fallback
-        "en": {"flag": "🇬🇧", "name": "English"},
-        "fr": {"flag": "🇫🇷", "name": "French"},
-        "de": {"flag": "🇩🇪", "name": "German"},
-        "ja": {"flag": "🇯🇵", "name": "Japanese"},
-        "ko": {"flag": "🇰🇷", "name": "Korean"},
-    }
-
     result = []
     for p in profiles:
-        # Get language info with fallback
-        lang = p.lang
-        info = lang_info.get(lang)
-
-        if not info:
-            # Generate a display name from the language code
-            if lang.startswith("zh-"):
-                info = {"flag": "🌏", "name": f"Chinese ({lang.split('-')[1].upper()})"}
-            elif lang == "zh":
-                info = {"flag": "🇨🇳", "name": "Chinese"}
-            else:
-                info = {"flag": "🌐", "name": lang.upper()}
-
+        info = _get_lang_info(p.lang)
         result.append({
             "id": p.id,
             "lang": p.lang,

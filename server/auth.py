@@ -246,6 +246,17 @@ class SQLAlchemyRepo(AuthRepository):
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 
+    @staticmethod
+    def _normalize_email(email: str) -> str:
+        return email.strip().lower()
+
+    def _find_by_email(self, session, email: str):
+        return (
+            session.query(Account)
+            .filter(Account.email == self._normalize_email(email))
+            .first()
+        )
+
     def _to_dict(self, account: Account) -> Dict[str, Any]:
         return {
             "id": account.id,
@@ -263,20 +274,12 @@ class SQLAlchemyRepo(AuthRepository):
 
     def find_account_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         with self.session_factory() as session:
-            account = (
-                session.query(Account)
-                .filter(Account.email == email.strip().lower())
-                .first()
-            )
+            account = self._find_by_email(session, email)
             return self._public_dict(account) if account else None
 
     def get_account_credentials(self, email: str) -> Optional[Dict[str, Any]]:
         with self.session_factory() as session:
-            account = (
-                session.query(Account)
-                .filter(Account.email == email.strip().lower())
-                .first()
-            )
+            account = self._find_by_email(session, email)
             if not account:
                 return None
             return {
@@ -290,11 +293,7 @@ class SQLAlchemyRepo(AuthRepository):
         self, email: str, password_hash: str, subscription_tier: str = "Free"
     ) -> Dict[str, Any]:
         with self.session_factory() as session:
-            if (
-                session.query(Account)
-                .filter(Account.email == email.strip().lower())
-                .first()
-            ):
+            if self._find_by_email(session, email):
                 raise ValueError("email already registered")
 
             # Check if this is the first account - make it admin
@@ -303,7 +302,7 @@ class SQLAlchemyRepo(AuthRepository):
                 subscription_tier = "admin"
 
             account = Account(
-                email=email.strip().lower(),
+                email=self._normalize_email(email),
                 password_hash=password_hash,
                 is_active=True,
                 is_verified=True,

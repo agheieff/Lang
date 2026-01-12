@@ -66,8 +66,6 @@ def select_topic_for_profile(db: Session, profile: Profile) -> str:
 
 def get_topic_coverage(db: Session, lang: str, target_lang: str) -> Dict[str, int]:
     """Get count of ready texts per topic for a language pair."""
-    from server.models import ReadingText
-
     coverage = {topic: 0 for topic in AVAILABLE_TOPICS}
     coverage["other"] = 0  # For texts with no/unknown topic
 
