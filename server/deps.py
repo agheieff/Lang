@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional, Callable
 import logging
-
 import os
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -66,7 +66,6 @@ def get_current_account(
         # Defense in depth: check expiration explicitly
         if "exp" in data:
             try:
-                from datetime import datetime, timezone
                 exp_timestamp = int(data["exp"])
                 if datetime.now(timezone.utc).timestamp() > exp_timestamp:
                     logger.warning("Authentication failed: Token expired")

@@ -192,4 +192,4 @@ _SETTINGS = _Settings()
 
 
 def get_settings() -> _Settings:
-    return _Settings()
+    return _SETTINGS
