@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional
 from datetime import datetime, timezone
 import logging
-from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -22,11 +21,6 @@ from server.deps import get_current_account
 
 # Move service imports to top
 from server.services.recommendation import select_best_text
-# NOTE: Old tracking system disabled - using new reading-text-log system instead
-# from server.services.learning import (
-#     track_interactions_from_session,
-#     update_level_from_text,
-# )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reading"])
@@ -57,38 +51,6 @@ def _get_active_profile(request: Request, db: Session, account_id: int) -> Optio
         except ValueError:
             pass
     return _get_profile_for_account(db, account_id)
-
-
-# Pydantic models for request validation
-class WordInteraction(BaseModel):
-    surface: str
-    lemma: Optional[str] = None
-    pos: str = "NOUN"
-    span_start: int
-    span_end: int
-    clicked: bool = False
-    click_count: int = 0
-    translation_viewed: bool = False
-    translation_viewed_at: Optional[float] = None
-    timestamp: Optional[float] = None
-
-
-class SessionData(BaseModel):
-    exposed_at: Optional[float] = None
-    words: List[WordInteraction] = []
-    sentences: Optional[List[Dict[str, Any]]] = None
-    full_translation_views: Optional[List[Dict[str, Any]]] = None
-
-
-class WordClickRequest(BaseModel):
-    text_id: int = Field(..., gt=0, description="Text ID")
-    word_data: Optional[Dict[str, Any]] = None
-    session_data: Optional[SessionData] = None
-
-
-class SaveSessionRequest(BaseModel):
-    text_id: int = Field(..., gt=0, description="Text ID")
-    session_data: Optional[SessionData] = None
 
 
 # Demo text for when no texts are available
@@ -565,152 +527,3 @@ def get_next_text(
             "text_id": None,
             "texts_to_generate": texts_to_generate,
         }, status_code=202)
-
-
-# @router.post("/reading/word-click")  # DISABLED - using new reading-text-log system
-def word_click(
-    data: WordClickRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Track word clicks for SRS."""
-
-    try:
-        account_id = _get_account_id(request)
-        if not account_id:
-            return JSONResponse(
-                {"status": "error", "message": "Not authenticated"}, status_code=401
-            )
-
-        # Get profile from account_id
-        profile = _get_profile_for_account(db, account_id)
-        if not profile:
-            return JSONResponse(
-                {"status": "error", "message": "Profile not found"}, status_code=404
-            )
-
-        # Track all interactions from session data (includes clicks with timestamps)
-        if data.session_data and data.session_data.words:
-            track_interactions_from_session(
-                db=db,
-                account_id=account_id,
-                profile_id=profile.id,
-                text_id=data.text_id,
-                interactions=[
-                    {
-                        "surface": w.surface,
-                        "lemma": w.lemma or w.surface,
-                        "pos": w.pos,
-                        "span_start": w.span_start,
-                        "span_end": w.span_end,
-                        "clicked": w.clicked,
-                        "click_count": w.click_count,
-                        "translation_viewed": w.translation_viewed,
-                    }
-                    for w in data.session_data.words
-                ],
-            )
-
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Error in word_click: {e}", exc_info=True)
-        return JSONResponse(
-            {"status": "error", "message": "Internal server error"}, status_code=500
-        )
-
-
-# @router.post("/reading/save-session")  # DISABLED - using new reading-text-log system
-def save_session(
-    data: SaveSessionRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Save reading session and update user level."""
-
-    try:
-        account_id = _get_account_id(request)
-        if not account_id:
-            return JSONResponse(
-                {"status": "error", "message": "Not authenticated"}, status_code=401
-            )
-
-        if not data.text_id:
-            return JSONResponse(
-                {"status": "error", "message": "Missing text_id"}, status_code=400
-            )
-
-        # Get profile from account_id
-        profile = _get_profile_for_account(db, account_id)
-        if not profile:
-            return JSONResponse(
-                {"status": "error", "message": "Profile not found"}, status_code=404
-            )
-
-        # Process session data
-        session_data = data.session_data or SessionData()
-        words = session_data.words or []
-        sentences = session_data.sentences or []
-
-        # Track text exposure (when user first saw full text)
-        if session_data.exposed_at:
-            # Convert JS timestamp to datetime
-            exposed_dt = datetime.fromtimestamp(
-                session_data.exposed_at / 1000.0, tz=timezone.utc
-            )
-
-            # Check if this text was already tracked as read
-            existing_read = (
-                db.query(ProfileTextRead)
-                .filter(
-                    ProfileTextRead.profile_id == profile.id,
-                    ProfileTextRead.text_id == data.text_id,
-                )
-                .first()
-            )
-
-            if not existing_read:
-                # Create read entry when session is saved
-                read_entry = ProfileTextRead(
-                    profile_id=profile.id,
-                    text_id=data.text_id,
-                    read_count=1,
-                    first_read_at=exposed_dt,
-                    last_read_at=exposed_dt,
-                )
-                db.add(read_entry)
-                db.commit()
-
-        # Process word interactions
-        word_interactions = []
-        for word in words:
-            interaction = {
-                "surface": word.surface,
-                "lemma": word.lemma or word.surface,
-                "pos": word.pos,
-                "span_start": word.span_start,
-                "span_end": word.span_end,
-                "clicked": word.clicked,
-                "click_count": word.click_count,
-                "translation_viewed": word.translation_viewed,
-                "translation_viewed_at": word.translation_viewed_at,
-                "timestamp": word.timestamp,
-            }
-            word_interactions.append(interaction)
-
-        # Update user level based on all interactions
-        new_level, new_var = update_level_from_text(
-            db=db, profile=profile, text_id=data.text_id, interactions=word_interactions
-        )
-
-        return {
-            "status": "ok",
-            "level_value": new_level,
-            "level_var": new_var,
-            "processed_words": len(word_interactions),
-            "processed_sentences": len(sentences),
-        }
-    except Exception as e:
-        logger.error(f"Error in save_session: {e}", exc_info=True)
-        return JSONResponse(
-            {"status": "error", "message": "Internal server error"}, status_code=500
-        )

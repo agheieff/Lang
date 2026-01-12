@@ -19,6 +19,8 @@ __pycache__/
 
 # Environment files
 .env
+.env.backup
+.env.*
 
 # Package manager lock files
 uv.lock

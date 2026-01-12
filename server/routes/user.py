@@ -14,6 +14,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from server.auth import Account  # type: ignore
 from server.llm.client import chat_complete
+from server.config import LANG_INFO
 
 from ..deps import get_current_account as _get_current_account
 from ..db import get_db, db_transaction
@@ -24,21 +25,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["user"])
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
-
-# Language info mapping (centralized - also in auth.py middleware)
-LANG_INFO = {
-    "es": {"flag": "🇪🇸", "name": "Spanish"},
-    "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
-    "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
-    "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
-    "zh-Hans": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
-    "zh-Hant": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
-    "en": {"flag": "🇬🇧", "name": "English"},
-    "fr": {"flag": "🇫🇷", "name": "French"},
-    "de": {"flag": "🇩🇪", "name": "German"},
-    "ja": {"flag": "🇯🇵", "name": "Japanese"},
-    "ko": {"flag": "🇰🇷", "name": "Korean"},
-}
 
 
 def _get_lang_info(lang: str) -> dict:

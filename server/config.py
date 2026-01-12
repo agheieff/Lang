@@ -18,6 +18,22 @@ class _Settings:
     )
 
 
+# Language info mapping (shared across auth middleware and user routes)
+LANG_INFO: Dict[str, Dict[str, str]] = {
+    "es": {"flag": "🇪🇸", "name": "Spanish"},
+    "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+    "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+    "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
+    "zh-Hans": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
+    "zh-Hant": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
+    "en": {"flag": "🇬🇧", "name": "English"},
+    "fr": {"flag": "🇫🇷", "name": "French"},
+    "de": {"flag": "🇩🇪", "name": "German"},
+    "ja": {"flag": "🇯🇵", "name": "Japanese"},
+    "ko": {"flag": "🇰🇷", "name": "Korean"},
+}
+
+
 # Enum for subscription tiers
 class SubscriptionTier(str, Enum):
     """Enum for subscription tiers with string values."""

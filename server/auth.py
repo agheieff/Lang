@@ -18,6 +18,8 @@ from passlib.context import CryptContext
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from server.config import LANG_INFO
+
 
 # =============================================================================
 # Database Models - Import from central models
@@ -566,21 +568,8 @@ class CookieUserMiddleware(BaseHTTPMiddleware):
 
                                 # Add computed attributes to profile
                                 if profile:
-                                    # Language code to flag and display name mapping
-                                    lang_info = {
-                                        "es": {"flag": "🇪🇸", "name": "Spanish"},
-                                        "zh-CN": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},
-                                        "zh": {"flag": "🇨🇳", "name": "Chinese (Simplified)"},  # Legacy
-                                        "zh-TW": {"flag": "🇹🇼", "name": "Chinese (Traditional)"},
-                                        "en": {"flag": "🇬🇧", "name": "English"},
-                                        "fr": {"flag": "🇫🇷", "name": "French"},
-                                        "de": {"flag": "🇩🇪", "name": "German"},
-                                        "ja": {"flag": "🇯🇵", "name": "Japanese"},
-                                        "ko": {"flag": "🇰🇷", "name": "Korean"},
-                                    }
-
                                     lang = profile.lang
-                                    info = lang_info.get(lang)
+                                    info = LANG_INFO.get(lang)
 
                                     if not info:
                                         # Generate a display name from the language code
