@@ -195,6 +195,7 @@ class Profile(Base):
         UniqueConstraint(
             "account_id", "lang", "target_lang", name="uq_profile_account_lang_target"
         ),
+        Index("ix_profile_queue_dirty", "queue_dirty", "preferences_updating"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -221,6 +222,11 @@ class Profile(Base):
 
     # Async preferences update tracking
     preferences_updating: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Queue invalidation tracking
+    queue_dirty: Mapped[bool] = mapped_column(Boolean, default=False)
+    queue_built_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    queue_dirty_reason: Mapped[Optional[str]] = mapped_column(String(64), default=None)
 
     # Re-read settings: None = never show again, 0 = always allow, N = cooldown in days
     reread_cooldown_days: Mapped[Optional[int]] = mapped_column(

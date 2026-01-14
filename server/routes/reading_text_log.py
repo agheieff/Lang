@@ -154,6 +154,15 @@ def log_text_state(
             )
             logger.info(f"[TextState] SRS updated: {srs_result}")
 
+            # Check if vocabulary changed significantly and mark queue dirty for rebuild
+            if srs_result.get('significant_change', False):
+                from server.services.generation_controller import mark_profile_queue_dirty
+                mark_profile_queue_dirty(db, profile_id, reason="vocab")
+                logger.info(
+                    f"[TextState] Vocabulary changed significantly "
+                    f"({srs_result.get('significant_count', 0)} words), queue marked dirty"
+                )
+
             # Adjust profile level based on reading performance (ELO-style)
             profile = db.query(Profile).filter(Profile.id == profile_id).first()
             if profile:

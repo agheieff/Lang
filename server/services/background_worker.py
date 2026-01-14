@@ -104,38 +104,51 @@ async def maintenance_cycle():
     logger.info("Starting maintenance cycle")
 
     with SessionLocal() as db:
-        # Check if pool is already saturated before detecting gaps
-        from server.models import ReadingText, Profile
-
-        total_ready = (
-            db.query(ReadingText)
-            .filter(
-                ReadingText.words_complete == True,
-                ReadingText.sentences_complete == True,
-            )
-            .count()
+        from server.models import Profile
+        from server.services.generation_controller import (
+            rebuild_dirty_queues,
+            should_generate_for_profile,
         )
-        active_profiles = db.query(Profile).filter(Profile.preferences_updating == False).count()
 
-        # If we have 20+ ready texts per active profile, don't generate more
-        if active_profiles > 0 and total_ready >= (20 * active_profiles):
-            logger.info(
-                f"Pool saturated: {total_ready} ready texts for {active_profiles} profiles, skipping generation"
-            )
+        # Step 1: Rebuild dirty queues (preference/vocabulary changes)
+        rebuilt = rebuild_dirty_queues(db, limit=20)
+        if rebuilt > 0:
+            logger.info(f"Rebuilt {rebuilt} dirty queues")
+
+        # Step 2: Check generation desire for all active profiles
+        active_profiles = (
+            db.query(Profile)
+            .filter(Profile.preferences_updating == False)
+            .all()
+        )
+
+        generation_requests = []
+        for profile in active_profiles:
+            should_gen, count, reason = should_generate_for_profile(db, profile)
+            if should_gen:
+                # Create request object compatible with generation
+                from server.services.recommendation import TextRequest
+                request = TextRequest(
+                    profile_id=profile.id,
+                    lang=profile.lang,
+                    target_lang=profile.target_lang,
+                )
+                # Store count as attribute
+                request.generation_count = count
+                request.generation_reason = reason
+                generation_requests.append(request)
+
+        if generation_requests:
+            logger.info(f"Found {len(generation_requests)} generation requests")
+            # Fill gaps with new desire-based logic
+            await fill_gaps_with_desire(db, generation_requests)
         else:
-            # Step 1: Detect pool gaps
-            gaps = detect_pool_gaps(db, threshold=3.0)
+            logger.debug("No generation needed (all profiles saturated)")
 
-            if gaps:
-                logger.info(f"Found {len(gaps)} pool gaps")
-                await fill_gaps(db, gaps)
-            else:
-                logger.debug("No pool gaps detected")
-
-        # Step 2: Retry failed translations
+        # Step 3: Retry failed translations
         await retry_failed_translations(db)
 
-        # Step 3: Clean up old texts
+        # Step 4: Clean up old texts
         cleanup_old_texts(db)
 
     logger.info("Maintenance cycle completed")
@@ -220,6 +233,54 @@ async def fill_gaps(db: Session, gaps: List) -> None:
         logger.info(f"Gap fill results: {success_count}/{len(results)} successful")
 
 
+async def fill_gaps_with_desire(
+    db: Session,
+    requests: List,
+) -> None:
+    """Generate texts based on desire scoring."""
+    if not requests:
+        return
+
+    # Get currently locked profile IDs
+    locked_profile_ids = _get_locked_profile_ids()
+
+    # Filter out locked profiles
+    available_requests = [
+        r for r in requests
+        if r.profile_id not in locked_profile_ids
+    ]
+
+    if len(available_requests) < len(requests):
+        logger.info(
+            f"Filtered out {len(requests) - len(available_requests)} "
+            "requests due to active generation"
+        )
+
+    if not available_requests:
+        logger.debug("No available requests to fill (all locked)")
+        return
+
+    # Flatten requests: 1 request might generate 1-3 texts
+    generation_tasks = []
+    for req in available_requests[:MAX_GENERATION_CONCURRENCY]:
+        count = getattr(req, 'generation_count', 1)
+        for i in range(count):
+            generation_tasks.append((req, i))
+
+    # Limit total concurrent generations
+    semaphore = asyncio.Semaphore(MAX_GENERATION_CONCURRENCY)
+    tasks = []
+
+    for req, index in generation_tasks[:MAX_GENERATION_CONCURRENCY]:
+        task = _generate_text_for_request(db, req, semaphore, index)
+        tasks.append(task)
+
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        success_count = sum(1 for r in results if not isinstance(r, Exception))
+        logger.info(f"Generation results: {success_count}/{len(results)} successful")
+
+
 async def _generate_text_for_gap(
     db: Session, gap, semaphore: asyncio.Semaphore, index: int = 0
 ) -> None:
@@ -291,6 +352,75 @@ async def _generate_text_for_gap(
                 logger.error(f"Error generating text for gap: {e}", exc_info=True)
     finally:
         # Always release the lock when done
+        _release_generation_lock(profile_id)
+
+
+async def _generate_text_for_request(
+    db: Session, request, semaphore: asyncio.Semaphore, index: int = 0
+) -> None:
+    """Generate a text for a specific desire-based request."""
+    profile_id = request.profile_id
+
+    if not _acquire_generation_lock(profile_id):
+        logger.debug(f"Could not acquire lock for profile {profile_id}")
+        return
+
+    try:
+        async with semaphore:
+            from server.models import Profile
+            from server.services.recommendation import (
+                select_topic_for_profile,
+                select_diverse_topic,
+            )
+
+            profile = db.query(Profile).filter(Profile.id == profile_id).first()
+            if not profile:
+                logger.warning(f"Profile {profile_id} not found")
+                return
+
+            reason = getattr(request, 'generation_reason', 'unknown')
+            logger.info(
+                f"Generating text for profile {profile.id} "
+                f"(reason: {reason}, index: {index})"
+            )
+
+            # Extract target words from request if available
+            target_words = request.target_words if hasattr(request, 'target_words') else None
+
+            # Select topic with diversity consideration
+            preferred_topic = select_topic_for_profile(db, profile)
+            selected_topic = select_diverse_topic(db, profile, preferred_topic)
+
+            # Generate text content
+            text_obj = await generate_text_content(
+                account_id=profile.account_id,
+                profile_id=profile.id,
+                lang=profile.lang,
+                target_lang=profile.target_lang,
+                profile=profile,
+                target_words=target_words,
+                topic=selected_topic,
+            )
+
+            if not text_obj:
+                logger.error(f"Failed to generate text for profile {profile.id}")
+                return
+
+            # Generate translations
+            success = await generate_translations(
+                text_id=text_obj.id,
+                lang=profile.lang,
+                target_lang=profile.target_lang,
+            )
+
+            if success:
+                logger.info(f"Generated text {text_obj.id} for profile {profile.id}")
+            else:
+                logger.warning(f"Text {text_obj.id} generated but translations failed")
+
+    except Exception as e:
+        logger.error(f"Error generating text: {e}", exc_info=True)
+    finally:
         _release_generation_lock(profile_id)
 
 

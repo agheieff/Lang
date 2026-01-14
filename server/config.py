@@ -170,6 +170,23 @@ POOL_CI_VARIANCE: float = _f(
     "ARC_POOL_CI_VARIANCE", 0.05
 )  # How much to vary CI target in pool
 
+# Hybrid generation pool settings
+POOL_MIN_SIZE: int = _i("ARC_POOL_MIN_SIZE", 10)
+POOL_TARGET_SIZE: int = _i("ARC_POOL_TARGET_SIZE", 12)
+POOL_MAX_SIZE: int = _i("ARC_POOL_MAX_SIZE", 15)
+
+# Generation desire thresholds
+GEN_DESIRE_URGENT: float = _f("ARC_GEN_DESIRE_URGENT", 0.6)
+GEN_DESIRE_NORMAL: float = _f("ARC_GEN_DESIRE_NORMAL", 0.3)
+GEN_QUALITY_THRESHOLD: float = _f("ARC_GEN_QUALITY_THRESHOLD", 3.0)
+
+# Vocabulary change thresholds
+VOCAB_SIGNIFICANT_COUNT: int = _i("ARC_VOCAB_SIGNIFICANT_COUNT", 5)
+VOCAB_FAMILIARITY_THRESHOLD: float = _f("ARC_VOCAB_FAMILIARITY_THRESHOLD", 0.2)
+
+# Queue rebuild settings
+QUEUE_DIRTY_REBUILD_LIMIT: int = _i("ARC_QUEUE_DIRTY_REBUILD_LIMIT", 20)
+
 # Topic categories for text generation (path-based strings, hierarchy-ready)
 TOPICS: list[str] = [
     "fiction",

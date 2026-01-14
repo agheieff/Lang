@@ -329,8 +329,10 @@ def batch_update_lexemes_from_text_state(
         current_time: Timestamp for updates
 
     Returns:
-        Summary dict with updated/clicked/total/failed counts
+        Summary dict with updated/clicked/total/failed counts and significant_change flag
     """
+    from server.config import VOCAB_FAMILIARITY_THRESHOLD, VOCAB_SIGNIFICANT_COUNT
+
     if not current_time:
         current_time = datetime.now(timezone.utc)
 
@@ -339,6 +341,7 @@ def batch_update_lexemes_from_text_state(
     total = 0
     failed = 0
     failures = []
+    significant_changes = 0  # Track significant familiarity changes
 
     for word_data in words:
         try:
@@ -387,6 +390,10 @@ def batch_update_lexemes_from_text_state(
                 if lexeme.familiarity is not None:
                     lexeme.familiarity = max(0.0, lexeme.familiarity - learning_effect)
 
+                    # Track significant change
+                    if old_fam is not None and abs(lexeme.familiarity - old_fam) > VOCAB_FAMILIARITY_THRESHOLD:
+                        significant_changes += 1
+
                     # Increase variance (we're less certain after unexpected clicks)
                     if lexeme.familiarity_variance is not None:
                         lexeme.familiarity_variance = min(0.25, lexeme.familiarity_variance + VARIANCE_REDUCTION * click_count)
@@ -406,6 +413,10 @@ def batch_update_lexemes_from_text_state(
 
                 if lexeme.familiarity is not None:
                     lexeme.familiarity = min(1.0, lexeme.familiarity + LEARNING_RATE_NO_CLICK)
+
+                    # Track significant change
+                    if old_fam is not None and abs(lexeme.familiarity - old_fam) > VOCAB_FAMILIARITY_THRESHOLD:
+                        significant_changes += 1
 
                     # Decrease variance (we're more confident after successful non-click)
                     if lexeme.familiarity_variance is not None:
@@ -465,6 +476,8 @@ def batch_update_lexemes_from_text_state(
         "total": total,
         "failed": failed,
         "failures": failures,
+        "significant_change": significant_changes >= VOCAB_SIGNIFICANT_COUNT,
+        "significant_count": significant_changes,
     }
 
 
