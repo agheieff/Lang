@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from server.base_path import BASE_PATH, app_path
 from server.characters import get_characters_state
 from server.db import init_all_databases, session_scope
 from server.grammar import get_grammar_state
@@ -139,7 +140,7 @@ def index(request: Request) -> RedirectResponse:
         workspace = registry.resolve(requested)
     except (LookupError, ValueError):
         workspace = registry.resolve(registry.selected_id())
-    return RedirectResponse(url=f"/p/{workspace.profile_id}", status_code=307)
+    return RedirectResponse(url=app_path(f"/p/{workspace.profile_id}"), status_code=307)
 
 
 @app.get("/p/{profile_id}", response_class=HTMLResponse, include_in_schema=False)
@@ -157,6 +158,7 @@ def profile_page(request: Request, profile_id: str, view: str | None = None) -> 
             "workspace": workspace,
             "initial_view": initial_view,
             "show_characters": show_characters,
+            "base_path": BASE_PATH,
             "profile_options": [profile_option(item) for item in registry.list()],
         },
     )
@@ -165,7 +167,7 @@ def profile_page(request: Request, profile_id: str, view: str | None = None) -> 
         workspace.profile_id,
         httponly=True,
         samesite="lax",
-        path="/",
+        path=BASE_PATH or "/",
     )
     return response
 

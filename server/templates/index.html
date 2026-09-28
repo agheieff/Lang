@@ -18,16 +18,16 @@
         if (themeColor) themeColor.content = theme === "dark" ? dark : light;
       })();
     </script>
-    <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="stylesheet" href="{{ base_path }}/assets/styles.css">
   </head>
-  <body data-profile-id="{{ workspace.profile_id }}" data-initial-view="{{ initial_view }}">
+  <body data-base-path="{{ base_path }}" data-profile-id="{{ workspace.profile_id }}" data-initial-view="{{ initial_view }}">
     <a class="skip-link"
        href="{% if initial_view == 'words' %}#words-search{% elif initial_view == 'characters' %}#characters-search{% elif initial_view == 'grammar' %}#grammar-search{% elif initial_view == 'texts' %}#texts-heading{% elif initial_view == 'statistics' %}#statistics-heading{% elif initial_view == 'settings' %}#theme-settings{% else %}#lesson-content{% endif %}">
       Skip to {% if initial_view == 'words' %}words{% elif initial_view == 'characters' %}characters{% elif initial_view == 'grammar' %}grammar{% elif initial_view == 'texts' %}texts{% elif initial_view == 'statistics' %}statistics{% elif initial_view == 'settings' %}settings{% else %}the lesson{% endif %}
     </a>
 
     <header class="app-header">
-      <a class="brand" href="/p/{{ workspace.profile_id }}" aria-label="Lang Reader home">
+      <a class="brand" href="{{ base_path }}/p/{{ workspace.profile_id }}" aria-label="Lang Reader home">
         <span class="brand-mark" aria-hidden="true">L</span>
         <span>Lang Reader</span>
       </a>
@@ -50,21 +50,21 @@
         <nav class="rail-nav" aria-label="Primary navigation">
           <p class="rail-heading">Library</p>
           <a class="rail-item{% if initial_view == 'reading' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}"
              {% if initial_view == 'reading' %}aria-current="page"{% endif %}
              aria-label="Reading">
             <span class="rail-icon" aria-hidden="true">R</span>
             <span class="rail-label">Reading</span>
           </a>
           <a class="rail-item{% if initial_view == 'texts' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}?view=texts"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}?view=texts"
              {% if initial_view == 'texts' %}aria-current="page"{% endif %}
              aria-label="Texts">
             <span class="rail-icon" aria-hidden="true">T</span>
             <span class="rail-label">Texts</span>
           </a>
           <a class="rail-item{% if initial_view == 'words' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}?view=words"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}?view=words"
              {% if initial_view == 'words' %}aria-current="page"{% endif %}
              aria-label="Words">
             <span class="rail-icon" aria-hidden="true">W</span>
@@ -72,7 +72,7 @@
           </a>
           {% if show_characters %}
           <a class="rail-item{% if initial_view == 'characters' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}?view=characters"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}?view=characters"
              {% if initial_view == 'characters' %}aria-current="page"{% endif %}
              aria-label="Characters">
             <span class="rail-icon" aria-hidden="true">字</span>
@@ -80,7 +80,7 @@
           </a>
           {% endif %}
           <a class="rail-item{% if initial_view == 'grammar' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}?view=grammar"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}?view=grammar"
              {% if initial_view == 'grammar' %}aria-current="page"{% endif %}
              aria-label="Grammar">
             <span class="rail-icon" aria-hidden="true">G</span>
@@ -92,14 +92,14 @@
             <span class="rail-status">Soon</span>
           </button>
           <a class="rail-item{% if initial_view == 'statistics' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}?view=statistics"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}?view=statistics"
              {% if initial_view == 'statistics' %}aria-current="page"{% endif %}
              aria-label="Statistics">
             <span class="rail-icon" aria-hidden="true">▥</span>
             <span class="rail-label">Statistics</span>
           </a>
           <a class="rail-item{% if initial_view == 'settings' %} rail-item-active{% endif %}"
-             href="/p/{{ workspace.profile_id }}?view=settings"
+             href="{{ base_path }}/p/{{ workspace.profile_id }}?view=settings"
              {% if initial_view == 'settings' %}aria-current="page"{% endif %}
              aria-label="Settings">
             <span class="rail-icon" aria-hidden="true">⚙</span>
@@ -232,7 +232,7 @@
             <strong id="reader-mode-title"></strong>
             <span id="reader-mode-detail"></span>
           </div>
-          <a class="reader-mode-back" href="/p/{{ workspace.profile_id }}?view=texts">
+          <a class="reader-mode-back" href="{{ base_path }}/p/{{ workspace.profile_id }}?view=texts">
             Back to texts
           </a>
         </aside>
@@ -900,6 +900,6 @@
     <div id="action-status-message" class="action-status-message" role="status"
          aria-live="polite" aria-atomic="true" hidden></div>
     <div id="status-message" class="status-message" role="status" aria-live="polite" hidden></div>
-    <script type="module" src="/assets/app.js"></script>
+    <script type="module" src="{{ base_path }}/assets/app.js"></script>
   </body>
 </html>

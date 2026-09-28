@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -152,3 +153,32 @@ def test_reader_api_returns_lesson_and_maps_missing_id(
 
     missing = api_client.get("/api/reader", params={"lesson_id": 999})
     assert missing.status_code == 404
+
+
+def test_public_base_path_prefixes_browser_urls(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import server.main
+
+    monkeypatch.setattr(server.main, "BASE_PATH", "/lang")
+    monkeypatch.setattr(server.main, "app_path", lambda path: f"/lang{path}")
+
+    root = api_client.get("/", follow_redirects=False)
+    page = api_client.get("/p/es-es", params={"view": "texts"})
+
+    assert root.headers["location"].startswith("/lang/p/")
+    assert 'data-base-path="/lang"' in page.text
+    assert 'href="/lang/p/es-es?view=texts"' in page.text
+    assert 'src="/lang/assets/app.js"' in page.text
+    assert 'href="/p/' not in page.text
+    assert "Path=/lang" in page.headers["set-cookie"]
+
+
+def test_base_path_rejects_ambiguous_prefixes() -> None:
+    from server.base_path import parse_base_path
+
+    assert parse_base_path("") == ""
+    assert parse_base_path("/lang") == "/lang"
+    for value in ("/", "lang", "/lang/", "/a b", "//x"):
+        with pytest.raises(ValueError):
+            parse_base_path(value)

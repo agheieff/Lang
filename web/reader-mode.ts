@@ -1,3 +1,5 @@
+import { appPath } from "./base-path.js";
+
 export type ReaderMode = "standard" | "reread" | "preview";
 export type TextAction = "read" | "continue" | "reread" | "preview";
 
@@ -32,7 +34,7 @@ export function textActionHref(profileId: string, lessonId: number, action: Text
   const parameters = new URLSearchParams({ lesson_id: String(lessonId) });
   if (action === "preview") parameters.set("mode", "preview");
   if (action === "reread") parameters.set("mode", "reread");
-  return `/p/${encodeURIComponent(profileId)}?${parameters.toString()}`;
+  return appPath(`/p/${encodeURIComponent(profileId)}?${parameters.toString()}`);
 }
 
 export function readerApiPath(profileApi: string, launch: ReaderLaunch): string {

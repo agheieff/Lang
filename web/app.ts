@@ -9,6 +9,7 @@ import {
   type StartingPoint,
 } from "./activation.js";
 import { ActiveTimer } from "./active-time.js";
+import { appPath } from "./base-path.js";
 import {
   type CharactersPayload,
   type CharacterView,
@@ -232,7 +233,7 @@ const VIEW_ERROR_COPY: Partial<Record<InitialView, { eyebrow: string; heading: s
     heading: "We couldn’t load your vocabulary.",
   },
 };
-const profileApi = `/api/profiles/${encodeURIComponent(profileId)}`;
+const profileApi = appPath(`/api/profiles/${encodeURIComponent(profileId)}`);
 const toneColorPreference = new ToneColorPreference(
   window.localStorage,
   toneColorStorageKey(profileId),
@@ -2563,7 +2564,7 @@ async function skipCurrentLesson(): Promise<void> {
   }
 
   showActionStatus(`Skipped “${skippedTitle}” for now. Opening the next text…`);
-  window.history.replaceState(null, "", `/p/${encodeURIComponent(profileId)}`);
+  window.history.replaceState(null, "", appPath(`/p/${encodeURIComponent(profileId)}`));
   try {
     await loadLesson();
     if (!readerView.hidden) byId("lesson-title").focus({ preventScroll: true });
@@ -2945,7 +2946,7 @@ profileSwitch.addEventListener("change", () => {
   activeTimer.save();
   if (readerModeRecordsEvidence(readerMode)) events.sendOnExit();
   const suffix = initialView === "reading" ? "" : `?view=${initialView}`;
-  window.location.assign(`/p/${encodeURIComponent(profileSwitch.value)}${suffix}`);
+  window.location.assign(appPath(`/p/${encodeURIComponent(profileSwitch.value)}${suffix}`));
 });
 document.addEventListener("pointerdown", (event) => {
   const target = event.target;

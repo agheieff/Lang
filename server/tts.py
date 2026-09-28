@@ -14,6 +14,7 @@ from pydantic import Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from server.base_path import app_path
 from server.clock import utc_now
 from server.lesson_content import body_sentences, lesson_document
 from server.models import AudioTask, Interaction, Lesson, Profile
@@ -462,7 +463,9 @@ def audio_status(db: Session, workspace: Workspace, lesson_id: int) -> LessonAud
                 reason="ready",
                 voice_id=voice_id,
                 voice_label=voice.label,
-                audio_url=f"/api/profiles/{workspace.profile_id}/lessons/{lesson.id}/audio",
+                audio_url=app_path(
+                    f"/api/profiles/{workspace.profile_id}/lessons/{lesson.id}/audio"
+                ),
             )
         task.state = "pending"
         task.relative_path = None
