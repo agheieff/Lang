@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from server.learning import (
     validate_lesson,
 )
 from server.lexeme_learning import rebuild_lexeme_states
+from server.memory_model import FSRS_DEFAULT_WEIGHTS
 from server.models import Interaction, Lesson, LexemeState, ProficiencyState
 from server.schemas import ReaderState
 
@@ -276,10 +278,11 @@ def test_annotated_title_terms_participate_in_event_validation_and_evidence(
     assert states["es:mundo:NOUN"].qualified_exposures == 1
 
 
-def test_reveals_are_graded_across_sessions_and_capped_within_a_session(
+def test_reveals_are_lapses_across_sessions_and_capped_within_a_session(
     db: Session, lesson_factory: Any, event_factory: Any
 ) -> None:
-    term = ("es:comprobar:VERB", "comprobar", "comprobar", "VERB", "check", 500)
+    # A rare word: its frequency prior is negligible, so the first lapse starts from FSRS values.
+    term = ("es:comprobar:VERB", "comprobar", "comprobar", "VERB", "check", 40_000)
     first_lesson = import_lesson(
         db,
         lesson_factory(key="graded-reveal-one", terms=[term], targets=[]),
@@ -311,8 +314,8 @@ def test_reveals_are_graded_across_sessions_and_capped_within_a_session(
     )
     first = _states(db)[term[0]]
     assert first.reveal_failures == 1
-    assert first.beta == pytest.approx(2.25)
-    assert first.stability_days == pytest.approx(0.428125)
+    assert first.beta == pytest.approx(3.0)
+    assert first.stability_days == pytest.approx(FSRS_DEFAULT_WEIGHTS[0])
 
     record_events(
         db,
@@ -337,8 +340,8 @@ def test_reveals_are_graded_across_sessions_and_capped_within_a_session(
     )
     repeated = _states(db)[term[0]]
     assert repeated.reveal_failures == 3
-    assert repeated.beta == pytest.approx(3.85)
-    assert repeated.stability_days == pytest.approx(0.10)
+    assert repeated.beta == pytest.approx(5.0)
+    assert repeated.stability_days <= first.stability_days
     assert (
         db.scalar(
             select(func.count())
@@ -951,8 +954,12 @@ def test_reader_advances_to_next_uncompleted_lesson(
 
 
 def test_reader_term_bands_combine_evidence_frequency_and_targets(
-    db: Session, lesson_factory: Any, event_factory: Any
+    db: Session, lesson_factory: Any, event_factory: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Knowledge is time-aware: evaluate just after spaced readings over a month.
+    monkeypatch.setattr(
+        "server.models.utc_now", lambda: datetime(2026, 2, 2, 12, 0, tzinfo=timezone.utc)
+    )
     familiar = ("es:familiar:WORD", "familiar", "familiar", "WORD", "familiar", 90_000)
     prior_lessons = [
         import_lesson(
@@ -970,9 +977,11 @@ def test_reader_term_bands_combine_evidence_frequency_and_targets(
                 event_id=f"familiar-complete-{index}",
                 session_id=f"familiar-session-{index}",
                 payload={"active_seconds": 45, "completion_ratio": 1},
-                seconds=index,
+                seconds=day * 86_400,
             )
-            for index, lesson in enumerate(prior_lessons)
+            for index, (lesson, day) in enumerate(
+                zip(prior_lessons, (0, 3, 8, 16, 31), strict=True)
+            )
         ],
     )
 

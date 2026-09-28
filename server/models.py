@@ -20,7 +20,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from server.clock import utc_now
+from server.clock import as_utc, utc_now
+from server.memory_model import MemoryState, knowledge
 from server.schemas import CalibrationStatus, CefrLevel, GenerationTaskState
 
 
@@ -253,9 +254,13 @@ class LexemeState(Base):
     pronunciation: Mapped[str | None] = mapped_column(String(300), nullable=True)
     frequency_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    # alpha/beta tally weighted success/failure evidence (uncertainty only); memory_difficulty,
+    # stability_days and last_seen_at are the FSRS state, and prior_known covers no evidence.
     alpha: Mapped[float] = mapped_column(Float, default=2.0)
     beta: Mapped[float] = mapped_column(Float, default=2.0)
     stability_days: Mapped[float] = mapped_column(Float, default=0.5)
+    memory_difficulty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prior_known: Mapped[float] = mapped_column(Float, default=0.5)
     qualified_exposures: Mapped[int] = mapped_column(Integer, default=0)
     reveal_failures: Mapped[float] = mapped_column(Float, default=0.0)
     distinct_lessons: Mapped[int] = mapped_column(Integer, default=0)
@@ -271,9 +276,16 @@ class LexemeState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     @property
+    def memory_state(self) -> MemoryState | None:
+        if self.memory_difficulty is None or self.last_seen_at is None:
+            return None
+        return MemoryState(self.memory_difficulty, self.stability_days, as_utc(self.last_seen_at))
+
+    @property
     def mastery(self) -> float:
-        total = self.alpha + self.beta
-        return self.alpha / total if total else 0.5
+        """Probability of still recalling this word a month from now (time-aware)."""
+
+        return knowledge(self.memory_state, prior=self.prior_known, at=utc_now())
 
 
 class CharacterState(Base):
@@ -289,6 +301,7 @@ class CharacterState(Base):
     alpha: Mapped[float] = mapped_column(Float, default=2.0)
     beta: Mapped[float] = mapped_column(Float, default=2.0)
     stability_days: Mapped[float] = mapped_column(Float, default=0.5)
+    memory_difficulty: Mapped[float | None] = mapped_column(Float, nullable=True)
     qualified_exposures: Mapped[int] = mapped_column(Integer, default=0)
     inferred_failure_sessions: Mapped[int] = mapped_column(Integer, default=0)
     inferred_failure_mass: Mapped[float] = mapped_column(Float, default=0.0)
@@ -310,9 +323,18 @@ class CharacterState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     @property
+    def memory_state(self) -> MemoryState | None:
+        if self.memory_difficulty is None or self.last_evidence_at is None:
+            return None
+        return MemoryState(
+            self.memory_difficulty, self.stability_days, as_utc(self.last_evidence_at)
+        )
+
+    @property
     def mastery(self) -> float:
-        total = self.alpha + self.beta
-        return self.alpha / total if total else 0.5
+        """Probability of still recognizing this character a month from now (time-aware)."""
+
+        return knowledge(self.memory_state, prior=0.5, at=utc_now())
 
 
 class GrammarState(Base):

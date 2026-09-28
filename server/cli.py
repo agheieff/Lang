@@ -307,10 +307,10 @@ def lesson_list(args: argparse.Namespace) -> None:
 def rebuild(args: argparse.Namespace) -> None:
     workspace = _workspace(args)
     with session_scope(workspace) as db:
+        proficiency = rebuild_proficiency_state(db)  # the vocabulary prior uses it
         terms = rebuild_lexeme_states(db)
         characters = rebuild_character_states(db)
         grammar = rebuild_grammar_states(db)
-        proficiency = rebuild_proficiency_state(db)
         _print_json(
             {
                 "rebuilt": len(terms),
@@ -360,6 +360,31 @@ def _generation_task_view(task: GenerationTask) -> dict[str, Any]:
         "started_at": task.started_at.isoformat() if task.started_at else None,
         "finished_at": task.finished_at.isoformat() if task.finished_at else None,
     }
+
+
+def memory_evaluate(args: argparse.Namespace) -> None:
+    from server.memory_evaluation import (
+        describe_policy,
+        evaluate,
+        fit,
+        load_history,
+        session_order,
+    )
+
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        history = load_history(db)
+    result: dict[str, object] = {"production": evaluate(history).as_dict()}
+    if args.fit:
+        order = session_order(history)
+        train, test = set(order[: len(order) // 2]), set(order[len(order) // 2 :])
+        fitted, _score = fit(history, sessions=train)
+        result["held_out"] = {
+            "production": evaluate(history, sessions=test).as_dict(),
+            "fitted_on_first_half": evaluate(history, fitted, sessions=test).as_dict(),
+            "fitted_policy": describe_policy(fitted),
+        }
+    _print_json(result)
 
 
 def status(args: argparse.Namespace) -> None:
@@ -458,6 +483,14 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("brief").set_defaults(handler=brief)
     commands.add_parser("status").set_defaults(handler=status)
     commands.add_parser("rebuild").set_defaults(handler=rebuild)
+
+    memory = commands.add_parser("memory", help="Score the vocabulary memory model on history")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    evaluate_parser = memory_commands.add_parser("evaluate")
+    evaluate_parser.add_argument(
+        "--fit", action="store_true", help="also grid-fit on the first half, score the second"
+    )
+    evaluate_parser.set_defaults(handler=memory_evaluate)
 
     lesson = commands.add_parser("lesson", help="Validate and import generated lessons")
     lesson_commands = lesson.add_subparsers(dest="lesson_command", required=True)

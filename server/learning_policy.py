@@ -49,3 +49,16 @@ class TermBandPolicy:
 
 
 TERM_BAND_POLICY = TermBandPolicy()
+
+
+def frontier_frequency_rank(
+    difficulty: float,
+    lower: float | None,
+    policy: TermBandPolicy = TERM_BAND_POLICY,
+) -> int:
+    """Corpus frequency rank around which a learner at ``difficulty`` stops knowing words."""
+
+    if lower is not None:
+        difficulty = min(difficulty, lower)
+    span = policy.max_expected_frequency_rank / policy.base_expected_frequency_rank
+    return int(round(policy.base_expected_frequency_rank * span**difficulty))

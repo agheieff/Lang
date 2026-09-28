@@ -16,6 +16,15 @@ from server.clock import as_utc, utc_now
 from server.han import character_tracking_available, han_characters
 from server.learning_units import LearningUnitIndex, learning_unit_indexes
 from server.lesson_content import all_sentences, lesson_document
+from server.memory_model import (
+    AGAIN,
+    GOOD,
+    MemoryPolicy,
+    MemoryState,
+    interval_days,
+    knowledge,
+    review,
+)
 from server.models import CharacterState, Interaction, Lesson
 from server.reading_evidence import (
     DEFAULT_READING_EVIDENCE_POLICY,
@@ -23,13 +32,11 @@ from server.reading_evidence import (
     qualified_completion_and_considered,
 )
 from server.schemas import LessonDocument
-from server.spaced_repetition import (
-    DEFAULT_STABILITY_POLICY,
-    StabilityPolicy,
-    estimated_recall,
-    stability_after_failure,
-    stability_after_weighted_success,
-)
+
+# Characters get their own memory policy; reveals are inferred from word clicks, so they are
+# applied as partial lapses whose weight is the configured failure mass.
+CHARACTER_MEMORY_POLICY = MemoryPolicy(passive_confidence=0.45)
+CHARACTER_PRIOR = 0.5
 
 
 @dataclass(frozen=True)
@@ -37,24 +44,18 @@ class CharacterLearningPolicy:
     """Tunable weights for evidence inferred from ordinary word-based reading."""
 
     qualification: ReadingEvidencePolicy = DEFAULT_READING_EVIDENCE_POLICY
-    passive_success_weight: float = 1.0
     new_context_success_bonus: float = 0.25
     single_character_failure_mass: float = 0.4
     multi_character_failure_mass: float = 0.2
     failure_cap_per_session: float = 0.5
-    inferred_failure_due_days: float = 2.0
-    stability_gain_days_per_success_mass: float = 0.75
-    stability: StabilityPolicy = DEFAULT_STABILITY_POLICY
+    memory: MemoryPolicy = CHARACTER_MEMORY_POLICY
 
     def __post_init__(self) -> None:
         values = (
-            self.passive_success_weight,
             self.new_context_success_bonus,
             self.single_character_failure_mass,
             self.multi_character_failure_mass,
             self.failure_cap_per_session,
-            self.inferred_failure_due_days,
-            self.stability_gain_days_per_success_mass,
         )
         if any(not math.isfinite(value) or value < 0 for value in values):
             raise ValueError("character learning weights must be finite and non-negative")
@@ -66,6 +67,8 @@ class CharacterLearningPolicy:
             > self.failure_cap_per_session
         ):
             raise ValueError("character failure mass must not exceed the per-session cap")
+        if self.failure_cap_per_session > 1:
+            raise ValueError("the per-session character failure cap must be at most one lapse")
 
 
 DEFAULT_CHARACTER_LEARNING_POLICY = CharacterLearningPolicy()
@@ -76,9 +79,9 @@ class _CharacterEstimate:
     character: str
     learning_language: str
     translation_language: str
+    memory: MemoryState | None = None
     alpha: float = 2.0
     beta: float = 2.0
-    stability_days: float = 0.5
     qualified_exposures: int = 0
     inferred_failure_mass: float = 0.0
     direct_successes: int = 0
@@ -91,9 +94,8 @@ class _CharacterEstimate:
     last_inferred_failure_at: datetime | None = None
     next_due_at: datetime | None = None
 
-    @property
-    def mastery(self) -> float:
-        return self.alpha / (self.alpha + self.beta)
+    def knowledge_at(self, at: datetime, policy: CharacterLearningPolicy) -> float:
+        return knowledge(self.memory, prior=CHARACTER_PRIOR, at=at, policy=policy.memory)
 
 
 @dataclass(frozen=True)
@@ -165,12 +167,16 @@ def _replay_character_states(
     evidence = _ordered_evidence(documents, units, interactions, policy)
 
     failure_totals: dict[tuple[int, str, str], float] = defaultdict(float)
+    first_reading_session: dict[int, str] = {}
     for item in evidence:
         if item.kind == "success":
+            reread = first_reading_session.setdefault(item.lesson_id, item.session_id) != (
+                item.session_id
+            )
             for character in item.characters:
                 state = estimates.get((*_languages(item), character))
                 if state is not None:
-                    _apply_success(state, item, policy)
+                    _apply_success(state, item, policy, reread=reread)
             continue
 
         weights = _failure_weights(item, estimates, policy)
@@ -438,7 +444,8 @@ def _failure_weights(
     scores = [
         max(
             1e-9,
-            (1.0 - state.mastery) * (1.0 + min(1.0, 4.0 / (state.alpha + state.beta))),
+            (1.0 - state.knowledge_at(evidence.at, policy))
+            * (1.0 + min(1.0, 4.0 / (state.alpha + state.beta))),
         )
         for state in selected
     ]
@@ -455,59 +462,36 @@ def _apply_failure(
     weight: float,
     policy: CharacterLearningPolicy,
 ) -> None:
-    recall = estimated_recall(
-        mastery=state.mastery,
-        stability_days=state.stability_days,
-        last_seen_at=state.last_evidence_at,
-        at=evidence.at,
-        policy=policy.stability,
-    )
+    state.memory = review(state.memory, AGAIN, evidence.at, weight=weight, policy=policy.memory)
     state.beta += weight
     state.inferred_failure_mass = round(state.inferred_failure_mass + weight, 12)
-    state.stability_days = stability_after_failure(
-        stability_days=state.stability_days,
-        recall=recall,
-        penalty=weight,
-        policy=policy.stability,
-    )
     state.failure_sessions.add((evidence.lesson_id, evidence.session_id))
     _record_evidence_context(state, evidence)
     state.last_inferred_failure_at = evidence.at
-    state.next_due_at = evidence.at + timedelta(days=policy.inferred_failure_due_days)
+    state.next_due_at = evidence.at + timedelta(days=interval_days(state.memory.stability_days))
 
 
 def _apply_success(
     state: _CharacterEstimate,
     evidence: _CharacterEvidence,
     policy: CharacterLearningPolicy,
+    *,
+    reread: bool = False,
 ) -> None:
     contexts = evidence.contexts.get(state.character, frozenset())
     has_new_context = bool(contexts - state.word_context_keys)
-    weight = policy.passive_success_weight
+    weight = policy.memory.passive_confidence
     if has_new_context:
-        weight += policy.new_context_success_bonus
-    recall = (
-        1.0
-        if state.last_evidence_at is None
-        else estimated_recall(
-            mastery=state.mastery,
-            stability_days=state.stability_days,
-            last_seen_at=state.last_evidence_at,
-            at=evidence.at,
-            policy=policy.stability,
-        )
-    )
-    state.stability_days = stability_after_weighted_success(
-        stability_days=state.stability_days,
-        recall=recall,
-        evidence_mass=weight,
-        gain_days_per_mass=policy.stability_gain_days_per_success_mass,
-        policy=policy.stability,
-    )
+        weight *= 1.0 + policy.new_context_success_bonus
+    if reread:
+        weight *= policy.memory.reread_weight
+    weight = min(1.0, weight)
+    state.memory = review(state.memory, GOOD, evidence.at, weight=weight, policy=policy.memory)
     state.alpha += weight
-    state.qualified_exposures += 1
+    if not reread:
+        state.qualified_exposures += 1
     _record_evidence_context(state, evidence)
-    state.next_due_at = evidence.at + timedelta(days=state.stability_days)
+    state.next_due_at = evidence.at + timedelta(days=interval_days(state.memory.stability_days))
 
 
 def _record_evidence_context(
@@ -527,7 +511,8 @@ def _state_row(state: _CharacterEstimate) -> CharacterState:
         character=state.character,
         alpha=state.alpha,
         beta=state.beta,
-        stability_days=state.stability_days,
+        stability_days=state.memory.stability_days if state.memory is not None else 0.0,
+        memory_difficulty=state.memory.difficulty if state.memory is not None else None,
         qualified_exposures=state.qualified_exposures,
         inferred_failure_sessions=len(state.failure_sessions),
         inferred_failure_mass=state.inferred_failure_mass,

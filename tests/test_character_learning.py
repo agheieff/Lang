@@ -105,12 +105,10 @@ def _snapshot(db: Session) -> list[tuple[object, ...]]:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"passive_success_weight": -0.1},
         {"new_context_success_bonus": -0.1},
         {"single_character_failure_mass": 0.6, "failure_cap_per_session": 0.5},
         {"multi_character_failure_mass": float("inf")},
-        {"inferred_failure_due_days": -1},
-        {"stability_gain_days_per_success_mass": -1},
+        {"failure_cap_per_session": 1.5},
     ],
 )
 def test_character_policy_rejects_invalid_configuration(
@@ -197,7 +195,8 @@ def test_passive_evidence_requires_qualified_unassisted_reading(
     assert states["月"].qualified_exposures == 0
     assert states["月"].inferred_failure_mass == 0
     assert states["山"].qualified_exposures == 1
-    assert states["山"].alpha == pytest.approx(3.25)
+    # One clean reading in a new word context: passive confidence 0.45 x (1 + 0.25 bonus).
+    assert states["山"].alpha == pytest.approx(2.5625)
     assert states["山"].distinct_lessons == 1
     assert states["山"].direct_successes == 0
     assert states["山"].direct_failures == 0
@@ -335,12 +334,12 @@ def test_new_word_contexts_reinforce_more_than_repeated_contexts(
     state = _states(db)["明"]
 
     assert state.qualified_exposures == 3
-    assert state.alpha == pytest.approx(5.5)
+    assert state.alpha == pytest.approx(2 + 0.5625 + 0.45 + 0.5625)
     assert state.distinct_lessons == 3
     assert state.distinct_word_contexts == 2
 
 
-def test_sixteen_clean_sessions_support_confident_character_recognition(
+def test_sixteen_massed_rereads_do_not_create_confident_character_recognition(
     db: Session,
     event_factory: Any,
 ) -> None:
@@ -369,10 +368,9 @@ def test_sixteen_clean_sessions_support_confident_character_recognition(
 
     state = _states(db)["这"]
 
-    assert state.qualified_exposures == 16
-    assert state.alpha == pytest.approx(18.25)
-    assert state.mastery == pytest.approx(0.9012345679)
-    assert state.stability_days == pytest.approx(12.6875)
+    assert state.qualified_exposures == 1  # the other fifteen are rereads within seconds
+    assert state.stability_days < 5
+    assert state.memory_state is not None
 
 
 def test_non_chinese_lessons_do_not_create_character_state(

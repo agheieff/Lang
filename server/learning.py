@@ -40,7 +40,7 @@ from server.grammar_catalog import (
 )
 from server.han import character_tracking_available
 from server.language_packs import language_pack, language_pack_digest
-from server.learning_policy import TERM_BAND_POLICY, TermBandPolicy
+from server.learning_policy import TERM_BAND_POLICY, TermBandPolicy, frontier_frequency_rank
 from server.learning_units import LearningUnitIndex, build_learning_unit_index
 from server.lesson_content import body_sentences, lesson_document
 from server.lesson_queue import (
@@ -550,12 +550,7 @@ def _is_familiar(state: LexemeState, policy: TermBandPolicy) -> bool:
 
 
 def _expected_frequency_rank(profile: ProfileView, policy: TermBandPolicy) -> int:
-    difficulty = profile.difficulty
-    proficiency = profile.proficiency
-    if proficiency.lower is not None:
-        difficulty = min(difficulty, proficiency.lower)
-    span = policy.max_expected_frequency_rank / policy.base_expected_frequency_rank
-    return int(round(policy.base_expected_frequency_rank * span**difficulty))
+    return frontier_frequency_rank(profile.difficulty, profile.proficiency.lower, policy)
 
 
 def record_events(

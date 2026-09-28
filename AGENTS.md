@@ -161,25 +161,29 @@ references one catalog key and anchors it to a precise half-open sentence run ra
   ranges, and optional notes only for context-specific help.
 - Only use typed `calibration` probes when the generation request asks for them. Use every requested
   difficulty exactly once, keep probe terms unique and previously unused, and make each occur once.
-- A term reveal is negative evidence. A sufficiently read, completed lesson gives weak positive
-  evidence to unrevealed terms. Sentence/full translations suppress that passive evidence for their
-  scope. Repeated reveals remain raw events but their SRS penalty is capped per session. Rebuilt
-  mastery, stability, retrievability, and due dates are time-aware; do not replace them with raw
-  click counts. A reveal of a configured productive span distributes one bounded failure unit over
-  its selected components, weighted toward the lower-mastery component; it never gives every
-  homograph the full penalty.
-- Keep vocabulary evidence mass and stability-days-per-mass independently configurable from
-  characters. Delayed clean retrieval may add more stability, while graded reveal penalties remain
-  stronger across repeated sessions; do not collapse either reducer to raw click or appearance
-  counts.
+- Words and characters use the FSRS-4.5 memory model (`server/memory_model.py`). A term reveal is
+  an explicit lapse ("again"), capped at one per term per session. A sufficiently read, completed
+  lesson gives each unrevealed term a partial "good" review weighted by `passive_confidence`;
+  sentence/full translations suppress that passive evidence for their scope. A reread of an
+  already-read lesson is discounted by `reread_weight` and is not a new qualified exposure. Massed
+  exposure is nearly worthless by construction: FSRS barely raises stability while recall is
+  already high. A reveal of a configured productive span distributes one bounded failure unit over
+  its selected components, weighted toward the less-known component; it never gives every homograph
+  the full penalty.
+- `mastery` is time-aware: the probability of still recalling a unit one horizon (30 days) from
+  now. Words without evidence use a frequency prior around the learner's frontier rank, and the
+  prior also seeds the first review so pre-existing knowledge of common words survives. Keep
+  `alpha`/`beta` as evidence tallies for uncertainty only. Do not replace any of this with raw click
+  or appearance counts, and re-score parameter changes with `lang memory evaluate --fit` against
+  real history before adopting them.
 - Chinese character recognition is another replayable projection of those same events, never a new
   interaction stream. A qualified clean session supplies one bounded positive observation per
   character, plus a small bonus for a new canonical word context; repeated appearances inside that
   session are not independent successes. A one-character reveal is bounded negative evidence, while
   a longer display span shares a smaller total across its distinct characters, weighted toward
   weaker/less-certain estimates. Deduplicate repeats and cap each character per lesson session.
-  Sentence/full help suppresses passive credit in scope. Keep the character-specific stability
-  policy independently configurable; do not force it to share word-evidence growth coefficients.
+  Sentence/full help suppresses passive credit in scope. Keep the character-specific memory policy
+  independently configurable from words.
 - Opening a grammar marker is neutral. Revealing its explanation records explicit negative evidence
   through `translation.revealed` with `scope="grammar"`; repeat penalties are capped per
   construction/session. A sentence translation can be weaker inferred grammar evidence when

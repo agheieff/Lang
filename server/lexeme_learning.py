@@ -13,58 +13,44 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from server.clock import as_utc, utc_now
+from server.learning_policy import frontier_frequency_rank
 from server.learning_units import LearningUnitIndex, learning_unit_indexes
 from server.lesson_content import lesson_document
-from server.models import Interaction, Lesson, LexemeState
+from server.memory_model import (
+    AGAIN,
+    GOOD,
+    MemoryPolicy,
+    MemoryState,
+    interval_days,
+    knowledge,
+    prior_known,
+    review,
+)
+from server.models import Interaction, Lesson, LexemeState, ProficiencyState, Profile
 from server.reading_evidence import (
     DEFAULT_READING_EVIDENCE_POLICY,
     ReadingEvidencePolicy,
     qualified_completion_and_considered,
 )
 from server.schemas import LessonDocument, LessonTerm
-from server.spaced_repetition import (
-    DEFAULT_STABILITY_POLICY,
-    StabilityPolicy,
-    estimated_recall,
-    stability_after_failure,
-    stability_after_weighted_success,
-)
+
+# Reading-specific parameters were chosen by replaying the zh-hans history with
+# ``lang memory evaluate``: passive confidence is flat between about 0.2 and 0.6, and LLM frequency
+# ranks put the effective frontier near half the rank implied by the stated level.
+LEXEME_MEMORY_POLICY = MemoryPolicy(passive_confidence=0.45, prior_slope=1.0)
 
 
 @dataclass(frozen=True)
 class LexemeLearningPolicy:
-    """All tunable evidence and scheduling weights for vocabulary."""
+    """Evidence qualification and memory-model parameters for vocabulary."""
 
     qualification: ReadingEvidencePolicy = DEFAULT_READING_EVIDENCE_POLICY
-    passive_success_weight: float = 1.5
-    failure_weight: float = 1.0
-    repeated_reveal_grades: tuple[float, ...] = (0.25, 0.6, 1.0)
-    full_failure_due_days: float = 0.25
-    weak_failure_due_days: float = 2.0
-    stability_gain_days_per_success_mass: float = 0.5
-    stability: StabilityPolicy = DEFAULT_STABILITY_POLICY
+    memory: MemoryPolicy = LEXEME_MEMORY_POLICY
+    frontier_scale: float = 0.5
 
     def __post_init__(self) -> None:
-        weights = (
-            self.passive_success_weight,
-            self.failure_weight,
-            self.stability_gain_days_per_success_mass,
-        )
-        if any(not math.isfinite(value) or value < 0 for value in weights):
-            raise ValueError("learning weights must be finite and non-negative")
-        grades = self.repeated_reveal_grades
-        if (
-            not grades
-            or any(not math.isfinite(value) or not 0 <= value <= 1 for value in grades)
-            or tuple(sorted(grades)) != grades
-        ):
-            raise ValueError("repeated_reveal_grades must be ordered values between 0 and 1")
-        if (
-            not math.isfinite(self.full_failure_due_days)
-            or not math.isfinite(self.weak_failure_due_days)
-            or not 0 <= self.full_failure_due_days <= self.weak_failure_due_days
-        ):
-            raise ValueError("failure due-day bounds must be finite, non-negative, and ordered")
+        if not math.isfinite(self.frontier_scale) or self.frontier_scale <= 0:
+            raise ValueError("frontier_scale must be finite and positive")
 
 
 DEFAULT_LEXEME_LEARNING_POLICY = LexemeLearningPolicy()
@@ -75,9 +61,10 @@ class _LexemeEstimate:
     term: LessonTerm
     learning_language: str
     translation_language: str
+    prior: float = 0.5
+    memory: MemoryState | None = None
     alpha: float = 2.0
     beta: float = 2.0
-    stability_days: float = 0.5
     qualified_exposures: int = 0
     reveal_failures: float = 0.0
     lesson_ids: set[int] = field(default_factory=set)
@@ -86,9 +73,8 @@ class _LexemeEstimate:
     last_revealed_at: datetime | None = None
     next_due_at: datetime | None = None
 
-    @property
-    def mastery(self) -> float:
-        return self.alpha / (self.alpha + self.beta)
+    def knowledge_at(self, at: datetime, policy: LexemeLearningPolicy) -> float:
+        return knowledge(self.memory, prior=self.prior, at=at, policy=policy.memory)
 
 
 @dataclass(frozen=True)
@@ -116,7 +102,9 @@ def rebuild_lexeme_states(
     interactions = db.scalars(
         select(Interaction).order_by(Interaction.occurred_at, Interaction.id)
     ).all()
-    estimates = _replay_lexeme_states(documents, interactions, policy)
+    estimates = _replay_lexeme_states(
+        documents, interactions, policy, frontier_rank=_learner_frontier_rank(db, policy)
+    )
 
     db.execute(delete(LexemeState))
     rows = [_state_row(key[2], state) for key, state in sorted(estimates.items())]
@@ -125,18 +113,31 @@ def rebuild_lexeme_states(
     return rows
 
 
+def _learner_frontier_rank(db: Session, policy: LexemeLearningPolicy) -> float:
+    profile = db.get(Profile, 1)
+    proficiency = db.get(ProficiencyState, 1)
+    difficulty = profile.difficulty if profile is not None else 0.15
+    if proficiency is not None and proficiency.estimate is not None:
+        difficulty = proficiency.estimate
+    lower = proficiency.lower if proficiency is not None else None
+    return frontier_frequency_rank(difficulty, lower) * policy.frontier_scale
+
+
 def _replay_lexeme_states(
     documents: Mapping[int, LessonDocument],
     interactions: Sequence[Interaction],
     policy: LexemeLearningPolicy,
+    *,
+    frontier_rank: float,
 ) -> dict[tuple[str, str, str], _LexemeEstimate]:
     indexes = learning_unit_indexes(documents.values())
-    estimates = _initial_estimates(indexes)
+    estimates = _initial_estimates(indexes, frontier_rank, policy)
     evidence = _ordered_evidence(documents, interactions, indexes, policy)
 
     failure_totals: dict[tuple[int, str, str], float] = defaultdict(float)
     exclusions: dict[tuple[int, str], set[str]] = defaultdict(set)
     successes: dict[tuple[int, str], set[str]] = defaultdict(set)
+    first_reading_session: dict[int, str] = {}
     for item in evidence:
         index = indexes[(item.learning_language, item.translation_language)]
         targets = _evidence_targets(item, index, estimates)
@@ -145,7 +146,7 @@ def _replay_lexeme_states(
         session = (item.lesson_id, item.session_id)
         if item.kind == "failure":
             weights = (
-                _composite_failure_weights(targets, item, estimates)
+                _composite_failure_weights(targets, item, estimates, policy)
                 if item.display_key is not None
                 else {targets[0]: 1.0}
             )
@@ -161,23 +162,30 @@ def _replay_lexeme_states(
         elif item.kind == "exclude":
             exclusions[session].update(targets)
         else:
+            # Rereading a text is weak evidence: the words are partly remembered from the text.
+            reread = first_reading_session.setdefault(item.lesson_id, item.session_id) != (
+                item.session_id
+            )
             for term_key in targets:
                 if term_key in exclusions[session] or term_key in successes[session]:
                     continue
                 state = estimates[(item.learning_language, item.translation_language, term_key)]
-                _apply_success(state, item, policy)
+                _apply_success(state, item, policy, reread=reread)
                 successes[session].add(term_key)
     return estimates
 
 
 def _initial_estimates(
     indexes: Mapping[tuple[str, str], LearningUnitIndex],
+    frontier_rank: float,
+    policy: LexemeLearningPolicy,
 ) -> dict[tuple[str, str, str], _LexemeEstimate]:
     return {
         (*languages, term_key): _LexemeEstimate(
             term=term,
             learning_language=languages[0],
             translation_language=languages[1],
+            prior=prior_known(term.frequency_rank, frontier_rank, policy.memory),
         )
         for languages, index in indexes.items()
         for term_key, term in index.learning_catalog().items()
@@ -241,6 +249,7 @@ def _composite_failure_weights(
     targets: tuple[str, ...],
     evidence: _LearningEvidence,
     estimates: Mapping[tuple[str, str, str], _LexemeEstimate],
+    policy: LexemeLearningPolicy,
 ) -> dict[str, float]:
     selected = [
         estimates[(evidence.learning_language, evidence.translation_language, key)]
@@ -250,7 +259,9 @@ def _composite_failure_weights(
         selected
     )
     contrast = 1.0 + 2.0 * (1.0 - uncertainty)
-    scores = [math.exp((1.0 - state.mastery) * contrast) for state in selected]
+    scores = [
+        math.exp((1.0 - state.knowledge_at(evidence.at, policy)) * contrast) for state in selected
+    ]
     total = sum(scores)
     return {key: score / total for key, score in zip(targets, scores, strict=True)}
 
@@ -376,70 +387,36 @@ def _apply_failure(
     weight: float,
     policy: LexemeLearningPolicy,
 ) -> None:
-    penalty = weight * _failure_grade(state.reveal_failures, policy)
-    recall = estimated_recall(
-        mastery=state.mastery,
-        stability_days=state.stability_days,
-        last_seen_at=state.last_seen_at,
-        at=evidence.at,
-        policy=policy.stability,
+    state.memory = review(
+        state.memory, AGAIN, evidence.at, weight=weight, prior=state.prior, policy=policy.memory
     )
-    state.beta += policy.failure_weight * penalty
+    state.beta += weight
     state.reveal_failures = round(state.reveal_failures + weight, 12)
-    state.stability_days = stability_after_failure(
-        stability_days=state.stability_days,
-        recall=recall,
-        penalty=penalty,
-        policy=policy.stability,
-    )
     state.lesson_ids.add(evidence.lesson_id)
     state.first_seen_at = state.first_seen_at or evidence.at
     state.last_seen_at = evidence.at
     state.last_revealed_at = evidence.at
-    due_days = (
-        policy.weak_failure_due_days
-        - (policy.weak_failure_due_days - policy.full_failure_due_days) * penalty
-    )
-    state.next_due_at = evidence.at + timedelta(days=due_days)
-
-
-def _failure_grade(failures: float, policy: LexemeLearningPolicy) -> float:
-    grades = policy.repeated_reveal_grades
-    lower = min(math.floor(failures), len(grades) - 1)
-    upper = min(lower + 1, len(grades) - 1)
-    fraction = failures - math.floor(failures)
-    return grades[lower] + fraction * (grades[upper] - grades[lower])
+    state.next_due_at = evidence.at + timedelta(days=interval_days(state.memory.stability_days))
 
 
 def _apply_success(
     state: _LexemeEstimate,
     evidence: _LearningEvidence,
     policy: LexemeLearningPolicy,
+    *,
+    reread: bool = False,
 ) -> None:
-    recall = (
-        1.0
-        if state.last_seen_at is None
-        else estimated_recall(
-            mastery=state.mastery,
-            stability_days=state.stability_days,
-            last_seen_at=state.last_seen_at,
-            at=evidence.at,
-            policy=policy.stability,
-        )
+    weight = policy.memory.passive_confidence * (policy.memory.reread_weight if reread else 1.0)
+    state.memory = review(
+        state.memory, GOOD, evidence.at, weight=weight, prior=state.prior, policy=policy.memory
     )
-    state.stability_days = stability_after_weighted_success(
-        stability_days=state.stability_days,
-        recall=recall,
-        evidence_mass=policy.passive_success_weight,
-        gain_days_per_mass=policy.stability_gain_days_per_success_mass,
-        policy=policy.stability,
-    )
-    state.alpha += policy.passive_success_weight
-    state.qualified_exposures += 1
+    state.alpha += weight
+    if not reread:
+        state.qualified_exposures += 1
     state.lesson_ids.add(evidence.lesson_id)
     state.first_seen_at = state.first_seen_at or evidence.at
     state.last_seen_at = evidence.at
-    state.next_due_at = evidence.at + timedelta(days=state.stability_days)
+    state.next_due_at = evidence.at + timedelta(days=interval_days(state.memory.stability_days))
 
 
 def _state_row(term_key: str, state: _LexemeEstimate) -> LexemeState:
@@ -454,7 +431,9 @@ def _state_row(term_key: str, state: _LexemeEstimate) -> LexemeState:
         frequency_rank=state.term.frequency_rank,
         alpha=state.alpha,
         beta=state.beta,
-        stability_days=state.stability_days,
+        stability_days=state.memory.stability_days if state.memory is not None else 0.0,
+        memory_difficulty=state.memory.difficulty if state.memory is not None else None,
+        prior_known=state.prior,
         qualified_exposures=state.qualified_exposures,
         reveal_failures=state.reveal_failures,
         distinct_lessons=len(state.lesson_ids),

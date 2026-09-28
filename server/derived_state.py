@@ -14,7 +14,7 @@ from server.language_packs import language_pack_digest
 from server.models import DerivedState, Interaction, Lesson, Profile
 
 # Bump when a reducer's semantics change so existing caches are replayed with the new code.
-DERIVED_MODEL_REVISION = 1
+DERIVED_MODEL_REVISION = 2
 
 
 def evidence_watermark(db: Session) -> str:
@@ -56,10 +56,10 @@ def ensure_derived_states(db: Session) -> bool:
     state = db.get(DerivedState, 1)
     if state is not None and state.watermark == watermark:
         return False
+    rebuild_proficiency_state(db)  # first: the vocabulary prior uses the learner's frontier
     rebuild_lexeme_states(db)
     rebuild_character_states(db)
     rebuild_grammar_states(db)
-    rebuild_proficiency_state(db)
     # Proficiency may update the profile's level source, so record the post-rebuild watermark.
     state = db.get(DerivedState, 1) or DerivedState(id=1)
     state.watermark = evidence_watermark(db)

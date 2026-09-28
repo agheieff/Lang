@@ -35,6 +35,7 @@ def _character(
         alpha=alpha,
         beta=beta,
         stability_days=stability_days,
+        memory_difficulty=5.0 if seen else None,
         first_evidence_at=evidence_at,
         last_evidence_at=evidence_at,
     )
@@ -58,11 +59,11 @@ def _term(
     )
 
 
-def test_character_retrievability_combines_posterior_and_time_decay() -> None:
-    state = _character("湖")
+def test_character_retrievability_follows_the_memory_curve() -> None:
+    state = _character("湖")  # stability 1 day: recall falls to 90% after one day
 
-    assert character_retrievability(state, at=NOW) == pytest.approx(0.75)
-    assert character_retrievability(state, at=NOW + timedelta(days=1)) == pytest.approx(0.75 * 0.9)
+    assert character_retrievability(state, at=NOW) == pytest.approx(1.0)
+    assert character_retrievability(state, at=NOW + timedelta(days=1)) == pytest.approx(0.9)
     assert character_retrievability(_character("新", seen=False), at=NOW) == 0.0
 
 
@@ -72,7 +73,7 @@ def test_word_support_uses_each_distinct_han_identity_and_weakest_character() ->
 
     support = word_character_support(term, states, at=NOW)
 
-    expected_geometric = math.sqrt(0.75 * 0.05)
+    expected_geometric = math.sqrt(1.0 * 0.05)
     assert support == pytest.approx(0.7 * expected_geometric)
 
 

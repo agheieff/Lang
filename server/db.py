@@ -20,11 +20,12 @@ from server.workspaces import Workspace, registry
 
 # PRAGMA user_version. Version 1 is the unversioned schema that existed before migrations.
 BASELINE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Derived caches are replayed from append-only evidence, so a derived-table change only drops the
 # table; it is recreated below and rebuilt from the evidence on the next read.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("DROP TABLE IF EXISTS proficiency_state",),
+    3: ("DROP TABLE IF EXISTS lexeme_states", "DROP TABLE IF EXISTS character_states"),
 }
 
 _factories: dict[Path, sessionmaker[Session]] = {}

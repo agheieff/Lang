@@ -6,10 +6,10 @@ import math
 from collections.abc import Mapping
 from datetime import datetime
 
-from server.clock import as_utc, optional_utc
+from server.clock import as_utc
 from server.han import distinct_han_characters
+from server.memory_model import recall_now
 from server.models import CharacterState, LexemeState
-from server.spaced_repetition import estimated_recall
 
 CHARACTER_SUPPORT_WEIGHT = 0.15
 CHARACTER_GEOMETRIC_WEIGHT = 0.7
@@ -22,16 +22,10 @@ MAXIMUM_OFFER_MULTIPLIER = 1.15
 def character_retrievability(state: CharacterState, *, at: datetime) -> float:
     """Return posterior recognition after time decay, or zero before evidence exists."""
 
-    last_evidence_at = optional_utc(state.last_evidence_at)
-    if state.first_evidence_at is None or last_evidence_at is None:
+    memory = state.memory_state
+    if memory is None:
         return 0.0
-    retention = estimated_recall(
-        mastery=state.mastery,
-        stability_days=state.stability_days,
-        last_seen_at=last_evidence_at,
-        at=as_utc(at),
-    )
-    return max(0.0, min(1.0, state.mastery * retention))
+    return max(0.0, min(1.0, recall_now(memory, prior=0.0, at=as_utc(at))))
 
 
 def word_character_support(

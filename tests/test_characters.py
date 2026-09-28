@@ -237,7 +237,8 @@ def test_characters_use_opened_title_and_body_text_and_conservative_reveals(
     assert characters["湖"].inferred_failure_sessions == 1
     assert characters["湖"].inferred_failure_mass == pytest.approx(0.1)
     assert characters["湖"].mastery < 0.5
-    assert characters["湖"].retrievability < characters["湖"].mastery
+    # mastery projects recall a month ahead, so it never exceeds current recall
+    assert characters["湖"].mastery <= characters["湖"].retrievability
     assert characters["湖"].mastery_uncertainty > 0
     assert characters["湖"].last_evidence_at is not None
     assert characters["湖"].next_due_at is not None
