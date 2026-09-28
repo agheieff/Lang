@@ -2642,6 +2642,21 @@ def _refresh_worker_workspaces(profile_id: str | None, known_profiles: set[str])
     return workspaces
 
 
+def _deferred_by_host() -> bool:
+    """Let the host keep agent work apart, e.g. while its own maintenance run is accounted.
+
+    ARC_LANG_DEFER_COMMAND exits 0 to mean "wait now"; any other outcome lets work proceed.
+    """
+
+    command = os.getenv("ARC_LANG_DEFER_COMMAND")
+    if not command:
+        return False
+    try:
+        return subprocess.run(shlex.split(command), capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _maintain_worker_workspaces(
     workspaces: list[Workspace], callback: GenerationCallback | None = None
 ) -> None:
@@ -2649,7 +2664,7 @@ def _maintain_worker_workspaces(
         with session_scope(workspace) as db:
             maintain_generation_task(db)
             maintain_topic_generation_tasks(db)
-        if callback is not None:
+        if callback is not None and not _deferred_by_host():
             maybe_update_preferences(workspace, callback)
 
 
@@ -2695,6 +2710,11 @@ def run_worker(*, once: bool = False, profile_id: str | None = None) -> None:
             if now >= next_maintenance:
                 _maintain_worker_workspaces(workspaces, callback)
                 next_maintenance = now + maintenance_seconds
+            if _deferred_by_host():
+                if once:
+                    return
+                time.sleep(poll_seconds)
+                continue
             claimed: tuple[Workspace, GenerationTask] | None = None
             preferred_profile_id = profile_id or registry.selected_id()
             for workspace in _round_robin_workspaces(

@@ -4360,3 +4360,16 @@ def test_priority_terms_keep_revealed_terms_ahead_of_many_unseen(
     assert priority[0].reason in {"due", "fragile"}
     assert len([term for term in priority if term.reason == "unseen"]) == len(priority) - 1
     assert 0 < len(priority) < len(terms)
+
+
+def test_host_defer_command_holds_agent_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    from server.agent_worker import _deferred_by_host
+
+    monkeypatch.delenv("ARC_LANG_DEFER_COMMAND", raising=False)
+    assert _deferred_by_host() is False
+    monkeypatch.setenv("ARC_LANG_DEFER_COMMAND", "true")
+    assert _deferred_by_host() is True
+    monkeypatch.setenv("ARC_LANG_DEFER_COMMAND", "false")
+    assert _deferred_by_host() is False
+    monkeypatch.setenv("ARC_LANG_DEFER_COMMAND", "/nonexistent/command")
+    assert _deferred_by_host() is False
