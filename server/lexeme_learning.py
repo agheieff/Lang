@@ -103,7 +103,7 @@ def rebuild_lexeme_states(
         select(Interaction).order_by(Interaction.occurred_at, Interaction.id)
     ).all()
     estimates = _replay_lexeme_states(
-        documents, interactions, policy, frontier_rank=_learner_frontier_rank(db, policy)
+        documents, interactions, policy, frontier_rank=learner_frontier_rank(db, policy)
     )
 
     db.execute(delete(LexemeState))
@@ -113,14 +113,22 @@ def rebuild_lexeme_states(
     return rows
 
 
-def _learner_frontier_rank(db: Session, policy: LexemeLearningPolicy) -> float:
+def learner_level_frontier_rank(db: Session) -> float:
+    """Corpus rank around which the learner's level stops knowing words (true corpus ranks)."""
+
     profile = db.get(Profile, 1)
     proficiency = db.get(ProficiencyState, 1)
     difficulty = profile.difficulty if profile is not None else 0.15
     if proficiency is not None and proficiency.estimate is not None:
         difficulty = proficiency.estimate
     lower = proficiency.lower if proficiency is not None else None
-    return frontier_frequency_rank(difficulty, lower) * policy.frontier_scale
+    return float(frontier_frequency_rank(difficulty, lower))
+
+
+def learner_frontier_rank(db: Session, policy: LexemeLearningPolicy) -> float:
+    """Frontier for agent-estimated ranks, which replay shows run about twice too common."""
+
+    return learner_level_frontier_rank(db) * policy.frontier_scale
 
 
 def _replay_lexeme_states(

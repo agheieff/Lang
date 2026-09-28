@@ -1080,6 +1080,11 @@ function renderTextCard(
     textElement("span", "", `${Math.round(item.difficulty * 100)}% difficulty`),
     textElement("span", "", `${item.lexical_token_count.toLocaleString()} words`),
   );
+  if (item.known_share !== null) {
+    const known = textElement("span", "", `≈${Math.round(item.known_share * 100)}% known`);
+    known.title = "Predicted share of running words you currently know";
+    meta.append(known);
+  }
   if (item.status === "read" && item.last_completed_at) {
     meta.append(textElement("span", "", `Read ${formatLibraryDate(item.last_completed_at)}`));
   } else if (item.status === "in_progress" && item.opened_at) {

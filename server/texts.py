@@ -31,6 +31,7 @@ from server.schemas import (
     TextsState,
     TextView,
 )
+from server.vocabulary_plan import KnownShareInputs, known_share, profile_known_share_inputs
 
 
 def get_texts_state(db: Session) -> TextsState:
@@ -42,11 +43,13 @@ def get_texts_state(db: Session) -> TextsState:
     activity = lesson_activities(db, lesson_ids)
     ready_ids = [lesson.id for lesson in lessons if activity[lesson.id].ready]
     queue_positions = {lesson_id: index for index, lesson_id in enumerate(ready_ids, 1)}
+    share_inputs = profile_known_share_inputs(db)
     texts = [
         _text_view(
             lesson,
             activity[lesson.id],
             queue_positions.get(lesson.id),
+            share_inputs,
         )
         for lesson in lessons
     ]
@@ -159,6 +162,7 @@ def _text_view(
     lesson: Lesson,
     activity: LessonActivity,
     queue_position: int | None,
+    share_inputs: KnownShareInputs,
 ) -> TextView:
     document = lesson_document(lesson)
     return TextView(
@@ -178,4 +182,5 @@ def _text_view(
         completion_count=len(activity.completion_session_ids),
         rating=activity.rating,
         lexical_token_count=lexical_token_count(document),
+        known_share=known_share(document, share_inputs),
     )

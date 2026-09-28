@@ -85,6 +85,8 @@ class Lesson(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64))
     source_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Predicted fraction of known running words when imported; drives the difficulty loop.
+    known_share_at_import: Mapped[float | None] = mapped_column(Float, nullable=True)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now

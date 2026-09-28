@@ -256,7 +256,7 @@ def reader(db: FreshDatabase, lesson_id: int | None = None, fresh: bool = False)
 
 
 @app.get("/api/profiles/{profile_id}/texts", response_model=TextsState)
-def texts(db: Database) -> TextsState:
+def texts(db: FreshDatabase) -> TextsState:
     return get_texts_state(db)
 
 

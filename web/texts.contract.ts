@@ -37,6 +37,7 @@ export interface TextLibraryItem {
   completion_count: number;
   rating: -1 | 1 | null;
   lexical_token_count: number;
+  known_share: number | null;
 }
 
 export interface TextRequestItem {
@@ -82,6 +83,7 @@ const {
   integer,
   nullableInteger,
   boundedNumber: difficulty,
+  nullableNumber,
   timestamp,
   oneOf,
 } = createJsonContract("Invalid texts");
@@ -110,6 +112,10 @@ function parseTextItem(value: unknown, index: number): TextLibraryItem {
     completion_count: integer(item.completion_count, `${path}.completion_count`),
     rating,
     lexical_token_count: integer(item.lexical_token_count, `${path}.lexical_token_count`),
+    known_share:
+      item.known_share === undefined
+        ? null
+        : nullableNumber(item.known_share, `${path}.known_share`, 0, 1),
   };
 }
 

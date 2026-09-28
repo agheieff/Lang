@@ -129,6 +129,7 @@ from server.schemas import (
     TokenizedLessonDraft,
     TokenizedLessonSentence,
     TranslationLessonDraft,
+    VocabularyPlan,
 )
 from server.workspaces import DATA_DIR, PROJECT_ROOT, Workspace, registry
 
@@ -958,6 +959,8 @@ def _prose_stage_instructions(request: GenerationCallbackRequest) -> str:
     ]
     if request.content_plan is not None:
         parts.append(content_plan_instructions())
+    if request.brief.vocabulary is not None:
+        parts.append(_vocabulary_instructions(request.brief.vocabulary))
     if request.request_kind == "topic_request":
         topic = json.dumps(request.requested_topic, ensure_ascii=False)
         parts.append(
@@ -978,6 +981,36 @@ def _prose_stage_instructions(request: GenerationCallbackRequest) -> str:
         "schema fields."
     )
     return " ".join(parts).strip()
+
+
+def _vocabulary_instructions(plan: VocabularyPlan) -> str:
+    parts = []
+    if plan.list_new_words and plan.list_candidates:
+        parts.append(
+            f"New vocabulary: work about {plan.list_new_words} words from "
+            "brief.vocabulary.list_candidates (a frequency-ordered list near the learner's "
+            "frontier) naturally into the prose, choosing the ones that fit the situation. Use "
+            "each so its meaning is inferable from context, ideally more than once."
+        )
+    free = "The word list is exhausted" if plan.list_exhausted else "In addition"
+    if plan.free_new_words:
+        parts.append(
+            f"{free}: introduce about {plan.free_new_words} useful new words of your own choosing "
+            "that suit the situation and are not in priority_terms or mastered vocabulary."
+        )
+    if plan.recent_known_share is not None:
+        direction = (
+            "lean on more familiar vocabulary"
+            if plan.recent_known_share < plan.target_known_share - 0.02
+            else "keep the vocabulary load similar"
+            if plan.recent_known_share <= plan.target_known_share + 0.02
+            else "the learner can take a little more new vocabulary"
+        )
+        parts.append(
+            f"Recent texts were predicted at {plan.recent_known_share:.0%} known running words "
+            f"against a {plan.target_known_share:.0%} target, so {direction}."
+        )
+    return " ".join(parts)
 
 
 def _lexical_stage_instructions(

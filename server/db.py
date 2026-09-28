@@ -20,12 +20,14 @@ from server.workspaces import Workspace, registry
 
 # PRAGMA user_version. Version 1 is the unversioned schema that existed before migrations.
 BASELINE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Derived caches are replayed from append-only evidence, so a derived-table change only drops the
 # table; it is recreated below and rebuilt from the evidence on the next read.
-MIGRATIONS: dict[int, tuple[str, ...]] = {
+MIGRATIONS: dict[int, tuple[str | tuple[str, str, str], ...]] = {
     2: ("DROP TABLE IF EXISTS proficiency_state",),
     3: ("DROP TABLE IF EXISTS lexeme_states", "DROP TABLE IF EXISTS character_states"),
+    # (table, column, type): added only when missing, so reruns and fresh schemas are safe.
+    4: (("lessons", "known_share_at_import", "FLOAT"),),
 }
 
 _factories: dict[Path, sessionmaker[Session]] = {}
@@ -233,8 +235,17 @@ def _migrate(connection: Any, dialect: Dialect) -> int:
         )
     if version:
         for target in range(version + 1, SCHEMA_VERSION + 1):
-            for statement in MIGRATIONS.get(target, ()):
-                connection.execute(statement)
+            for step in MIGRATIONS.get(target, ()):
+                if isinstance(step, str):
+                    connection.execute(step)
+                    continue
+                table_name, column, column_type = step
+                existing = connection.execute(f'PRAGMA table_info("{table_name}")')
+                columns = {row[1] for row in existing}
+                if columns and column not in columns:
+                    connection.execute(
+                        f'ALTER TABLE "{table_name}" ADD COLUMN "{column}" {column_type}'
+                    )
     for table in Base.metadata.sorted_tables:
         connection.execute(str(CreateTable(table, if_not_exists=True).compile(dialect=dialect)))
         for index in sorted(table.indexes, key=lambda item: item.name or ""):

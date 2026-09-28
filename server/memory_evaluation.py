@@ -24,10 +24,10 @@ from server.lexeme_learning import (
     LexemeLearningPolicy,
     _apply_failure,
     _apply_success,
-    _learner_frontier_rank,
     _LearningEvidence,
     _LexemeEstimate,
     _ordered_evidence,
+    learner_frontier_rank,
 )
 from server.memory_model import prior_known, recall_now
 from server.models import Interaction, Lesson
@@ -92,7 +92,7 @@ def load_history(db: Session) -> History:
         key: term for index in indexes.values() for key, term in index.learning_catalog().items()
     }
     # Undo the configured scale so fitting can explore it independently.
-    base = _learner_frontier_rank(db, policy) / policy.frontier_scale
+    base = learner_frontier_rank(db, policy) / policy.frontier_scale
     return History(ordered, rereads, dict(observed), terms, base)
 
 

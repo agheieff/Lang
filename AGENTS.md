@@ -205,10 +205,17 @@ references one catalog key and anchors it to a precise half-open sentence run ra
   `lesson.rated` only when a rating or optional feedback tag is present. A null rating is valid only
   when the event contains feedback.
 - Treat `priority_terms` and `target_policy.candidate_term_keys` as ranked opportunities, never a
-  checklist. Urgency already accounts for due time, frequency, uncertainty, and repeated failures;
-  candidate breadth adapts to text length and proficiency confidence, while review/exploration and
-  target capacity also use the known-word ratio and difficulty. Natural text quality may
-  legitimately result in zero realized targets.
+  checklist. Urgency ranks reviewed words by 1 - predicted recall now (a bonus once recall falls
+  below 90%) and never-reviewed words by how likely they are still unknown, plus frequency,
+  uncertainty, and repeated failures. Natural text quality may legitimately result in zero
+  realized targets.
+- New vocabulary comes from two sources on purpose: `brief.vocabulary.list_candidates`
+  (frequency-ordered word lists in `server/word_lists/`, restricted to unencountered words near the
+  learner's level frontier) and a few words the agent chooses itself. The agent's own picks are a
+  deliberate random element and the only source once a list is exhausted or a language has none.
+- Every import records `known_share_at_import`, the predicted share of running words the learner
+  knows. The next plan compares recent values with the target (95% by default,
+  `target_known_share` preference) and scales new-word counts; texts show their current share.
 - For Chinese candidate ordering only, character retrievability may provide the existing small,
   bounded readability hint for sparse-evidence words. It fades out after direct word evidence and
   must never alter lexeme mastery, evidence, bands, urgency values, or due dates.

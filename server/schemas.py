@@ -697,6 +697,8 @@ class TextView(StrictModel):
     completion_count: int = Field(ge=0)
     rating: Literal[-1, 1] | None
     lexical_token_count: int = Field(ge=0)
+    # Predicted share of running words the learner currently knows.
+    known_share: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class LessonQueueActionIn(StrictModel):
@@ -987,6 +989,27 @@ class AgentLessonBrief(StrictModel):
     ending_excerpt: str = Field(max_length=180)
     calibration_lesson: bool = False
     metadata: dict[str, Any]
+    known_share: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class NewWordCandidate(StrictModel):
+    lemma: str = Field(min_length=1, max_length=200)
+    pronunciation: str | None = Field(default=None, max_length=300)
+    gloss: str = Field(max_length=500)
+    frequency_rank: int | None = Field(default=None, ge=1)
+    level: int | None = Field(default=None, ge=1)
+    source: str = Field(min_length=1, max_length=40)
+
+
+class VocabularyPlan(StrictModel):
+    """New-vocabulary guidance: list words near the frontier plus the agent's own picks."""
+
+    list_candidates: list[NewWordCandidate] = Field(default_factory=list, max_length=32)
+    list_new_words: int = Field(ge=0, le=12)
+    free_new_words: int = Field(ge=0, le=12)
+    list_exhausted: bool = False
+    target_known_share: float = Field(ge=0.5, le=1.0)
+    recent_known_share: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class AgentBrief(StrictModel):
@@ -1002,6 +1025,7 @@ class AgentBrief(StrictModel):
     priority_terms: list[AgentTermBrief]
     mastered_term_keys: list[str]
     recent_lessons: list[AgentLessonBrief]
+    vocabulary: VocabularyPlan | None = None
 
 
 class GeneratedLessonBlock(LessonBlock):

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, cast, get_args
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -48,6 +48,12 @@ from server.lesson_queue import (
     skipped_lesson_ids,
     unread_lessons,
 )
+from server.lexeme_learning import (
+    DEFAULT_LEXEME_LEARNING_POLICY,
+    learner_frontier_rank,
+    learner_level_frontier_rank,
+)
+from server.memory_model import recall_now
 from server.models import (
     CharacterState,
     GenerationTask,
@@ -93,6 +99,14 @@ from server.schemas import (
     TextRequestIn,
     is_proper_noun_pos,
 )
+from server.vocabulary_plan import (
+    DEFAULT_TARGET_KNOWN_SHARE,
+    KnownShareInputs,
+    known_share,
+    plan_vocabulary,
+    profile_known_share_inputs,
+)
+from server.word_lists import word_list
 from server.workspaces import Workspace
 
 GENERATION_DEDUPE_KEY = "lesson-queue"
@@ -359,6 +373,18 @@ def import_lesson(
     db.commit()
     db.refresh(lesson)
     ensure_derived_states(db)
+    if lesson.known_share_at_import is None:
+        # Keep updated_at unchanged: it is part of the derived-state watermark.
+        db.execute(
+            update(Lesson)
+            .where(Lesson.id == lesson.id)
+            .values(
+                known_share_at_import=known_share(document, profile_known_share_inputs(db)),
+                updated_at=lesson.updated_at,
+            )
+        )
+        db.commit()
+        db.refresh(lesson)
     _ensure_lesson_audio(db, lesson)
     return lesson
 
@@ -1617,6 +1643,27 @@ def build_agent_brief(
         latest_feedback,
         now,
     )
+    share_inputs = KnownShareInputs(
+        units=units,
+        states={term.term_key: term for term in terms},
+        frontier_rank=learner_frontier_rank(db, DEFAULT_LEXEME_LEARNING_POLICY),
+        memory=DEFAULT_LEXEME_LEARNING_POLICY.memory,
+        at=now,
+    )
+    recent_import_shares = [
+        lesson.known_share_at_import
+        for lesson in lessons
+        if documents[lesson.id].calibration is None and lesson.known_share_at_import is not None
+    ][:3]
+    vocabulary = plan_vocabulary(
+        entries=word_list(profile.learning_language),
+        known_lemmas=(term.lemma for term in terms),
+        frontier_rank=learner_level_frontier_rank(db),
+        memory=share_inputs.memory,
+        text_length=_effective_text_length(profile_view, latest_feedback),
+        target_known_share=_target_known_share(profile_view.preferences),
+        recent_known_shares=recent_import_shares,
+    )
     mastered = sorted(
         term.term_key
         for term in terms
@@ -1651,6 +1698,7 @@ def build_agent_brief(
                 ending_excerpt=_lesson_excerpt(sentences, from_end=True),
                 calibration_lesson=document.calibration is not None,
                 metadata=_agent_lesson_metadata(document.metadata),
+                known_share=known_share(document, share_inputs),
             )
         )
     return AgentBrief(
@@ -1669,6 +1717,7 @@ def build_agent_brief(
         priority_terms=priority_terms,
         mastered_term_keys=mastered,
         recent_lessons=recent,
+        vocabulary=vocabulary,
     )
 
 
@@ -1999,11 +2048,21 @@ def _target_known_ratio(preferences: Mapping[str, Any]) -> float:
     return max(0.5, min(1.0, float(configured)))
 
 
+def _target_known_share(preferences: Mapping[str, Any]) -> float:
+    configured = preferences.get("target_known_share")
+    if isinstance(configured, bool) or not isinstance(configured, (int, float)):
+        return DEFAULT_TARGET_KNOWN_SHARE
+    return max(0.85, min(0.99, float(configured)))
+
+
 def _profile_target_capacity_factor(profile: ProfileView) -> float:
     known_ratio = _target_known_ratio(profile.preferences)
     known_ratio_adjustment = (DEFAULT_TARGET_KNOWN_RATIO - known_ratio) / 2.0
     difficulty_adjustment = (profile.difficulty - 0.5) / 4.0
     return 1.0 + known_ratio_adjustment + difficulty_adjustment
+
+
+DESIRED_RETENTION = 0.9
 
 
 def _urgency(
@@ -2013,26 +2072,28 @@ def _urgency(
     target_appearances: int = 0,
     failure_lesson_count: int = 0,
 ) -> float:
-    mastery_need = 1.0 - term.mastery
-    uncertainty = min(1.0, 4.0 / (term.alpha + term.beta))
-    if term.first_seen_at is None:
-        due = 0.8
-    elif term.next_due_at is None:
-        due = 0.5
-    else:
-        days = (now - as_utc(term.next_due_at)).total_seconds() / 86_400
-        due = max(0.0, min(1.0, 0.5 + days / 7.0))
+    """Rank a word for deliberate reuse by how likely it is forgotten right now.
+
+    Reviewed words are scored by 1 - predicted recall, with a bonus once recall has fallen below
+    the desired retention (due). Words never reviewed here are scored by how likely they are still
+    unknown given frequency and level, so common words the learner surely knows are not drilled.
+    """
+
     frequency = (
         1.0 / (1.0 + math.log10(max(1, term.frequency_rank)))
         if term.frequency_rank is not None
         else 0.25
     )
-    failure_strength = min(1.0, term.reveal_failures / 3.0)
+    memory = term.memory_state
+    if memory is None:
+        need = 1.0 - term.prior_known
+        due = 0.5
+    else:
+        recall = recall_now(memory, prior=term.prior_known, at=now)
+        need = 1.0 - recall
+        due = 1.0 if recall < DESIRED_RETENTION else 0.0
+    uncertainty = min(1.0, 4.0 / (term.alpha + term.beta))
     failure_spread = min(1.0, failure_lesson_count / 3.0)
-    known_signal = min(1.0, term.qualified_exposures / 3.0)
-    surprise = 0.0
-    if term.reveal_failures >= 2:
-        surprise = failure_strength * frequency * (0.6 + 0.2 * failure_spread + 0.2 * known_signal)
     target_signal = min(1.0, float(target_appearances))
     rare_incidental_penalty = (
         0.12
@@ -2043,12 +2104,12 @@ def _urgency(
         else 0.0
     )
     score = (
-        0.32 * mastery_need
-        + 0.18 * uncertainty
-        + 0.17 * due
-        + 0.1 * frequency
-        + 0.18 * surprise
-        + 0.1 * target_signal
+        0.42 * need
+        + 0.18 * due
+        + 0.14 * frequency
+        + 0.08 * uncertainty
+        + 0.1 * failure_spread
+        + 0.08 * target_signal
         - rare_incidental_penalty
     )
     return round(max(0.0, score), 6)

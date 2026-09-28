@@ -16,11 +16,15 @@
 !/run.sh
 !/run_tests.sh
 !/scripts/**/*.sh
+!/scripts/**/*.py
 !/config/**/*.toml
 
 !/server/**/*.py
 !/server/grammar_catalogs/**/*.toml
 !/server/language_rules/**/*.toml
+!/server/word_lists/**/*.tsv
+!/server/word_lists/**/*.txt
+!/server/word_lists/**/*.md
 !/server/templates/**/*.html
 !/web/**/*.ts
 !/web/**/*.css
