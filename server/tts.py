@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import unicodedata
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -472,7 +473,7 @@ def audio_status(db: Session, workspace: Workspace, lesson_id: int) -> LessonAud
         task.error = "cached audio file is missing"
         task.updated_at = utc_now()
         db.commit()
-    if provider_command() is None:
+    if provider_command() is None and not remote_tts_enabled():
         return LessonAudioStatus(
             lesson_id=lesson.id,
             state="unavailable",
@@ -497,6 +498,12 @@ def audio_status(db: Session, workspace: Workspace, lesson_id: int) -> LessonAud
     elif task.attempts > 0:
         preparing_reason = "retrying"
         message = "The first local generation attempt failed; one automatic retry is queued."
+    elif remote_tts_enabled():
+        preparing_reason = "queued"
+        message = (
+            "Audio is queued and is prepared on the PC while it is on; a browser voice can be "
+            "used meanwhile."
+        )
     else:
         preparing_reason = "queued"
         message = "Local audio is queued; the audio worker prepares one text at a time."
@@ -693,3 +700,22 @@ def project_environment() -> dict[str, str]:
 
 def audio_task_state(task: AudioTask) -> AudioTaskState:
     return cast(AudioTaskState, task.state)
+
+
+def validate_wave(path: Path) -> None:
+    if not path.is_file() or path.stat().st_size <= 44:
+        raise ValueError("Qwen provider did not create usable audio")
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if audio.getnframes() <= 0 or audio.getframerate() < 8_000:
+                raise ValueError("Qwen provider created an empty or invalid WAV")
+            if audio.getnchannels() not in {1, 2} or audio.getsampwidth() not in {2, 3, 4}:
+                raise ValueError("Qwen provider created an unsupported WAV format")
+    except wave.Error as error:
+        raise ValueError("Qwen provider created an invalid WAV") from error
+
+
+def remote_tts_enabled() -> bool:
+    """Audio is synthesized by a worker on another machine (the PC) that claims tasks here."""
+
+    return os.getenv("ARC_LANG_TTS_REMOTE") == "1"

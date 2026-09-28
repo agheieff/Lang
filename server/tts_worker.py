@@ -9,7 +9,6 @@ import select
 import signal
 import subprocess
 import time
-import wave
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -29,6 +28,7 @@ from server.tts import (
     provider_command,
     provider_request,
     recover_audio_tasks,
+    validate_wave,
 )
 from server.workspaces import PROJECT_ROOT, Workspace, registry
 
@@ -116,7 +116,7 @@ def process_audio_task(workspace: Workspace, task_id: int, provider: AudioProvid
             request = provider_request(task, lesson, temporary)
         temporary.unlink(missing_ok=True)
         provider.generate(request)
-        _validate_wave(temporary)
+        validate_wave(temporary)
         os.replace(temporary, final_path)
         final_path.chmod(0o600)
         with session_scope(workspace) as db:
@@ -135,19 +135,6 @@ def _audio_task_model() -> type[Any]:
     from server.models import AudioTask
 
     return AudioTask
-
-
-def _validate_wave(path: Path) -> None:
-    if not path.is_file() or path.stat().st_size <= 44:
-        raise ValueError("Qwen provider did not create usable audio")
-    try:
-        with wave.open(str(path), "rb") as audio:
-            if audio.getnframes() <= 0 or audio.getframerate() < 8_000:
-                raise ValueError("Qwen provider created an empty or invalid WAV")
-            if audio.getnchannels() not in {1, 2} or audio.getsampwidth() not in {2, 3, 4}:
-                raise ValueError("Qwen provider created an unsupported WAV format")
-    except wave.Error as error:
-        raise ValueError("Qwen provider created an invalid WAV") from error
 
 
 class Worker:

@@ -17,6 +17,7 @@
 !/run_tests.sh
 !/scripts/**/*.sh
 !/scripts/**/*.py
+!/scripts/**/*.service
 !/config/**/*.toml
 
 !/server/**/*.py

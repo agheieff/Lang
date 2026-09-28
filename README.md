@@ -343,6 +343,16 @@ FP16 attention path. Other installations may explicitly set `ARC_LANG_TTS_ATTENT
 `ARC_LANG_TTS_DTYPE=float16` after a synthesis smoke test. Set `ARC_LANG_TTS_ENABLED=0` to leave the
 local worker off; browser speech remains available for activated profiles.
 
+## Neural audio on another machine
+
+The reader can run on a small always-on host while speech is synthesized on a stronger machine.
+Set `ARC_LANG_TTS_REMOTE=1` for the host's web service so audio status reports "queued" instead of
+"unavailable". On the machine with the Qwen runtime (`scripts/install_qwen_tts.sh`), run
+`uv run python -m server.remote_tts_worker --host HOST` or install `scripts/lang-tts-remote.service`.
+It claims one task at a time with `lang tts claim` over SSH, synthesizes locally, and uploads the WAV
+with `lang tts complete`; a claim left unfinished for 45 minutes returns to the queue without using
+an attempt. Nothing is exposed beyond SSH.
+
 ## Commands
 
 ```bash

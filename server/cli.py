@@ -362,6 +362,27 @@ def _generation_task_view(task: GenerationTask) -> dict[str, Any]:
     }
 
 
+def tts_claim(args: argparse.Namespace) -> None:
+    from server.db import init_all_databases
+    from server.remote_tts import claim_remote_audio
+
+    init_all_databases()
+    _print_json(claim_remote_audio(args.lease_minutes))
+
+
+def tts_complete(args: argparse.Namespace) -> None:
+    from server.remote_tts import complete_remote_audio
+
+    audio = sys.stdin.buffer.read()
+    _print_json({"relative_path": complete_remote_audio(_workspace(args), args.task, audio)})
+
+
+def tts_fail(args: argparse.Namespace) -> None:
+    from server.remote_tts import fail_remote_audio
+
+    _print_json({"state": fail_remote_audio(_workspace(args), args.task, args.error)})
+
+
 def memory_evaluate(args: argparse.Namespace) -> None:
     from server.memory_evaluation import (
         describe_policy,
@@ -491,6 +512,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--fit", action="store_true", help="also grid-fit on the first half, score the second"
     )
     evaluate_parser.set_defaults(handler=memory_evaluate)
+
+    tts = commands.add_parser("tts", help="Remote audio synthesis (claimed over SSH)")
+    tts_commands = tts.add_subparsers(dest="tts_command", required=True)
+    claim_parser = tts_commands.add_parser("claim")
+    claim_parser.add_argument("--lease-minutes", type=float, default=45.0)
+    claim_parser.set_defaults(handler=tts_claim)
+    complete_parser = tts_commands.add_parser("complete", help="read WAV bytes from stdin")
+    complete_parser.add_argument("--task", type=int, required=True)
+    complete_parser.set_defaults(handler=tts_complete)
+    fail_parser = tts_commands.add_parser("fail")
+    fail_parser.add_argument("--task", type=int, required=True)
+    fail_parser.add_argument("--error", required=True)
+    fail_parser.set_defaults(handler=tts_fail)
 
     lesson = commands.add_parser("lesson", help="Validate and import generated lessons")
     lesson_commands = lesson.add_subparsers(dest="lesson_command", required=True)

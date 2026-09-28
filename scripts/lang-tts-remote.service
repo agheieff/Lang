@@ -1,0 +1,19 @@
+# PC user unit: synthesize the Pi's queued lesson audio whenever this PC is on.
+# Install: ln -s "$PWD/scripts/lang-tts-remote.service" ~/.config/systemd/user/ &&
+#          systemctl --user daemon-reload && systemctl --user enable --now lang-tts-remote
+[Unit]
+Description=Lang: synthesize Pi lesson audio on this PC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Arcadia/Lang
+ExecStart=%h/Arcadia/Lang/.venv/bin/python -m server.remote_tts_worker
+Restart=on-failure
+RestartSec=60
+Nice=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
