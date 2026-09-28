@@ -45,6 +45,9 @@ MIN_USABLE_PROBES_PER_ATTEMPT = 8
 ROUGH_MIN_ATTEMPTS = 2
 ROUGH_MIN_PROBES = 12
 STABLE_MIN_ATTEMPTS = 4
+# Ordinary first readings are weaker, coarser evidence than calibration probes.
+ROUGH_MIN_READINGS = 5
+STABLE_MIN_READINGS = 12
 STABLE_MAX_INTERVAL_WIDTH = 0.18
 MIN_REPORTED_INTERVAL_WIDTH = 0.12
 LOWER_QUANTILE = 0.10
@@ -181,6 +184,7 @@ class CalibrationEstimate:
     upper_level: CefrLevel | None
     qualified_attempts: int
     usable_probes: int
+    qualified_readings: int = 0
 
     @property
     def interval_width(self) -> float | None:
@@ -349,10 +353,10 @@ def estimate_calibration(
     upper = _quantile(probabilities, UPPER_QUANTILE)
     lower, upper = _apply_interval_floor(lower, upper, difficulty)
     usable_probes = sum(len(attempt.probes) for attempt in qualified)
-    status = _status(len(qualified), usable_probes, upper - lower)
+    status = _status(len(qualified), usable_probes, upper - lower, len(qualified_readings))
 
     return CalibrationEstimate(
-        status=status if qualified else "unstarted",
+        status=status if qualified or qualified_readings else "unstarted",
         difficulty=difficulty,
         lower=lower,
         upper=upper,
@@ -361,13 +365,20 @@ def estimate_calibration(
         upper_level=cefr_for_difficulty(upper),
         qualified_attempts=len(qualified),
         usable_probes=usable_probes,
+        qualified_readings=len(qualified_readings),
     )
 
 
-def _status(attempts: int, probes: int, interval_width: float) -> CalibrationStatus:
-    if attempts >= STABLE_MIN_ATTEMPTS and interval_width <= STABLE_MAX_INTERVAL_WIDTH:
+def _status(
+    attempts: int, probes: int, interval_width: float, readings: int = 0
+) -> CalibrationStatus:
+    if interval_width <= STABLE_MAX_INTERVAL_WIDTH and (
+        attempts >= STABLE_MIN_ATTEMPTS or readings >= STABLE_MIN_READINGS
+    ):
         return "stable"
-    if attempts >= ROUGH_MIN_ATTEMPTS and probes >= ROUGH_MIN_PROBES:
+    if (attempts >= ROUGH_MIN_ATTEMPTS and probes >= ROUGH_MIN_PROBES) or (
+        readings >= ROUGH_MIN_READINGS
+    ):
         return "rough"
     return "collecting"
 

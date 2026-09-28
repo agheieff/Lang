@@ -331,7 +331,7 @@ def test_self_reported_level_is_never_overwritten_and_demo_metadata_is_ignored(
             full_translation=True,
         ),
     )
-    assert rebuild_proficiency_state(db).status == "unstarted"
+    assert rebuild_proficiency_state(db).status == "collecting"
 
     for sequence in (1, 2):
         payload = _calibration_lesson(

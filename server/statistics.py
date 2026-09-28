@@ -92,6 +92,7 @@ def get_statistics_summary(db: Session) -> StatisticsSummary:
             upper_category=proficiency.upper_level,
             qualified_attempts=proficiency.qualified_attempts,
             usable_probes=proficiency.usable_probes,
+            qualified_readings=proficiency.qualified_readings,
         ),
     )
 

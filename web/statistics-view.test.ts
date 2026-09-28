@@ -39,6 +39,7 @@ const populated = parseStatistics({
     upper_category: "B1",
     qualified_attempts: 2,
     usable_probes: 20,
+    qualified_readings: 3,
   },
 });
 
@@ -153,7 +154,7 @@ describe("statistics view presentation", () => {
       meterText: "Approx. HSK 2, 20% of the shared scale",
       status: "Rough estimate",
       range: "Likely range 0.04–0.36 · Approx. HSK 1 to Approx. HSK 4",
-      evidence: "2 qualifying calibration reads · 20 usable probes",
+      evidence: "3 qualifying reads · 2 calibration reads · 20 usable probes",
     });
   });
 
@@ -191,6 +192,7 @@ describe("statistics view presentation", () => {
         upper_category: null,
         qualified_attempts: 0,
         usable_probes: 0,
+        qualified_readings: 0,
       },
     };
 
@@ -212,9 +214,9 @@ describe("statistics view presentation", () => {
       category: "A1",
       categoryTitle: "",
       percent: 15,
-      status: "No calibration reads yet",
+      status: "No qualifying reads yet",
       range: "Calibration texts will add a confidence range.",
-      evidence: "0 qualifying calibration reads · 0 usable probes",
+      evidence: "0 qualifying reads · 0 calibration reads · 0 usable probes",
     });
   });
 

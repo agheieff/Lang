@@ -60,7 +60,8 @@ start_worker() {
   WORKER_PGIDS+=("$!")
 }
 
-if [[ "${ARC_LANG_AUTO_GENERATE:-1}" == "1" ]]; then
+export ARC_LANG_AUTO_GENERATE="${ARC_LANG_AUTO_GENERATE:-1}"
+if [[ "$ARC_LANG_AUTO_GENERATE" == "1" ]]; then
   command -v setsid >/dev/null || { echo "setsid is required (Arch: util-linux)" >&2; exit 1; }
   start_worker uv run python -m server.worker_supervisor
 fi

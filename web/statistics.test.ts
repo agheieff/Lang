@@ -46,6 +46,7 @@ const payload = {
     upper_category: "B1",
     qualified_attempts: 2,
     usable_probes: 20,
+    qualified_readings: 3,
   },
 };
 
@@ -135,7 +136,7 @@ describe("statistics presentation", () => {
       ["Strong", 0.1],
     ]);
     expect(bands.map(masteryRange)).toEqual(["under 56%", "56–63%", "64–84%", "85% and up"]);
-    expect(calibrationLabel("unstarted")).toBe("No calibration reads yet");
+    expect(calibrationLabel("unstarted")).toBe("No qualifying reads yet");
     expect(calibrationLabel("rough")).toBe("Rough estimate");
     expect(levelSourceLabel("self_reported")).toBe("Self-report prior, updated by reading");
   });

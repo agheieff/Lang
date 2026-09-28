@@ -237,6 +237,7 @@ class ProficiencyState(Base):
     upper_level: Mapped[CefrLevel | None] = mapped_column(String(2), nullable=True)
     qualified_attempts: Mapped[int] = mapped_column(Integer, default=0)
     usable_probes: Mapped[int] = mapped_column(Integer, default=0)
+    qualified_readings: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -354,3 +355,13 @@ class GrammarState(Base):
     def mastery(self) -> float:
         total = self.alpha + self.beta
         return self.alpha / total if total else 0.5
+
+
+class DerivedState(Base):
+    """Evidence watermark of the last complete derived-cache rebuild."""
+
+    __tablename__ = "derived_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    watermark: Mapped[str] = mapped_column(String(64))
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

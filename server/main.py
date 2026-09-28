@@ -5,15 +5,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import Connection, Engine
 from sqlalchemy.orm import Session
 
 from server.base_path import BASE_PATH, app_path
 from server.characters import get_characters_state
 from server.db import init_all_databases, session_scope
+from server.derived_state import ensure_derived_states
 from server.grammar import get_grammar_state
 from server.han import character_tracking_available
 from server.language_display import profile_option
@@ -133,6 +135,27 @@ Database = Annotated[Session, Depends(get_db)]
 LegacyDatabase = Annotated[Session, Depends(get_legacy_db)]
 
 
+def get_fresh_db(db: Database) -> Session:
+    """Refresh derived caches at the HTTP boundary so domain reads stay side-effect free."""
+
+    ensure_derived_states(db)
+    return db
+
+
+def get_fresh_legacy_db(db: LegacyDatabase) -> Session:
+    ensure_derived_states(db)
+    return db
+
+
+FreshDatabase = Annotated[Session, Depends(get_fresh_db)]
+FreshLegacyDatabase = Annotated[Session, Depends(get_fresh_legacy_db)]
+
+
+def _refresh_derived_states(bind: Engine | Connection) -> None:
+    with Session(bind=bind) as db:
+        ensure_derived_states(db)
+
+
 @app.get("/", response_class=RedirectResponse, include_in_schema=False)
 def index(request: Request) -> RedirectResponse:
     requested = request.cookies.get(PROFILE_COOKIE) or registry.selected_id()
@@ -215,9 +238,12 @@ def activate_profile(
     return view
 
 
-def _events(batch: InteractionBatch, db: Session) -> EventRecordResult:
+def _events(batch: InteractionBatch, db: Session, background: BackgroundTasks) -> EventRecordResult:
     try:
-        return record_events(db, batch.events)
+        result = record_events(db, batch.events, rebuild_derived=False)
+        # Replay after the response: a click must not wait for the whole history.
+        background.add_task(_refresh_derived_states, db.get_bind())
+        return result
     except (EventConflictError, LookupError):
         raise
     except ValueError as error:
@@ -225,7 +251,7 @@ def _events(batch: InteractionBatch, db: Session) -> EventRecordResult:
 
 
 @app.get("/api/profiles/{profile_id}/reader", response_model=ReaderState)
-def reader(db: Database, lesson_id: int | None = None, fresh: bool = False) -> ReaderState:
+def reader(db: FreshDatabase, lesson_id: int | None = None, fresh: bool = False) -> ReaderState:
     return get_reader_state(db, lesson_id=lesson_id, fresh=fresh)
 
 
@@ -299,22 +325,22 @@ def request_text(request: TextRequestIn, db: Database) -> TextRequestView:
 
 
 @app.get("/api/profiles/{profile_id}/words", response_model=WordsState)
-def words(db: Database) -> WordsState:
+def words(db: FreshDatabase) -> WordsState:
     return get_words_state(db)
 
 
 @app.get("/api/profiles/{profile_id}/characters", response_model=CharactersState)
-def characters(db: Database) -> CharactersState:
+def characters(db: FreshDatabase) -> CharactersState:
     return get_characters_state(db)
 
 
 @app.get("/api/profiles/{profile_id}/statistics", response_model=StatisticsSummary)
-def statistics(db: Database) -> StatisticsSummary:
+def statistics(db: FreshDatabase) -> StatisticsSummary:
     return get_statistics_summary(db)
 
 
 @app.get("/api/profiles/{profile_id}/grammar", response_model=GrammarState)
-def grammar(db: Database) -> GrammarState:
+def grammar(db: FreshDatabase) -> GrammarState:
     return get_grammar_state(db)
 
 
@@ -349,18 +375,20 @@ def lesson_audio(profile_id: str, lesson_id: int, db: Database) -> FileResponse:
 
 
 @app.post("/api/profiles/{profile_id}/events", response_model=EventRecordResult)
-def events(batch: InteractionBatch, db: Database) -> EventRecordResult:
-    return _events(batch, db)
+def events(batch: InteractionBatch, db: Database, background: BackgroundTasks) -> EventRecordResult:
+    return _events(batch, db, background)
 
 
 # One-release compatibility for open pre-workspace tabs. Always pinned to the legacy DB.
 @app.get("/api/reader", response_model=ReaderState)
 def legacy_reader(
-    db: LegacyDatabase, lesson_id: int | None = None, fresh: bool = False
+    db: FreshLegacyDatabase, lesson_id: int | None = None, fresh: bool = False
 ) -> ReaderState:
     return get_reader_state(db, lesson_id=lesson_id, fresh=fresh)
 
 
 @app.post("/api/events", response_model=EventRecordResult)
-def legacy_events(batch: InteractionBatch, db: LegacyDatabase) -> EventRecordResult:
-    return _events(batch, db)
+def legacy_events(
+    batch: InteractionBatch, db: LegacyDatabase, background: BackgroundTasks
+) -> EventRecordResult:
+    return _events(batch, db, background)

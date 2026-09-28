@@ -22,9 +22,9 @@ from server.calibration import (
     cefr_center,
     cefr_for_difficulty,
 )
-from server.character_learning import rebuild_character_states
 from server.character_word_support import character_adjusted_offer_score
 from server.clock import as_utc, utc_now
+from server.derived_state import ensure_derived_states
 from server.generation_tasks import (
     GenerationMode,
     generation_task_kind,
@@ -32,7 +32,7 @@ from server.generation_tasks import (
     requested_topic,
     topic_request_id,
 )
-from server.grammar import comfortable_grammar_construction_keys, rebuild_grammar_states
+from server.grammar import comfortable_grammar_construction_keys
 from server.grammar_catalog import (
     GrammarConstruction,
     find_grammar_catalog,
@@ -48,7 +48,6 @@ from server.lesson_queue import (
     skipped_lesson_ids,
     unread_lessons,
 )
-from server.lexeme_learning import rebuild_lexeme_states
 from server.models import (
     CharacterState,
     GenerationTask,
@@ -359,10 +358,7 @@ def import_lesson(
     lesson.updated_at = utc_now()
     db.commit()
     db.refresh(lesson)
-    rebuild_lexeme_states(db)
-    rebuild_character_states(db)
-    rebuild_grammar_states(db)
-    rebuild_proficiency_state(db)
+    ensure_derived_states(db)
     _ensure_lesson_audio(db, lesson)
     return lesson
 
@@ -563,8 +559,13 @@ def _expected_frequency_rank(profile: ProfileView, policy: TermBandPolicy) -> in
 
 
 def record_events(
-    db: Session, events: Sequence[InteractionIn | Mapping[str, Any]]
+    db: Session,
+    events: Sequence[InteractionIn | Mapping[str, Any]],
+    *,
+    rebuild_derived: bool = True,
 ) -> EventRecordResult:
+    """Append events; the HTTP path defers the derived-cache replay off the request."""
+
     parsed = [
         event if isinstance(event, InteractionIn) else InteractionIn.model_validate(event)
         for event in events
@@ -650,12 +651,8 @@ def record_events(
     accepted_id_set = set(accepted_ids)
     accepted_types = {event.type for event in new_events if event.event_id in accepted_id_set}
     replay_types = accepted_types or {event.type for event in unique_events.values()}
-    if replay_types & DERIVED_EVIDENCE_EVENT_TYPES:
-        rebuild_lexeme_states(db)
-        rebuild_character_states(db)
-        rebuild_grammar_states(db)
-    if replay_types & PROFICIENCY_EVENT_TYPES:
-        rebuild_proficiency_state(db)
+    if rebuild_derived and replay_types & PROFICIENCY_EVENT_TYPES:
+        ensure_derived_states(db)
     generation_triggers = [
         event.event_id
         for event in new_events
@@ -665,7 +662,7 @@ def record_events(
         ensure_generation_task(
             db,
             trigger_event_ids=generation_triggers,
-            proficiency_current=True,
+            proficiency_current=rebuild_derived,
         )
     return EventRecordResult(
         accepted=len(accepted_ids),
@@ -675,7 +672,9 @@ def record_events(
 
 
 def auto_generation_enabled() -> bool:
-    return os.getenv("ARC_LANG_AUTO_GENERATE") == "1"
+    """Enabled unless explicitly disabled, matching the documented `pnpm dev` default."""
+
+    return os.getenv("ARC_LANG_AUTO_GENERATE", "1") != "0"
 
 
 def unread_queue_target() -> int:
@@ -1046,8 +1045,9 @@ def ensure_generation_task(
     profile = ensure_profile(db)
     if not profile_is_active(profile):
         return None
-    if not proficiency_current:
-        rebuild_proficiency_state(db)
+    if not proficiency_current and profile_level_source(profile) == "unknown":
+        # Finishing calibration placement can change the generation mode itself.
+        ensure_derived_states(db)
     mode = generation_mode(profile)
     target = CALIBRATION_QUEUE_TARGET if mode == "calibration" else unread_queue_target()
     unread = unread_generation_lesson_count(db, mode)
@@ -1088,6 +1088,8 @@ def ensure_generation_task(
             db.commit()
             db.refresh(outstanding)
         return outstanding
+    if not proficiency_current:
+        ensure_derived_states(db)
     latest = next(
         (
             task
@@ -1492,7 +1494,7 @@ def build_agent_brief(
             }
         }
     )
-    rebuild_grammar_states(db)
+    ensure_derived_states(db)
     catalog = find_grammar_catalog(profile.learning_language)
     now = utc_now()
     lessons = db.scalars(
@@ -2192,6 +2194,7 @@ def build_profile_view(db: Session, profile: Profile | None = None) -> ProfileVi
         ),
         qualified_attempts=state.qualified_attempts if state is not None else 0,
         usable_probes=state.usable_probes if state is not None else 0,
+        qualified_readings=state.qualified_readings if state is not None else 0,
     )
     return ProfileView(
         learning_language=profile.learning_language,

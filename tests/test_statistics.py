@@ -260,6 +260,7 @@ def test_level_summary_exposes_one_current_snapshot(db: Session) -> None:
         "upper_category": "C1",
         "qualified_attempts": 2,
         "usable_probes": 18,
+        "qualified_readings": 0,
     }
 
 

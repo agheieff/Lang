@@ -41,6 +41,7 @@ export interface StatisticsLevel {
   upper_category: string | null;
   qualified_attempts: number;
   usable_probes: number;
+  qualified_readings: number;
 }
 
 export interface StatisticsPayload {
@@ -166,6 +167,7 @@ export function parseStatistics(value: unknown): StatisticsPayload {
     upper_category: asNullableText(rawLevel.upper_category, "level.upper_category"),
     qualified_attempts: asInteger(rawLevel.qualified_attempts, "level.qualified_attempts"),
     usable_probes: asInteger(rawLevel.usable_probes, "level.usable_probes"),
+    qualified_readings: asInteger(rawLevel.qualified_readings, "level.qualified_readings"),
   };
   const rangeParts = [level.lower, level.upper];
   if (rangeParts.filter((part) => part !== null).length === 1) {
@@ -248,8 +250,8 @@ export function masteryRange(band: KnowledgeBand): string {
 }
 
 export function calibrationLabel(status: CalibrationStatus): string {
-  if (status === "unstarted") return "No calibration reads yet";
-  if (status === "collecting") return "Calibration in progress";
+  if (status === "unstarted") return "No qualifying reads yet";
+  if (status === "collecting") return "Collecting evidence";
   if (status === "rough") return "Rough estimate";
   return "Stable estimate";
 }

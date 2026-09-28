@@ -117,7 +117,10 @@ export function presentStatistics(state: StatisticsPayload): StatisticsPresentat
       meterText: `${current.label}, ${percent}% of the shared scale`,
       status: calibrationLabel(level.status),
       range: levelRange(state),
-      evidence: `${level.qualified_attempts.toLocaleString()} qualifying calibration ${plural(
+      evidence: `${level.qualified_readings.toLocaleString()} qualifying ${plural(
+        level.qualified_readings,
+        "read",
+      )} · ${level.qualified_attempts.toLocaleString()} calibration ${plural(
         level.qualified_attempts,
         "read",
       )} · ${level.usable_probes.toLocaleString()} usable ${plural(level.usable_probes, "probe")}`,

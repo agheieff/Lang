@@ -8,12 +8,24 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from server.models import Base
 from server.workspaces import Workspace, registry
+
+# PRAGMA user_version. Version 1 is the unversioned schema that existed before migrations.
+BASELINE_SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Derived caches are replayed from append-only evidence, so a derived-table change only drops the
+# table; it is recreated below and rebuilt from the evidence on the next read.
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: ("DROP TABLE IF EXISTS proficiency_state",),
+}
 
 _factories: dict[Path, sessionmaker[Session]] = {}
 _engines: dict[Path, Engine] = {}
@@ -140,7 +152,7 @@ def init_db(workspace: Workspace | str | None = None) -> Workspace:
     engine = _session_factory(resolved).kw["bind"]
     if not isinstance(engine, Engine):
         raise RuntimeError("workspace database has no engine")
-    Base.metadata.create_all(engine)
+    migrate_database(engine)
 
     from server.learning import ensure_profile
 
@@ -176,6 +188,58 @@ def _backfill_character_states(db: Session) -> None:
     states = db.scalar(select(func.count()).select_from(CharacterState)) or 0
     if lessons and not states:
         rebuild_character_states(db)
+
+
+def migrate_database(engine: Engine) -> int:
+    """Bring one database to SCHEMA_VERSION inside a single exclusive transaction.
+
+    The web service and generation worker start concurrently, so version checks, migrations and
+    table creation must not interleave between processes.
+    """
+
+    raw = engine.raw_connection()
+    try:
+        connection: Any = raw.driver_connection
+        isolation = connection.isolation_level
+        connection.isolation_level = None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                version = _migrate(connection, engine.dialect)
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.isolation_level = isolation
+    finally:
+        raw.close()
+    return version
+
+
+def _migrate(connection: Any, dialect: Dialect) -> int:
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if (
+        version == 0
+        and connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lessons'"
+        ).fetchone()
+    ):
+        version = BASELINE_SCHEMA_VERSION
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema version {version} is newer than this code ({SCHEMA_VERSION})"
+        )
+    if version:
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            for statement in MIGRATIONS.get(target, ()):
+                connection.execute(statement)
+    for table in Base.metadata.sorted_tables:
+        connection.execute(str(CreateTable(table, if_not_exists=True).compile(dialect=dialect)))
+        for index in sorted(table.indexes, key=lambda item: item.name or ""):
+            connection.execute(str(CreateIndex(index, if_not_exists=True).compile(dialect=dialect)))
+    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    return SCHEMA_VERSION
 
 
 def init_all_databases() -> None:

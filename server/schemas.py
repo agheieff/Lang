@@ -522,6 +522,7 @@ class ProficiencyView(StrictModel):
     upper_level: CefrLevel | None = None
     qualified_attempts: int = Field(default=0, ge=0)
     usable_probes: int = Field(default=0, ge=0)
+    qualified_readings: int = Field(default=0, ge=0)
 
 
 class ProfileView(StrictModel):
@@ -890,6 +891,7 @@ class StatisticsLevelSummary(StrictModel):
     upper_category: CefrLevel | None = None
     qualified_attempts: int = Field(ge=0)
     usable_probes: int = Field(ge=0)
+    qualified_readings: int = Field(default=0, ge=0)
 
 
 class StatisticsSummary(StrictModel):

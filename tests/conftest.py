@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import os
+import tempfile
+
+# Isolate every test run from the real registry and databases before server modules import.
+os.environ["ARC_LANG_DATA_DIR"] = tempfile.mkdtemp(prefix="arc-lang-test-")
+# Tests opt in to automatic generation explicitly.
+os.environ["ARC_LANG_AUTO_GENERATE"] = "0"
+
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

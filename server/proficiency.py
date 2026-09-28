@@ -23,7 +23,7 @@ from server.learning_units import LearningUnitIndex, build_learning_unit_index
 from server.lesson_content import body_sentences, lesson_document
 from server.models import Interaction, Lesson, ProficiencyState, Profile
 from server.profile_activation import PROFILE_LEVEL_SOURCE_KEY, questionnaire_seed
-from server.reading_evidence import finite_number
+from server.reading_evidence import finite_number, payload_is_qualified_reading
 from server.schemas import FeedbackTag, LessonDocument, LevelSource, is_proper_noun_pos
 
 ADAPTIVE_TARGET_DIFFICULTY_METADATA_KEY = "adaptive_target_difficulty"
@@ -63,8 +63,8 @@ def rebuild_proficiency_state(
         for interaction in interactions:
             grouped[(interaction.lesson_id, interaction.session_id)].append(interaction)
 
-    calibration_attempts: dict[int, tuple[datetime, int, CalibrationAttempt]] = {}
-    reading_attempts: dict[int, tuple[datetime, int, OrdinaryReadingAttempt]] = {}
+    calibration_attempts: dict[int, tuple[tuple[bool, datetime, int], CalibrationAttempt]] = {}
+    reading_attempts: dict[int, tuple[tuple[bool, datetime, int], OrdinaryReadingAttempt]] = {}
     lesson_keys = {lesson.id: lesson.key for lesson in lessons}
     for (lesson_id, session_id), events in sorted(grouped.items()):
         document = documents[lesson_id]
@@ -72,6 +72,8 @@ def rebuild_proficiency_state(
         if completion is None:
             continue
         occurred_at = as_utc(completion.occurred_at)
+        # A qualified reading outranks an earlier too-short one of the same lesson.
+        rank = (not payload_is_qualified_reading(completion.payload), occurred_at, completion.id)
         if evidence_cursor is not None and completion.id <= evidence_cursor:
             continue
         if document.calibration is not None:
@@ -98,9 +100,9 @@ def rebuild_proficiency_state(
                     if units.resolve(probe.term_key) is not None
                 ),
             )
-            calibration_candidate = (occurred_at, completion.id, attempt)
+            calibration_candidate = (rank, attempt)
             previous_calibration = calibration_attempts.get(lesson_id)
-            if previous_calibration is None or calibration_candidate[:2] < previous_calibration[:2]:
+            if previous_calibration is None or rank < previous_calibration[0]:
                 calibration_attempts[lesson_id] = calibration_candidate
             continue
 
@@ -112,9 +114,9 @@ def rebuild_proficiency_state(
             events=events,
             completion=completion,
         )
-        reading_candidate = (occurred_at, completion.id, reading)
+        reading_candidate = (rank, reading)
         previous_reading = reading_attempts.get(lesson_id)
-        if previous_reading is None or reading_candidate[:2] < previous_reading[:2]:
+        if previous_reading is None or rank < previous_reading[0]:
             reading_attempts[lesson_id] = reading_candidate
 
     seed = questionnaire_seed(profile)
@@ -122,10 +124,10 @@ def rebuild_proficiency_state(
         seed = (profile.difficulty, SELF_REPORTED_PRIOR_VARIANCE)
     prior = CalibrationPrior(*seed) if seed is not None else None
     estimate = estimate_calibration(
-        (value[2] for value in calibration_attempts.values()),
+        (value[1] for value in calibration_attempts.values()),
         prior=prior,
         as_of=utc_now(),
-        reading_attempts=(value[2] for value in reading_attempts.values()),
+        reading_attempts=(value[1] for value in reading_attempts.values()),
     )
     state = db.get(ProficiencyState, 1) or ProficiencyState(id=1)
     state.status = estimate.status
@@ -137,6 +139,7 @@ def rebuild_proficiency_state(
     state.upper_level = estimate.upper_level
     state.qualified_attempts = estimate.qualified_attempts
     state.usable_probes = estimate.usable_probes
+    state.qualified_readings = estimate.qualified_readings
     state.updated_at = utc_now()
     db.add(state)
 
@@ -269,7 +272,11 @@ def _first_completion(events: Sequence[Interaction]) -> Interaction | None:
     completions = [event for event in events if event.event_type == "lesson.completed"]
     return min(
         completions,
-        key=lambda event: (as_utc(event.occurred_at), event.id),
+        key=lambda event: (
+            not payload_is_qualified_reading(event.payload),
+            as_utc(event.occurred_at),
+            event.id,
+        ),
         default=None,
     )
 

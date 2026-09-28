@@ -15,11 +15,11 @@ from server.learning import (
     build_generation_target_policy,
     get_reader_state,
     import_lesson,
-    rebuild_lexeme_states,
     record_events,
     update_profile,
     validate_lesson,
 )
+from server.lexeme_learning import rebuild_lexeme_states
 from server.models import Interaction, Lesson, LexemeState, ProficiencyState
 from server.schemas import ReaderState
 

@@ -354,7 +354,8 @@ def test_ordinary_success_moves_broad_estimate_quickly_then_slows() -> None:
     assert baseline.difficulty < first.difficulty < second.difficulty < fourth.difficulty
     assert fourth.difficulty < eighth.difficulty
     assert first.difficulty - baseline.difficulty > eighth.difficulty - fourth.difficulty
-    assert eighth.status == "unstarted"
+    assert eighth.status == "rough"
+    assert eighth.qualified_readings == 8
     assert eighth.qualified_attempts == eighth.usable_probes == 0
 
 
