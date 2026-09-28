@@ -420,6 +420,37 @@ def fail_audio_task(db: Session, task_id: int, *, error: str) -> AudioTask:
     return task
 
 
+def retry_audio_task(db: Session, task_id: int) -> AudioTask:
+    """Give a failed task a fresh attempt budget, e.g. after fixing the audio runtime."""
+
+    task = db.get(AudioTask, task_id)
+    if task is None:
+        raise LookupError(f"audio task not found: {task_id}")
+    if task.state != "failed":
+        raise ValueError(f"audio task {task_id} is not failed")
+    task.state = "pending"
+    task.attempts = 0
+    task.finished_at = None
+    task.updated_at = utc_now()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def release_audio_task(db: Session, task_id: int, *, reason: str) -> AudioTask:
+    """Return a claimed task to the queue without charging the attempt (worker-side problem)."""
+
+    task = _running_task(db, task_id)
+    task.state = "pending"
+    task.attempts = max(0, task.attempts - 1)
+    task.error = reason[:2000]
+    task.started_at = None
+    task.updated_at = utc_now()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
 def _running_task(db: Session, task_id: int) -> AudioTask:
     task = db.get(AudioTask, task_id)
     if task is None:

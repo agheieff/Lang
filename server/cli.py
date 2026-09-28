@@ -383,6 +383,18 @@ def tts_fail(args: argparse.Namespace) -> None:
     _print_json({"state": fail_remote_audio(_workspace(args), args.task, args.error)})
 
 
+def tts_release(args: argparse.Namespace) -> None:
+    from server.remote_tts import release_remote_audio
+
+    _print_json({"state": release_remote_audio(_workspace(args), args.task, args.reason)})
+
+
+def tts_retry(args: argparse.Namespace) -> None:
+    from server.remote_tts import retry_failed_audio
+
+    _print_json({"state": retry_failed_audio(_workspace(args), args.task)})
+
+
 def memory_evaluate(args: argparse.Namespace) -> None:
     from server.memory_evaluation import (
         describe_policy,
@@ -525,6 +537,13 @@ def build_parser() -> argparse.ArgumentParser:
     fail_parser.add_argument("--task", type=int, required=True)
     fail_parser.add_argument("--error", required=True)
     fail_parser.set_defaults(handler=tts_fail)
+    release_parser = tts_commands.add_parser("release", help="requeue without using an attempt")
+    release_parser.add_argument("--task", type=int, required=True)
+    release_parser.add_argument("--reason", required=True)
+    release_parser.set_defaults(handler=tts_release)
+    retry_parser = tts_commands.add_parser("retry", help="give a failed task a fresh budget")
+    retry_parser.add_argument("--task", type=int, required=True)
+    retry_parser.set_defaults(handler=tts_retry)
 
     lesson = commands.add_parser("lesson", help="Validate and import generated lessons")
     lesson_commands = lesson.add_subparsers(dest="lesson_command", required=True)

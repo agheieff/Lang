@@ -103,3 +103,69 @@ def test_remote_mode_reports_queued_instead_of_unavailable(
         status = audio_status(db, workspace, lesson_id)
     assert status.reason == "queued"
     assert "PC" in (status.message or "")
+
+
+def test_pc_worker_sends_provider_valid_requests_and_uploads(workspace: Workspace) -> None:
+    from server.qwen_tts_provider import _validate_request
+    from server.remote_tts_worker import Worker
+
+    claim = claim_remote_audio()
+    assert claim is not None
+    calls: list[tuple[list[str], bytes | None]] = []
+
+    class FakeRemote:
+        def run(self, arguments: list[str], *, stdin: bytes | None = None) -> Any:
+            calls.append((arguments, stdin))
+            return claim if arguments == ["tts", "claim"] else {"ok": True}
+
+    class FakeProvider:
+        def generate(self, request: Any) -> dict[str, Any]:
+            _validate_request(request.model_dump())  # the real provider's contract
+            Path(request.output_path).write_bytes(_wave_bytes())
+            return {"ok": True}
+
+    assert Worker(FakeRemote(), FakeProvider()).step() is True  # type: ignore[arg-type]
+    arguments, uploaded = calls[-1]
+    assert arguments == ["--profile", "es-es", "tts", "complete", "--task", str(claim["task_id"])]
+    assert uploaded == _wave_bytes()
+
+
+def test_runtime_failures_release_without_using_attempts(workspace: Workspace) -> None:
+    from server.remote_tts_worker import RuntimeBroken, Worker
+
+    claim = claim_remote_audio()
+    assert claim is not None
+    released: list[list[str]] = []
+
+    class FakeRemote:
+        def run(self, arguments: list[str], *, stdin: bytes | None = None) -> Any:
+            if arguments == ["tts", "claim"]:
+                return claim
+            released.append(arguments)
+            from server.remote_tts import release_remote_audio
+
+            return {"state": release_remote_audio(workspace, claim["task_id"], arguments[-1])}
+
+    class BrokenProvider:
+        def generate(self, request: Any) -> dict[str, Any]:
+            raise RuntimeError("LocalEntryNotFoundError: model snapshot missing")
+
+    with pytest.raises(RuntimeBroken):
+        Worker(FakeRemote(), BrokenProvider()).step()  # type: ignore[arg-type]
+    assert released[0][2:4] == ["tts", "release"]
+    task = _task(workspace)
+    assert task.state == "pending" and task.attempts == 0
+
+
+def test_failed_task_can_be_retried_with_a_fresh_budget(workspace: Workspace) -> None:
+    from server.remote_tts import retry_failed_audio
+
+    for _ in range(2):
+        claim = claim_remote_audio()
+        assert claim is not None
+        fail_remote_audio(workspace, claim["task_id"], "synthesis crashed")
+    task = _task(workspace)
+    assert task.state == "failed"
+
+    assert retry_failed_audio(workspace, task.id) == "pending"
+    assert _task(workspace).attempts == 0

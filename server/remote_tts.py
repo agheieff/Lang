@@ -24,6 +24,8 @@ from server.tts import (
     fail_audio_task,
     lesson_for_audio_task,
     provider_request,
+    release_audio_task,
+    retry_audio_task,
     validate_wave,
 )
 from server.workspaces import Workspace, registry
@@ -40,14 +42,8 @@ def claim_remote_audio(lease_minutes: float = DEFAULT_LEASE_MINUTES) -> dict[str
             cutoff = utc_now() - timedelta(minutes=lease_minutes)
             for stale in db.scalars(select(AudioTask).where(AudioTask.state == "running")):
                 if stale.started_at is None or as_utc(stale.started_at) < cutoff:
-                    # The PC went away mid-task; that is not the task's fault, so no attempt is
-                    # charged.
-                    stale.state = "pending"
-                    stale.attempts = max(0, stale.attempts - 1)
-                    stale.error = "remote audio lease expired"
-                    stale.started_at = None
-                    stale.updated_at = utc_now()
-            db.commit()
+                    # The PC went away mid-task; that is not the task's fault.
+                    release_audio_task(db, stale.id, reason="remote audio lease expired")
             task = claim_audio_task(db)
             if task is None:
                 continue
@@ -84,3 +80,13 @@ def complete_remote_audio(workspace: Workspace, task_id: int, audio: bytes) -> s
 def fail_remote_audio(workspace: Workspace, task_id: int, error: str) -> str:
     with session_scope(workspace) as db:
         return fail_audio_task(db, task_id, error=f"remote: {error}").state
+
+
+def release_remote_audio(workspace: Workspace, task_id: int, reason: str) -> str:
+    with session_scope(workspace) as db:
+        return release_audio_task(db, task_id, reason=f"remote: {reason}").state
+
+
+def retry_failed_audio(workspace: Workspace, task_id: int) -> str:
+    with session_scope(workspace) as db:
+        return retry_audio_task(db, task_id).state

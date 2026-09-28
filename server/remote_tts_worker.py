@@ -27,10 +27,22 @@ DEFAULT_REMOTE_CLI = (
 )
 IDLE_SECONDS = 120.0
 UNREACHABLE_SECONDS = 300.0
+RUNTIME_BROKEN_SECONDS = 1800.0
+# Failures of this machine's runtime rather than of the task: release without using an attempt.
+ENVIRONMENT_ERROR_MARKERS = (
+    "LocalEntryNotFoundError",
+    "GPU runtime is unavailable",
+    "No module named",
+    "Qwen provider stopped unexpectedly",
+)
 SSH_TIMEOUT_SECONDS = 120.0
 
 
 class RemoteUnavailable(RuntimeError):
+    pass
+
+
+class RuntimeBroken(RuntimeError):
     pass
 
 
@@ -78,13 +90,16 @@ class Worker:
         profile, task_id = claim["profile_id"], int(claim["task_id"])
         task = ["--profile", profile, "tts"]
         with tempfile.TemporaryDirectory(prefix="lang-tts-") as directory:
-            output = Path(directory) / "audio.wav"
+            output = Path(directory) / "audio.tmp.wav"  # the provider requires this suffix
             try:
                 request = AudioProviderRequest(**claim["request"], output_path=str(output))
                 self.provider.generate(request)
                 validate_wave(output)
             except Exception as error:
                 message = f"{type(error).__name__}: {error}"
+                if any(marker in message for marker in ENVIRONMENT_ERROR_MARKERS):
+                    self.remote.run([*task, "release", "--task", str(task_id), "--reason", message])
+                    raise RuntimeBroken(message) from error
                 self.remote.run([*task, "fail", "--task", str(task_id), "--error", message])
                 print(f"audio {profile}/{task_id} failed: {message}", flush=True)
                 return True
@@ -99,6 +114,11 @@ class Worker:
             except RemoteUnavailable as error:
                 print(f"Pi unreachable, retrying later: {error}", flush=True)
                 self._sleep(UNREACHABLE_SECONDS)
+                continue
+            except RuntimeBroken as error:
+                print(f"local audio runtime is broken, retrying later: {error}", flush=True)
+                self.provider.close()
+                self._sleep(RUNTIME_BROKEN_SECONDS)
                 continue
             if not worked:
                 self._sleep(IDLE_SECONDS)
@@ -125,7 +145,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, worker.stop)
     try:
         if args.once:
-            worker.step()
+            try:
+                worker.step()
+            except RuntimeBroken as error:
+                raise SystemExit(f"local audio runtime is broken: {error}") from error
         else:
             worker.run()
     finally:
