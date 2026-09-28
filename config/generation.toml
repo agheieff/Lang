@@ -1,0 +1,19 @@
+version = 1
+
+# These are provider-owned execution choices. Callback requests expose only provider-neutral task
+# names; another agent adapter can route the same tasks differently.
+[providers.codex.tasks.prose]
+model = "gpt-6-astra"
+reasoning_effort = "medium"
+
+[providers.codex.tasks.lexical]
+model = "gpt-6-astra"
+reasoning_effort = "low"
+
+[providers.codex.tasks.translation]
+model = "gpt-5.6-luna"
+reasoning_effort = "low"
+
+[providers.codex.tasks.grammar]
+model = "gpt-5.6-luna"
+reasoning_effort = "low"

@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import func, select
+
+from server.character_learning import rebuild_character_states
+from server.db import discard_workspace_storage, init_db, reset_workspace_storage, session_scope
+from server.grammar import rebuild_grammar_states
+from server.learning import (
+    auto_generation_enabled,
+    build_agent_brief,
+    build_profile_view,
+    ensure_generation_task,
+    ensure_profile,
+    import_lesson,
+    rebuild_proficiency_state,
+    retry_generation_task,
+    update_profile,
+    validate_lesson,
+)
+from server.lesson_content import body_sentences, lesson_document
+from server.lexeme_learning import rebuild_lexeme_states
+from server.models import (
+    CharacterState,
+    GenerationTask,
+    GrammarState,
+    Interaction,
+    Lesson,
+    LexemeState,
+)
+from server.profile_activation import (
+    QUESTIONNAIRE_SIGMA_FACTOR,
+    STARTING_POINT_DIFFICULTY,
+    ProfileActivationUpdate,
+    activate_profile_settings,
+    activation_view,
+    profile_is_active,
+)
+from server.schemas import LessonDocument, ProfileUpdate, ProfileView
+from server.workspaces import Workspace, registry
+
+_JSON_VALUE = TypeAdapter(Any)
+
+
+def _text_length(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("text length must be an integer") from error
+    if not 50 <= parsed <= 2_000:
+        raise argparse.ArgumentTypeError("text length must be between 50 and 2000")
+    return parsed
+
+
+def _read_json(path: str) -> Any:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _print_json(value: Any) -> None:
+    value = _JSON_VALUE.dump_python(value, mode="json")
+    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _profile_view(db: Any, profile: Any) -> ProfileView:
+    return build_profile_view(db, profile)
+
+
+def _workspace(args: argparse.Namespace) -> Workspace:
+    workspace = registry.resolve(args.profile_id)
+    init_db(workspace)
+    return workspace
+
+
+def _preferences(args: argparse.Namespace, existing: dict[str, Any]) -> dict[str, Any] | None:
+    preferences = dict(existing)
+    changed = False
+    if args.text_length is not None:
+        preferences["text_length"] = args.text_length
+        changed = True
+    if args.known_ratio is not None:
+        preferences["target_known_ratio"] = args.known_ratio
+        changed = True
+    if args.preference_json is not None:
+        extra = json.loads(args.preference_json)
+        if not isinstance(extra, dict):
+            raise ValueError("--preference-json must contain a JSON object")
+        preferences.update(extra)
+        changed = True
+    return preferences if changed else None
+
+
+def _profile_patch(args: argparse.Namespace, existing: Any) -> ProfileUpdate:
+    return ProfileUpdate(
+        learning_language=args.learning_language,
+        translation_language=args.translation_language,
+        level=args.level,
+        difficulty=args.difficulty,
+        interests=args.interests,
+        preferences=_preferences(args, dict(existing.preferences)),
+    )
+
+
+def profile_list(_: argparse.Namespace) -> None:
+    selected = registry.selected_id()
+    _print_json(
+        [
+            {
+                "id": workspace.profile_id,
+                "label": workspace.label,
+                "learning_language": workspace.learning_language,
+                "translation_language": workspace.translation_language,
+                "selected": workspace.profile_id == selected,
+                "workspace": workspace.relative_directory,
+                "database": workspace.relative_database,
+            }
+            for workspace in registry.list()
+        ]
+    )
+
+
+def profile_create(args: argparse.Namespace) -> None:
+    patch = ProfileUpdate(
+        learning_language=args.learning_language,
+        translation_language=args.translation_language,
+        level=args.level,
+        difficulty=args.difficulty,
+        interests=args.interests,
+        preferences=_preferences(args, {}),
+    )
+    if patch.learning_language is None or patch.translation_language is None:
+        raise ValueError("both profile languages are required")
+    workspace: Workspace | None = None
+    try:
+        with registry.provision(
+            args.new_profile_id,
+            label=args.label,
+            learning_language=patch.learning_language,
+            translation_language=patch.translation_language,
+        ) as workspace:
+            init_db(workspace)
+            with session_scope(workspace) as db:
+                update_profile(db, patch)
+    except BaseException:
+        if workspace is not None:
+            discard_workspace_storage(workspace)
+        raise
+    if args.select:
+        assert workspace is not None
+        registry.select(workspace.profile_id)
+    assert workspace is not None
+    _print_json({"created": True, "id": workspace.profile_id, "selected": args.select})
+
+
+def profile_select(args: argparse.Namespace) -> None:
+    workspace = registry.select(args.selected_profile_id)
+    _print_json({"selected": workspace.profile_id})
+
+
+def profile_delete(args: argparse.Namespace) -> None:
+    workspace = registry.delete(
+        args.deleted_profile_id,
+        discard=discard_workspace_storage,
+    )
+    _print_json(
+        {
+            "deleted": True,
+            "id": workspace.profile_id,
+            "workspace": workspace.relative_directory,
+        }
+    )
+
+
+def profile_reset(args: argparse.Namespace) -> None:
+    workspace = registry.reset(
+        args.reset_profile_id,
+        clear=reset_workspace_storage,
+    )
+    _print_json(
+        {
+            "id": workspace.profile_id,
+            "reset": True,
+            "workspace": workspace.relative_directory,
+        }
+    )
+
+
+def profile_show(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        _print_json(_profile_view(db, ensure_profile(db)))
+
+
+def profile_set(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        profile = ensure_profile(db)
+        patch = _profile_patch(args, profile)
+        if (
+            patch.learning_language is not None
+            and patch.learning_language != workspace.learning_language
+        ):
+            raise ValueError("create a new profile to change the learning language")
+        if (
+            patch.translation_language is not None
+            and patch.translation_language != workspace.translation_language
+        ):
+            raise ValueError("create a new profile to change the translation language")
+        _print_json(_profile_view(db, update_profile(db, patch)))
+
+
+def profile_activate(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        activation = activate_profile_settings(
+            db,
+            ProfileActivationUpdate(
+                starting_point=args.starting_point,
+                confidence=args.confidence,
+                interests=args.interests,
+                text_length=args.text_length,
+            ),
+        )
+        task = ensure_generation_task(db)
+        _print_json(
+            {
+                "activation": activation,
+                "automatic_generation_enabled": auto_generation_enabled(),
+                "generation_task_available": task is not None,
+                "generation_task": _generation_task_view(task) if task is not None else None,
+            }
+        )
+
+
+def brief(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        rebuild_lexeme_states(db)
+        rebuild_character_states(db)
+        rebuild_proficiency_state(db)
+        _print_json(build_agent_brief(db))
+
+
+def lesson_schema(_: argparse.Namespace) -> None:
+    _print_json(LessonDocument.model_json_schema())
+
+
+def lesson_validate(args: argparse.Namespace) -> None:
+    document = validate_lesson(_read_json(args.path))
+    _print_json(
+        {
+            "valid": True,
+            "key": document.key,
+            "terms": len(document.term_catalog()),
+            "sentences": len(body_sentences(document)),
+            "grammar_occurrences": len(document.grammar_occurrences()),
+        }
+    )
+
+
+def lesson_import(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        lesson = import_lesson(
+            db,
+            _read_json(args.path),
+            source_path=str(Path(args.path).resolve()),
+            replace=args.replace,
+        )
+        _print_json({"id": lesson.id, "key": lesson.key, "imported": True})
+
+
+def lesson_list(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        profile = ensure_profile(db)
+        lessons = db.scalars(
+            select(Lesson)
+            .where(
+                Lesson.learning_language == profile.learning_language,
+                Lesson.translation_language == profile.translation_language,
+            )
+            .order_by(Lesson.imported_at, Lesson.id)
+        ).all()
+        _print_json(
+            [
+                {
+                    "id": lesson.id,
+                    "key": lesson.key,
+                    "title": document.title,
+                    "topic": document.topic,
+                    "learning_language": document.learning_language,
+                    "translation_language": document.translation_language,
+                    "imported_at": lesson.imported_at.isoformat(),
+                }
+                for lesson in lessons
+                for document in [lesson_document(lesson)]
+            ]
+        )
+
+
+def rebuild(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        terms = rebuild_lexeme_states(db)
+        characters = rebuild_character_states(db)
+        grammar = rebuild_grammar_states(db)
+        proficiency = rebuild_proficiency_state(db)
+        _print_json(
+            {
+                "rebuilt": len(terms),
+                "characters_rebuilt": len(characters),
+                "grammar_rebuilt": len(grammar),
+                "proficiency_status": proficiency.status,
+                "qualified_calibration_attempts": proficiency.qualified_attempts,
+            }
+        )
+
+
+def generation_ensure(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        if not profile_is_active(ensure_profile(db)):
+            _print_json({"state": "inactive"})
+            return
+        task = ensure_generation_task(db, require_enabled=False)
+        _print_json(_generation_task_view(task) if task is not None else {"state": "satisfied"})
+
+
+def generation_list(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        statement = select(GenerationTask).order_by(GenerationTask.id.desc())
+        if args.state is not None:
+            statement = statement.where(GenerationTask.state == args.state)
+        _print_json([_generation_task_view(task) for task in db.scalars(statement).all()])
+
+
+def generation_retry(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        _print_json(_generation_task_view(retry_generation_task(db, args.task_id)))
+
+
+def _generation_task_view(task: GenerationTask) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "state": task.state,
+        "attempts": task.attempts,
+        "payload": task.payload,
+        "log_path": task.log_path,
+        "error": task.error,
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat(),
+        "started_at": task.started_at.isoformat() if task.started_at else None,
+        "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+    }
+
+
+def status(args: argparse.Namespace) -> None:
+    workspace = _workspace(args)
+    with session_scope(workspace) as db:
+        stored_profile = ensure_profile(db)
+        profile = build_profile_view(db, stored_profile)
+        _print_json(
+            {
+                "profile_id": workspace.profile_id,
+                "activation": activation_view(stored_profile),
+                "lessons": db.scalar(select(func.count()).select_from(Lesson)) or 0,
+                "interactions": db.scalar(select(func.count()).select_from(Interaction)) or 0,
+                "lexemes": db.scalar(select(func.count()).select_from(LexemeState)) or 0,
+                "characters": db.scalar(select(func.count()).select_from(CharacterState)) or 0,
+                "grammar_constructions": db.scalar(select(func.count()).select_from(GrammarState))
+                or 0,
+                "generation_tasks": db.scalar(select(func.count()).select_from(GenerationTask))
+                or 0,
+                "proficiency": {
+                    "difficulty": profile.difficulty,
+                    "level": profile.level,
+                    **profile.proficiency.model_dump(mode="json"),
+                },
+            }
+        )
+
+
+def _add_profile_settings(parser: argparse.ArgumentParser, *, languages: bool = True) -> None:
+    if languages:
+        parser.add_argument("--learning-language")
+        parser.add_argument("--translation-language")
+    parser.add_argument("--level")
+    parser.add_argument("--difficulty", type=float)
+    parser.add_argument("--interest", dest="interests", action="append")
+    parser.add_argument("--text-length", type=_text_length)
+    parser.add_argument("--known-ratio", type=float)
+    parser.add_argument("--preference-json")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="lang", description="Operate the local language reader")
+    parser.add_argument("--profile", dest="profile_id", help="Profile ID; overrides the default")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    profile = commands.add_parser("profile", help="Create, select, delete, or configure profiles")
+    profile_commands = profile.add_subparsers(dest="profile_command", required=True)
+    profile_commands.add_parser("list").set_defaults(handler=profile_list)
+    profile_commands.add_parser("show").set_defaults(handler=profile_show)
+    create = profile_commands.add_parser("create")
+    create.add_argument("new_profile_id")
+    create.add_argument("--label")
+    create.add_argument("--learning-language", required=True)
+    create.add_argument("--translation-language", required=True)
+    create.add_argument("--select", action="store_true")
+    _add_profile_settings(create, languages=False)
+    create.set_defaults(handler=profile_create)
+    select_profile = profile_commands.add_parser("select")
+    select_profile.add_argument("selected_profile_id")
+    select_profile.set_defaults(handler=profile_select)
+    delete_profile = profile_commands.add_parser(
+        "delete",
+        help="Permanently delete one unselected profile and all of its local files",
+    )
+    delete_profile.add_argument("deleted_profile_id")
+    delete_profile.set_defaults(handler=profile_delete)
+    reset_profile = profile_commands.add_parser(
+        "reset",
+        help="Permanently clear one unselected profile while keeping it available",
+    )
+    reset_profile.add_argument("reset_profile_id")
+    reset_profile.set_defaults(handler=profile_reset)
+    profile_set_parser = profile_commands.add_parser("set")
+    _add_profile_settings(profile_set_parser)
+    profile_set_parser.set_defaults(handler=profile_set)
+    profile_activate_parser = profile_commands.add_parser(
+        "activate",
+        help="Activate a profile and optionally seed its first calibration",
+    )
+    profile_activate_parser.add_argument(
+        "--starting-point",
+        choices=tuple(STARTING_POINT_DIFFICULTY),
+        default="unsure",
+    )
+    profile_activate_parser.add_argument(
+        "--confidence",
+        choices=tuple(QUESTIONNAIRE_SIGMA_FACTOR),
+        default="medium",
+    )
+    profile_activate_parser.add_argument(
+        "--interest", dest="interests", action="append", default=[]
+    )
+    profile_activate_parser.add_argument("--text-length", type=_text_length)
+    profile_activate_parser.set_defaults(handler=profile_activate)
+
+    commands.add_parser("brief").set_defaults(handler=brief)
+    commands.add_parser("status").set_defaults(handler=status)
+    commands.add_parser("rebuild").set_defaults(handler=rebuild)
+
+    lesson = commands.add_parser("lesson", help="Validate and import generated lessons")
+    lesson_commands = lesson.add_subparsers(dest="lesson_command", required=True)
+    lesson_commands.add_parser("schema").set_defaults(handler=lesson_schema)
+    validate_parser = lesson_commands.add_parser("validate")
+    validate_parser.add_argument("path")
+    validate_parser.set_defaults(handler=lesson_validate)
+    import_parser = lesson_commands.add_parser("import")
+    import_parser.add_argument("path")
+    import_parser.add_argument("--replace", action="store_true")
+    import_parser.set_defaults(handler=lesson_import)
+    lesson_commands.add_parser("list").set_defaults(handler=lesson_list)
+
+    generation = commands.add_parser("generation", help="Inspect lesson generation work")
+    generation_commands = generation.add_subparsers(dest="generation_command", required=True)
+    generation_commands.add_parser("ensure").set_defaults(handler=generation_ensure)
+    generation_list_parser = generation_commands.add_parser("list")
+    generation_list_parser.add_argument(
+        "--state", choices=("pending", "running", "completed", "failed")
+    )
+    generation_list_parser.set_defaults(handler=generation_list)
+    generation_retry_parser = generation_commands.add_parser("retry")
+    generation_retry_parser.add_argument("task_id", type=int)
+    generation_retry_parser.set_defaults(handler=generation_retry)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    if getattr(args, "known_ratio", None) is not None and not 0.5 <= args.known_ratio <= 1:
+        parser.error("--known-ratio must be between 0.5 and 1")
+    if getattr(args, "difficulty", None) is not None and not 0 <= args.difficulty <= 1:
+        parser.error("--difficulty must be between 0 and 1")
+    try:
+        args.handler(args)
+    except (OSError, ValueError, LookupError, ValidationError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+if __name__ == "__main__":
+    main()

@@ -1,33 +1,39 @@
-# Python
-__pycache__/
-*.pyc
-*.pyd
-.venv/
-*.egg-info/
-.eggs/
+# Whitelist: ignore everything, reopen directories, then allow project files explicitly.
+*
+!*/
 
-# Testing
-.pytest_cache/
+!/.gitignore
+!/AGENTS.md
+!/README.md
+!/pyproject.toml
+!/uv.lock
+!/uv.toml
+!/package.json
+!/pnpm-lock.yaml
+!/pnpm-workspace.yaml
+!/tsconfig.json
+!/biome.json
+!/run.sh
+!/run_tests.sh
+!/scripts/**/*.sh
+!/config/**/*.toml
 
-# Code quality
-.ruff_cache/
+!/server/**/*.py
+!/server/grammar_catalogs/**/*.toml
+!/server/language_rules/**/*.toml
+!/server/templates/**/*.html
+!/web/**/*.ts
+!/web/**/*.css
+!/tests/**/*.py
+!/tests/**/*.json
+!/examples/**/*.json
 
-# Database files
-*.db
-*.db-shm
-*.db-wal
-
-# Environment files
-.env
-.env.backup
-.env.*
-
-# Package manager lock files
-uv.lock
-
-# Runtime lock files and logs
-data/gen_locks/**
-data/llm_stream_logs/**
-
-# Development tool caches
-dev-tools/__pycache__/
+# Runtime and tool state stay private even though directories are reopened above.
+/.lang/
+/.mypy_cache/
+/.pytest_cache/
+/.ruff_cache/
+/.venv/
+/data/
+/node_modules/
+/server/static/

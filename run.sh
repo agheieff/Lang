@@ -1,42 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Default port
 PORT=8000
 
-usage() {
-  echo "Usage: $0 [--port N | -p N]" >&2
-}
-
-# Parse args
-while [ $# -gt 0 ]; do
+while (($#)); do
   case "$1" in
+    --port|-p)
+      PORT="${2:?missing port}"
+      shift 2
+      ;;
     --port=*)
       PORT="${1#*=}"
       shift
       ;;
-    --port|-p)
-      if [ $# -lt 2 ]; then usage; exit 1; fi
-      PORT="$2"
-      shift 2
-      ;;
-    -h|--help)
-      usage; exit 0
-      ;;
     *)
-      usage; exit 1
+      echo "Usage: $0 [--port N]" >&2
+      exit 2
       ;;
   esac
 done
 
-# Run from project root (script directory)
 cd "$(dirname "${BASH_SOURCE[0]}")"
+command -v uv >/dev/null || { echo "uv is required" >&2; exit 1; }
+command -v pnpm >/dev/null || { echo "pnpm is required (Arch: sudo pacman -S pnpm)" >&2; exit 1; }
 
-# Ensure deps/env are synced before running
-uv sync
+uv sync --locked
+pnpm install --frozen-lockfile
+pnpm build
 
-# Set default environment variables if not set
-export ARC_STARTUP_LANGS="${ARC_STARTUP_LANGS:-zh-CN}"
-export ARC_STARTUP_TEXTS_PER_LANG="${ARC_STARTUP_TEXTS_PER_LANG:-5}"
+WORKER_PIDS=()
+WORKER_PGIDS=()
+cleanup() {
+  local exit_status=$?
+  trap - EXIT INT TERM
+  if ((${#WORKER_PIDS[@]})); then
+    for pgid in "${WORKER_PGIDS[@]}"; do
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+    done
+    ( sleep 5; for pgid in "${WORKER_PGIDS[@]}"; do
+        kill -KILL -- "-$pgid" 2>/dev/null || true
+      done ) &
+    local killer_pid=$!
+    for pid in "${WORKER_PIDS[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+    kill "$killer_pid" 2>/dev/null || true
+    wait "$killer_pid" 2>/dev/null || true
+    for pgid in "${WORKER_PGIDS[@]}"; do
+      kill -KILL -- "-$pgid" 2>/dev/null || true
+    done
+  fi
+  exit "$exit_status"
+}
+trap cleanup EXIT INT TERM
 
-exec uv run uvicorn server.main:app --reload --port "$PORT"
+start_worker() {
+  setsid --wait "$@" &
+  WORKER_PIDS+=("$!")
+  WORKER_PGIDS+=("$!")
+}
+
+if [[ "${ARC_LANG_AUTO_GENERATE:-1}" == "1" ]]; then
+  command -v setsid >/dev/null || { echo "setsid is required (Arch: util-linux)" >&2; exit 1; }
+  start_worker uv run python -m server.worker_supervisor
+fi
+
+if [[ "${ARC_LANG_TTS_ENABLED:-1}" == "1" && -x data/tts/qwen/.venv/bin/python \
+      && -f data/tts/qwen/.ready ]]; then
+  command -v setsid >/dev/null || { echo "setsid is required (Arch: util-linux)" >&2; exit 1; }
+  start_worker uv run python -m server.tts_worker
+fi
+
+uv run uvicorn server.main:app --host 127.0.0.1 --port "$PORT" --reload \
+  --reload-dir server --reload-include '*.py' --reload-include '*.toml' \
+  --reload-exclude 'server/static/**'
