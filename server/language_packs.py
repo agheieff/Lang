@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -16,7 +17,14 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib  # type: ignore[import-not-found]
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 RULES_DIRECTORY = Path(__file__).with_name("language_rules")
 
@@ -194,6 +202,10 @@ class LanguagePack(BaseModel):
     learning_exceptions: tuple[LanguagePattern, ...] = ()
     non_learning_patterns: tuple[LanguagePattern, ...] = ()
     decomposition_patterns: tuple[DecompositionPattern, ...] = ()
+    # Per-instance memoization: a pack is immutable and replays query the same terms repeatedly.
+    _pos_sets: dict[tuple[str, ...], frozenset[str]] = PrivateAttr(default_factory=dict)
+    _issues: dict[tuple[str, str], str | None] = PrivateAttr(default_factory=dict)
+    _decompositions: dict[tuple[str, str], Any] = PrivateAttr(default_factory=dict)
     lemma_conventions: tuple[LemmaConvention, ...] = ()
     pronunciation_classes: tuple[PronunciationClass, ...] = ()
     contextual_pronunciation_rules: tuple[ContextualPronunciationRule, ...] = ()
@@ -278,7 +290,20 @@ class LanguagePack(BaseModel):
             raise ValueError(f"pronunciation {pronunciation!r} matches multiple classes: {matches}")
         return matches[0] if matches else None
 
+    def normalized_pos_set(self, allowed: tuple[str, ...]) -> frozenset[str]:
+        cached = self._pos_sets.get(allowed)
+        if cached is None:
+            cached = frozenset(self.normalize_pos(item) for item in allowed)
+            self._pos_sets[allowed] = cached
+        return cached
+
     def learning_issue(self, lemma: str, pos: str) -> str | None:
+        key = (lemma, pos)
+        if key not in self._issues:
+            self._issues[key] = self._learning_issue(lemma, pos)
+        return self._issues[key]
+
+    def _learning_issue(self, lemma: str, pos: str) -> str | None:
         normalized_lemma = unicodedata.normalize("NFC", lemma)
         normalized_pos = self.normalize_pos(pos)
         for override in self.learning_overrides:
@@ -299,8 +324,13 @@ class LanguagePack(BaseModel):
     def decompose(self, lemma: str, pos: str) -> LearningDecomposition | None:
         """Return a configured split unless an explicit include/exception preserves the lemma."""
 
-        normalized_lemma = unicodedata.normalize("NFC", lemma)
-        return self._decompose(normalized_lemma, self.normalize_pos(pos), frozenset())
+        key = (lemma, pos)
+        if key not in self._decompositions:
+            normalized_lemma = unicodedata.normalize("NFC", lemma)
+            self._decompositions[key] = self._decompose(
+                normalized_lemma, self.normalize_pos(pos), frozenset()
+            )
+        return self._decompositions[key]  # type: ignore[no-any-return]
 
     def _decompose(
         self, lemma: str, normalized_pos: str, ancestors: frozenset[str]
@@ -467,7 +497,21 @@ def normalize_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+_SIGNATURE_TTL_SECONDS = 2.0
+_rules_signature_cache: tuple[float, tuple[tuple[str, int, int], ...]] | None = None
+
+
 def _rules_signature() -> tuple[tuple[str, int, int], ...]:
+    """Detect edited rule files, stat-ing the directory at most every couple of seconds."""
+
+    global _rules_signature_cache
+    now = time.monotonic()
+    if _rules_signature_cache is None or now - _rules_signature_cache[0] > _SIGNATURE_TTL_SECONDS:
+        _rules_signature_cache = (now, _scan_rules_signature())
+    return _rules_signature_cache[1]
+
+
+def _scan_rules_signature() -> tuple[tuple[str, int, int], ...]:
     return tuple(
         (path.name, path.stat().st_mtime_ns, path.stat().st_size)
         for path in sorted(RULES_DIRECTORY.glob("*.toml"))
@@ -484,7 +528,7 @@ def _pattern_matches(
 
 
 def _pos_matches(allowed: tuple[str, ...], normalized_pos: str, pack: LanguagePack) -> bool:
-    return not allowed or normalized_pos in {pack.normalize_pos(item) for item in allowed}
+    return not allowed or normalized_pos in pack.normalized_pos_set(allowed)
 
 
 def _tag_matches(language_tag: str, configured_tag: str) -> bool:

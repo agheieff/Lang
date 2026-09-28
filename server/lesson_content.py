@@ -3,35 +3,53 @@
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from collections.abc import Iterator
-from weakref import WeakKeyDictionary
 
 from server.models import Lesson
 from server.schemas import LessonDocument, LessonRun, LessonSentence
 
-_documents: WeakKeyDictionary[Lesson, tuple[str, LessonDocument]] = WeakKeyDictionary()
+# Parsed documents are shared across sessions and requests, keyed by payload content hash; every
+# derived replay reads all lessons, so re-validating them per request dominated its cost.
+_MAX_CACHED_DOCUMENTS = 4096
+_documents: OrderedDict[str, LessonDocument] = OrderedDict()
+_fingerprints: dict[int, str] = {}
 _documents_lock = threading.Lock()
 
 
 def lesson_document(lesson: Lesson) -> LessonDocument:
     """Validate the payload that owns all reader-visible lesson content.
 
-    Parsed documents are memoized per ORM instance so replaying several derived projections
-    over the same session validates each lesson once. ``content_hash`` changes in lockstep
-    with ``payload`` on the lesson-replacement path, which invalidates the cached entry.
+    Treat the returned document as immutable: it is shared by every caller with the same payload.
+    ``content_hash`` changes in lockstep with ``payload`` on the lesson-replacement path.
     """
 
     content_hash = lesson.content_hash
     if content_hash is None:
         return LessonDocument.model_validate(lesson.payload)
     with _documents_lock:
-        cached = _documents.get(lesson)
-        if cached is not None and cached[0] == content_hash:
-            return cached[1]
+        cached = _documents.get(content_hash)
+        if cached is not None:
+            _documents.move_to_end(content_hash)
+            return cached
     document = LessonDocument.model_validate(lesson.payload)
     with _documents_lock:
-        _documents[lesson] = (content_hash, document)
+        existing = _documents.get(content_hash)
+        if existing is not None:
+            return existing
+        _documents[content_hash] = document
+        _fingerprints[id(document)] = content_hash
+        while len(_documents) > _MAX_CACHED_DOCUMENTS:
+            _, evicted = _documents.popitem(last=False)
+            _fingerprints.pop(id(evicted), None)
     return document
+
+
+def document_fingerprint(document: LessonDocument) -> str | None:
+    """Return the content hash of a cached document, or ``None`` for an uncached one."""
+
+    with _documents_lock:
+        return _fingerprints.get(id(document))
 
 
 def body_sentences(document: LessonDocument) -> tuple[LessonSentence, ...]:

@@ -7,8 +7,9 @@ clickable without turning every productive combination into an SRS item.
 
 from __future__ import annotations
 
+import threading
 import unicodedata
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
@@ -19,6 +20,7 @@ from server.language_packs import (
     LearningDecomposition,
     language_pack,
 )
+from server.lesson_content import document_fingerprint
 from server.schemas import LessonDocument, LessonTerm
 
 if TYPE_CHECKING:
@@ -129,10 +131,40 @@ def learning_unit_indexes(
     }
 
 
+_MAX_CACHED_INDEXES = 16
+_indexes: OrderedDict[tuple[object, ...], tuple[LanguagePack, LearningUnitIndex]] = OrderedDict()
+_indexes_lock = threading.Lock()
+
+
 def build_learning_unit_index(documents: Iterable[LessonDocument]) -> LearningUnitIndex:
-    """Build a profile-local index in caller-supplied (normally import) order."""
+    """Build a profile-local index in caller-supplied (normally import) order.
+
+    Indexes over cached documents are reused while the language pack is unchanged; callers must
+    treat the returned index as immutable.
+    """
 
     document_list = list(documents)
+    fingerprints = [document_fingerprint(document) for document in document_list]
+    if not document_list or any(value is None for value in fingerprints):
+        return _build_learning_unit_index(document_list)
+    languages = {document.learning_language for document in document_list}
+    pack = language_pack(next(iter(languages))) if len(languages) == 1 else None
+    key = (tuple(sorted(languages)), tuple(fingerprints))
+    with _indexes_lock:
+        cached = _indexes.get(key)
+        if cached is not None and cached[0] is pack:
+            _indexes.move_to_end(key)
+            return cached[1]
+    index = _build_learning_unit_index(document_list)
+    if pack is not None:
+        with _indexes_lock:
+            _indexes[key] = (pack, index)
+            while len(_indexes) > _MAX_CACHED_INDEXES:
+                _indexes.popitem(last=False)
+    return index
+
+
+def _build_learning_unit_index(document_list: list[LessonDocument]) -> LearningUnitIndex:
     languages = {document.learning_language for document in document_list}
     if len(languages) > 1:
         raise ValueError("a learning-unit index must contain one learning language")

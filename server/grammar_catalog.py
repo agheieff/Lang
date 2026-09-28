@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -131,17 +132,23 @@ def resolve_grammar_catalog(
 
 
 def grammar_construction(key: str) -> GrammarConstruction:
-    matches = [
-        construction
-        for catalog in grammar_catalogs()
-        for construction in catalog.constructions
-        if construction.key == key
-    ]
+    matches = _constructions_by_key(_catalog_signature()).get(key, ())
     if not matches:
         raise LookupError(f"unknown grammar construction: {key}")
     if len(matches) != 1:  # Defensive for callers if catalogs change during a process restart.
         raise ValueError(f"ambiguous grammar construction: {key}")
     return matches[0]
+
+
+@lru_cache(maxsize=4)
+def _constructions_by_key(
+    signature: tuple[tuple[str, int, int], ...],
+) -> dict[str, tuple[GrammarConstruction, ...]]:
+    index: dict[str, list[GrammarConstruction]] = {}
+    for catalog in _cached_grammar_catalogs(signature):
+        for construction in catalog.constructions:
+            index.setdefault(construction.key, []).append(construction)
+    return {key: tuple(values) for key, values in index.items()}
 
 
 def grammar_catalogs() -> tuple[GrammarCatalog, ...]:
@@ -184,7 +191,24 @@ def load_grammar_catalogs(directory: Path) -> tuple[GrammarCatalog, ...]:
     return tuple(catalogs)
 
 
+_SIGNATURE_TTL_SECONDS = 2.0
+_catalog_signature_cache: tuple[float, tuple[tuple[str, int, int], ...]] | None = None
+
+
 def _catalog_signature() -> tuple[tuple[str, int, int], ...]:
+    """Detect edited catalogs, stat-ing the directory at most every couple of seconds."""
+
+    global _catalog_signature_cache
+    now = time.monotonic()
+    if (
+        _catalog_signature_cache is None
+        or now - _catalog_signature_cache[0] > _SIGNATURE_TTL_SECONDS
+    ):
+        _catalog_signature_cache = (now, _scan_catalog_signature())
+    return _catalog_signature_cache[1]
+
+
+def _scan_catalog_signature() -> tuple[tuple[str, int, int], ...]:
     return tuple(
         (path.name, path.stat().st_mtime_ns, path.stat().st_size)
         for path in sorted(CATALOG_DIRECTORY.glob("*.toml"))
