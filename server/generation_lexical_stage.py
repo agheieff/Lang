@@ -34,7 +34,9 @@ from server.lexical_generation import (
     validate_lexical_unit_result,
 )
 from server.schemas import (
+    MAX_LEXICAL_BATCH_UNITS,
     GenerationCallbackRequest,
+    GenerationLexicalBatchRequest,
     GenerationLexicalConflictRequest,
     GenerationLexicalConflictResult,
     GenerationLexicalResult,
@@ -42,6 +44,7 @@ from server.schemas import (
     GenerationLexicalUnitResult,
     GenerationProseResult,
     LessonTerm,
+    LexicalBatchUnit,
     LexicalConflictGroup,
     ProseLessonSentence,
 )
@@ -73,10 +76,15 @@ class LexicalExecutionPolicy:
     parallel_callbacks: int = 2
     local_repair_limit: int = 1
     conflict_chunk_size: int = 64
+    # Sentences per lexical callback. Each callback carries a large fixed instruction and agent
+    # overhead, so per-sentence calls spent most tokens on repetition; 1 restores that mode.
+    batch_size: int = 8
 
     def __post_init__(self) -> None:
         if self.parallel_callbacks < 1:
             raise ValueError("parallel_callbacks must be positive")
+        if not 1 <= self.batch_size <= MAX_LEXICAL_BATCH_UNITS:
+            raise ValueError("batch_size must be between 1 and the batch schema limit")
         if self.local_repair_limit < 0:
             raise ValueError("local_repair_limit must not be negative")
         if self.conflict_chunk_size < 1:
@@ -108,6 +116,8 @@ ResultT = TypeVar("ResultT")
 class _RepairJob(Generic[ItemT, ResultT]):
     item: ItemT
     repair: ResultT | None = None
+    attempt: int = 1
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,10 +175,10 @@ def _run_repair_jobs(
             job = queue.popleft()
             submit(
                 job.item,
-                attempt=1,
+                attempt=job.attempt,
                 repair=job.repair,
                 retained_repair=job.repair,
-                error=None,
+                error=job.error,
             )
         done, _not_done = wait(tuple(pending), return_when=FIRST_COMPLETED)
         for future in done:
@@ -315,6 +325,19 @@ def run_sentence_lexical_stage(
             repairs,
         )
 
+    if policy.batch_size > 1:
+        fresh_units = [job.item for job in pending_jobs if job.repair is None]
+        carried = [job for job in pending_jobs if job.repair is not None]
+        pending_jobs = carried + _run_lexical_batches(
+            callback,
+            executor,
+            context,
+            fresh_units,
+            policy=policy,
+            language=language,
+            accept_result=accept_result,
+        )
+
     failures = _run_repair_jobs(
         callback,
         executor,
@@ -391,6 +414,151 @@ def run_sentence_lexical_stage(
         {},
     )
     return merged
+
+
+def _run_lexical_batches(
+    callback: GenerationCallback,
+    executor: ThreadPoolExecutor,
+    context: LexicalStageContext,
+    units: Sequence[LexicalUnit],
+    *,
+    policy: LexicalExecutionPolicy,
+    language: str,
+    accept_result: Callable[[LexicalUnit, GenerationLexicalUnitResult], None],
+) -> list[_RepairJob[LexicalUnit, GenerationLexicalUnitResult]]:
+    """Tokenize sentences in batches; return per-sentence jobs for anything not accepted.
+
+    Each returned unit is validated exactly like a single-sentence response. An invalid unit goes
+    straight to its one sentence-local repair; a missing unit (or a failed batch) gets a fresh
+    single-sentence attempt, so batching never lowers the per-sentence repair budget.
+    """
+
+    queue = deque(enumerate(_lexical_batches(units, policy.batch_size)))
+    pending: dict[Future[CallbackResult], tuple[list[LexicalUnit], CallbackInvocation]] = {}
+    leftovers: list[_RepairJob[LexicalUnit, GenerationLexicalUnitResult]] = []
+    while queue or pending:
+        while queue and len(pending) < policy.parallel_callbacks:
+            index, batch = queue.popleft()
+            invocation = make_stage_invocation(
+                _lexical_batch_request(context, batch),
+                base_request=context.request,
+                job_dir=context.manifest.job_dir,
+                artifact_dir=context.manifest.response_path.parent,
+                pipeline_state=context.state,
+                artifact_stem=f"lexical-batch-{index:02d}",
+            )
+            future = executor.submit(run_timed_callback, callback, invocation, time.perf_counter())
+            pending[future] = (batch, invocation)
+        done, _not_done = wait(tuple(pending), return_when=FIRST_COMPLETED)
+        for future in done:
+            batch, invocation = pending.pop(future)
+            stage_result, error = completed_stage_result(
+                invocation.artifact_stem or "lexical-batch",
+                future,
+                invocation,
+                context.log_path,
+                context.logs,
+            )
+            returned: dict[str, object] = {}
+            if error is None and stage_result is not None:
+                try:
+                    returned = _batch_units_by_id(stage_result.payload)
+                except ValueError:
+                    returned = {}
+            for unit in batch:
+                raw = returned.get(unit.unit_id)
+                try:
+                    parsed = GenerationLexicalUnitResult.model_validate(raw)
+                except ValidationError:
+                    leftovers.append(_RepairJob(unit))
+                    continue
+                try:
+                    validate_lexical_unit_result(unit, parsed, language)
+                except ValueError as invalid:
+                    leftovers.append(
+                        _RepairJob(unit, parsed, attempt=2, error=f"invalid response: {invalid}")
+                    )
+                    continue
+                accept_result(unit, parsed)
+    return leftovers
+
+
+def _lexical_batches(units: Sequence[LexicalUnit], size: int) -> list[list[LexicalUnit]]:
+    by_lesson: dict[int, list[LexicalUnit]] = {}
+    for unit in units:
+        by_lesson.setdefault(unit.lesson_index, []).append(unit)
+    return [
+        lesson_units[index : index + size]
+        for lesson_units in by_lesson.values()
+        for index in range(0, len(lesson_units), size)
+    ]
+
+
+def _batch_units_by_id(payload: str) -> dict[str, object]:
+    data = json.loads(payload)
+    units = data.get("units") if isinstance(data, dict) else None
+    if not isinstance(units, list):
+        raise ValueError("lexical batch response has no units list")
+    result: dict[str, object] = {}
+    for unit in units:
+        if isinstance(unit, dict) and isinstance(unit.get("unit_id"), str):
+            result.setdefault(unit["unit_id"].strip(), unit)
+    return result
+
+
+def _lexical_batch_request(
+    context: LexicalStageContext,
+    batch: Sequence[LexicalUnit],
+) -> GenerationLexicalBatchRequest:
+    known_terms: list[LessonTerm] = []
+    seen: set[str] = set()
+    for unit in batch:
+        for term in _lexical_unit_known_terms(context.request, unit):
+            if term.key not in seen:
+                seen.add(term.key)
+                known_terms.append(term)
+    lesson = context.prose.lessons[batch[0].lesson_index]
+    context_sentences = [
+        lesson.title_sentence,
+        *(sentence for block in lesson.blocks for sentence in block.sentences),
+    ]
+    instructions = [
+        "This is a batch of the lexical-only stage. Return exactly one result in units for every "
+        "supplied unit, each with its exact unit_id and frozen sentence key. Concatenating a "
+        "unit's runs must reproduce its frozen_sentence.text byte-for-byte. Annotate every lexical "
+        "token, including a title unit. Use null term_key only for whitespace and punctuation, "
+        "isolate surrounding punctuation, and never translate, rewrite, or annotate grammar.",
+        "Each unit result is independent: its terms catalog and term keys are local to that one "
+        "unit. Define every referenced identity exactly once in that unit's terms and use short "
+        "opaque keys such as term-1. Reuse a local key only for repeated occurrences of the exact "
+        "same lemma, normalized POS, meaning, and dictionary pronunciation within that unit. "
+        "Distinct senses stay distinct. The host owns cross-sentence identities and final keys.",
+        "known_terms is a small relevant subset of established definitions. Reuse its key only "
+        "for the exact same lexical identity and copy that definition exactly. Otherwise create a "
+        "local opaque key; never derive keys from the surface, lemma, pronunciation, or meaning.",
+        "context_sentences is the whole lesson for sense and lemma decisions. Output only the "
+        "supplied units. Follow every language_guidance rule, including canonical lemmas, "
+        "segmentation, POS normalization, and pronunciation formatting. Give every non-name term "
+        "an approximate corpus frequency_rank; only proper names may use null.",
+        TERM_IDENTITY_PREFLIGHT_INSTRUCTIONS,
+    ]
+    return GenerationLexicalBatchRequest(
+        **stage_request_common(context.request, include_failures=False),
+        units=[
+            LexicalBatchUnit(
+                unit_id=unit.unit_id,
+                lesson_index=unit.lesson_index,
+                sentence_index=unit.sentence_index,
+                is_title=unit.is_title,
+                frozen_sentence=unit.sentence,
+            )
+            for unit in batch
+        ],
+        context_sentences=context_sentences,
+        known_terms=known_terms[:256],
+        language_guidance=context.request.brief.language_guidance,
+        instructions=" ".join(instructions),
+    )
 
 
 def _make_unit_invocation(

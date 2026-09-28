@@ -1777,6 +1777,50 @@ class GenerationLexicalUnitRequest(GenerationStageRequestBase):
         return self
 
 
+class LexicalBatchUnit(StrictModel):
+    unit_id: str = Field(min_length=1, max_length=200)
+    lesson_index: int = Field(ge=0, le=9)
+    sentence_index: int = Field(ge=0, le=40)
+    is_title: bool
+    frozen_sentence: ProseLessonSentence
+
+
+MAX_LEXICAL_BATCH_UNITS = 16
+
+
+class GenerationLexicalBatchRequest(GenerationStageRequestBase):
+    """Several frozen sentences tokenized in one callback; each result stays sentence-local."""
+
+    stage: Literal["lexical"] = "lexical"
+    task: Literal["lexical"] = "lexical"
+    request_kind: Literal["sentence_batch"] = "sentence_batch"
+    units: list[LexicalBatchUnit] = Field(min_length=1, max_length=MAX_LEXICAL_BATCH_UNITS)
+    context_sentences: list[ProseLessonSentence] = Field(default_factory=list, max_length=41)
+    known_terms: list[LessonTerm] = Field(default_factory=list, max_length=256)
+    language_guidance: list[str] = Field(default_factory=list, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_batch(self) -> GenerationLexicalBatchRequest:
+        unit_ids = [unit.unit_id for unit in self.units]
+        if len(unit_ids) != len(set(unit_ids)):
+            raise ValueError("lexical batch repeats a unit id")
+        if any(unit.lesson_index >= self.lesson_count for unit in self.units):
+            raise ValueError("lexical batch lesson_index is outside lesson_count")
+        known_keys = [term.key for term in self.known_terms]
+        if len(known_keys) != len(set(known_keys)):
+            raise ValueError("lexical batch repeats a known term key")
+        return self
+
+
+class GenerationLexicalBatchResult(StrictModel):
+    """Response shape for a batch; the host validates each unit independently."""
+
+    schema_version: Literal[1]
+    units: list[GenerationLexicalUnitResult] = Field(
+        min_length=1, max_length=MAX_LEXICAL_BATCH_UNITS
+    )
+
+
 class LexicalConflictContext(StrictModel):
     sentence_key: str = Field(min_length=1, max_length=200)
     surface: str = Field(min_length=1, max_length=500)

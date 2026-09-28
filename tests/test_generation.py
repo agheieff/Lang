@@ -70,6 +70,8 @@ from server.schemas import (
     GenerationCallbackRequest,
     GenerationCallbackResult,
     GenerationGrammarResult,
+    GenerationLexicalBatchRequest,
+    GenerationLexicalBatchResult,
     GenerationLexicalConflictRequest,
     GenerationLexicalConflictResult,
     GenerationLexicalResult,
@@ -1467,26 +1469,44 @@ def _staged_callback_fixture(
     return prose, lexical, translation, grammar, response
 
 
+def _lexical_unit_payload(
+    payloads: dict[str, str], lesson_index: int, sentence_index: int, unit_id: str
+) -> GenerationLexicalUnitResult:
+    aggregate = GenerationLexicalResult.model_validate_json(payloads["lexical"])
+    lesson = aggregate.lessons[lesson_index]
+    sentences = [
+        lesson.title_sentence,
+        *(sentence for block in lesson.blocks for sentence in block.sentences),
+    ]
+    sentence = sentences[sentence_index]
+    referenced = {run.term_key for run in sentence.runs if run.term_key is not None}
+    return GenerationLexicalUnitResult(
+        schema_version=1,
+        unit_id=unit_id,
+        key=sentence.key,
+        terms=[term for term in lesson.terms if term.key in referenced],
+        runs=sentence.runs,
+    )
+
+
 def _staged_payload(
     invocation: CallbackInvocation,
     payloads: dict[str, str],
 ) -> str:
     request = invocation.request
     if isinstance(request, GenerationLexicalUnitRequest):
-        aggregate = GenerationLexicalResult.model_validate_json(payloads["lexical"])
-        lesson = aggregate.lessons[request.lesson_index]
-        sentences = [
-            lesson.title_sentence,
-            *(sentence for block in lesson.blocks for sentence in block.sentences),
-        ]
-        sentence = sentences[request.sentence_index]
-        referenced = {run.term_key for run in sentence.runs if run.term_key is not None}
-        return GenerationLexicalUnitResult(
+        return _lexical_unit_payload(
+            payloads, request.lesson_index, request.sentence_index, request.unit_id
+        ).model_dump_json()
+    if isinstance(request, GenerationLexicalBatchRequest):
+        return GenerationLexicalBatchResult(
             schema_version=1,
-            unit_id=request.unit_id,
-            key=sentence.key,
-            terms=[term for term in lesson.terms if term.key in referenced],
-            runs=sentence.runs,
+            units=[
+                _lexical_unit_payload(
+                    payloads, unit.lesson_index, unit.sentence_index, unit.unit_id
+                )
+                for unit in request.units
+            ],
         ).model_dump_json()
     if isinstance(request, GenerationLexicalConflictRequest):
         return GenerationLexicalConflictResult(
@@ -1513,7 +1533,11 @@ def _source_drifted_lexical_payload(
     return json.dumps(payload, ensure_ascii=False)
 
 
-def test_worker_repairs_only_the_invalid_lexical_unit_locally(tmp_path: Path) -> None:
+def test_worker_repairs_only_the_invalid_lexical_unit_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Exercises the per-sentence path that batching falls back to.
+    monkeypatch.setenv("ARC_LANG_LEXICAL_BATCH_SIZE", "1")
     workspace = WorkspaceRegistry(tmp_path).resolve("es-es")
     init_db(workspace)
     with session_scope(workspace) as db:
@@ -1572,7 +1596,99 @@ def test_worker_repairs_only_the_invalid_lexical_unit_locally(tmp_path: Path) ->
     assert sum(request.unit_attempt == 2 for request in lexical_requests) == 1
 
 
-def test_task_retry_reuses_successful_partial_lexical_units(tmp_path: Path) -> None:
+def _claimed_staged_task(tmp_path: Path) -> tuple[Any, GenerationTask, dict[str, str]]:
+    workspace = WorkspaceRegistry(tmp_path).resolve("es-es")
+    init_db(workspace)
+    with session_scope(workspace) as db:
+        _activate_test_profile(db)
+        update_profile(db, {"level": "A1", "difficulty": 0.1})
+        assert ensure_generation_task(db, require_enabled=False) is not None
+        claimed = claim_generation_task(db)
+        assert claimed is not None
+    prose, lexical, translation, grammar, _response = _staged_callback_fixture()
+    payloads = {
+        "prose": prose.model_dump_json(),
+        "lexical": lexical.model_dump_json(),
+        "translation": translation.model_dump_json(),
+        "grammar": grammar.model_dump_json(),
+    }
+    return workspace, claimed, payloads
+
+
+def test_batched_lexical_units_fall_back_per_sentence(tmp_path: Path) -> None:
+    workspace, claimed, payloads = _claimed_staged_task(tmp_path)
+    singles: list[GenerationLexicalUnitRequest] = []
+    batches: list[GenerationLexicalBatchRequest] = []
+    lock = Lock()
+
+    class PartlyWrongBatch:
+        def run(self, invocation: CallbackInvocation) -> CallbackResult:
+            request = invocation.request
+            payload = _staged_payload(invocation, payloads)
+            if isinstance(request, GenerationLexicalBatchRequest):
+                with lock:
+                    batches.append(request)
+                data = json.loads(payload)
+                kept = []
+                for unit in data["units"]:
+                    if unit["key"] == "sentence-1":
+                        continue  # omitted unit -> fresh single-sentence attempt
+                    if unit["key"] == "sentence-2":
+                        unit["runs"][0]["text"] += "x"  # drifted unit -> local repair
+                    kept.append(unit)
+                data["units"] = kept
+                payload = json.dumps(data, ensure_ascii=False)
+            elif isinstance(request, GenerationLexicalUnitRequest):
+                with lock:
+                    singles.append(request)
+            return CallbackResult(exit_code=0, payload=payload, log=request.stage)
+
+    process_generation_task(workspace, claimed, PartlyWrongBatch())
+
+    with session_scope(workspace) as db:
+        stored = db.get(GenerationTask, claimed.id)
+        assert stored is not None
+        assert stored.state == "completed", stored.error
+    assert len(batches) == 1 and len(batches[0].units) == 4
+    by_key = {request.frozen_sentence.key: request for request in singles}
+    assert set(by_key) == {"sentence-1", "sentence-2"}
+    assert by_key["sentence-1"].unit_attempt == 1 and by_key["sentence-1"].repair_result is None
+    repair = by_key["sentence-2"]
+    assert repair.unit_attempt == 2 and repair.repair_result is not None
+    assert "did not reconstruct frozen source exactly" in repair.instructions
+
+
+def test_failed_lexical_batch_retries_every_sentence_singly(tmp_path: Path) -> None:
+    workspace, claimed, payloads = _claimed_staged_task(tmp_path)
+    singles: list[str] = []
+    lock = Lock()
+
+    class FailingBatch:
+        def run(self, invocation: CallbackInvocation) -> CallbackResult:
+            request = invocation.request
+            if isinstance(request, GenerationLexicalBatchRequest):
+                return CallbackResult(exit_code=1, payload="", log="batch failed")
+            if isinstance(request, GenerationLexicalUnitRequest):
+                with lock:
+                    singles.append(request.frozen_sentence.key)
+            return CallbackResult(
+                exit_code=0, payload=_staged_payload(invocation, payloads), log=request.stage
+            )
+
+    process_generation_task(workspace, claimed, FailingBatch())
+
+    with session_scope(workspace) as db:
+        stored = db.get(GenerationTask, claimed.id)
+        assert stored is not None
+        assert stored.state == "completed", stored.error
+    assert sorted(singles) == ["sentence-1", "sentence-2", "sentence-3", "title-sentence"]
+
+
+def test_task_retry_reuses_successful_partial_lexical_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Exercises the per-sentence path that batching falls back to.
+    monkeypatch.setenv("ARC_LANG_LEXICAL_BATCH_SIZE", "1")
     workspace = WorkspaceRegistry(tmp_path).resolve("es-es")
     init_db(workspace)
     with session_scope(workspace) as db:
@@ -1647,8 +1763,9 @@ def test_task_retry_reuses_successful_partial_lexical_units(tmp_path: Path) -> N
 
 
 def test_callback_concurrency_is_bounded_across_translation_and_lexical_units(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("ARC_LANG_LEXICAL_BATCH_SIZE", "1")
     workspace = WorkspaceRegistry(tmp_path).resolve("es-es")
     init_db(workspace)
     with session_scope(workspace) as db:
@@ -1869,7 +1986,9 @@ def test_worker_runs_the_task_dag_with_separate_artifacts(tmp_path: Path) -> Non
         ("translation", "translation"),
         ("grammar", "grammar"),
     }
-    lexical_requests = [item for item in observed if isinstance(item, GenerationLexicalUnitRequest)]
+    lexical_requests = [
+        item for item in observed if isinstance(item, GenerationLexicalBatchRequest)
+    ]
     translation_request = next(item for item in observed if item.stage == "translation")
     grammar_request = next(item for item in observed if item.stage == "grammar")
     assert "Final prose preflight" in prose_request.instructions
@@ -1887,14 +2006,14 @@ def test_worker_runs_the_task_dag_with_separate_artifacts(tmp_path: Path) -> Non
     assert imported_document.metadata["grammar"]["offered"] == list(
         prose_request.grammar_policy.offered_keys
     )
-    assert len(lexical_requests) == 4
-    assert {request.frozen_sentence.key for request in lexical_requests} == {
+    assert len(lexical_requests) == 1
+    assert [unit.frozen_sentence.key for unit in lexical_requests[0].units] == [
         "title-sentence",
         "sentence-1",
         "sentence-2",
         "sentence-3",
-    }
-    assert all("Term keys are local" in request.instructions for request in lexical_requests)
+    ]
+    assert all("local to that one unit" in request.instructions for request in lexical_requests)
     assert all("never translate" in request.instructions for request in lexical_requests)
     assert translation_request.frozen_lessons == prose.lessons
     assert grammar_request.tokenized_lessons
@@ -1912,8 +2031,8 @@ def test_worker_runs_the_task_dag_with_separate_artifacts(tmp_path: Path) -> Non
                 .read_text()
                 .startswith("timing: duration_seconds=")
             )
-    assert len(list(artifact_dir.glob("lexical-unit-*-request.json"))) == 4
-    assert len(list(artifact_dir.glob("lexical-unit-*-response.json"))) == 4
+    assert len(list(artifact_dir.glob("lexical-batch-*-request.json"))) == 1
+    assert len(list(artifact_dir.glob("lexical-batch-*-response.json"))) == 1
     timing_events = [
         json.loads(line) for line in (artifact_dir / "timings.jsonl").read_text().splitlines()
     ]
@@ -1922,10 +2041,7 @@ def test_worker_runs_the_task_dag_with_separate_artifacts(tmp_path: Path) -> Non
         "prose",
         "translation",
         "grammar",
-        "lexical-unit-00-0000",
-        "lexical-unit-00-0001",
-        "lexical-unit-00-0002",
-        "lexical-unit-00-0003",
+        "lexical-batch-00",
     }
     assert all(event["duration_seconds"] >= 0 for event in callback_events)
     assert all(event["queue_wait_seconds"] >= 0 for event in callback_events)
@@ -2187,7 +2303,7 @@ def test_later_stage_gets_its_own_repair_attempt_and_reuses_dependencies(
             )
 
     process_generation_task(workspace, second, GrammarFailure())
-    assert second_stages.count("lexical") == 4
+    assert second_stages.count("lexical") == 1  # one batched call covers all four sentences
     assert second_stages[-1] == "grammar"
     with session_scope(workspace) as db:
         failed = db.get(GenerationTask, second.id)

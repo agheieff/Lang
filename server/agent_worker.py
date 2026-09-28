@@ -36,7 +36,9 @@ from server.generation_callback import (
     PipelineState,
 )
 from server.generation_lexical_stage import (
+    DEFAULT_LEXICAL_EXECUTION_POLICY,
     TERM_IDENTITY_PREFLIGHT_INSTRUCTIONS,
+    LexicalExecutionPolicy,
     LexicalStageContext,
     run_lexical_conflict_chunks,
     run_sentence_lexical_stage,
@@ -89,6 +91,7 @@ from server.lexical_generation import (
 from server.models import GenerationTask, Lesson
 from server.profile_activation import profile_is_active
 from server.schemas import (
+    MAX_LEXICAL_BATCH_UNITS,
     AgentBrief,
     CalibrationGenerationBrief,
     CallbackGrammarOccurrence,
@@ -103,6 +106,7 @@ from server.schemas import (
     GenerationGrammarPolicy,
     GenerationGrammarRequest,
     GenerationGrammarResult,
+    GenerationLexicalBatchRequest,
     GenerationLexicalConflictRequest,
     GenerationLexicalRequest,
     GenerationLexicalResult,
@@ -249,6 +253,8 @@ class CodexCallback:
         ]
         if isinstance(invocation.request, GenerationLexicalUnitRequest):
             action = "Tokenize and define one supplied frozen sentence"
+        elif isinstance(invocation.request, GenerationLexicalBatchRequest):
+            action = "Tokenize and define each supplied frozen sentence independently"
         elif isinstance(invocation.request, GenerationLexicalConflictRequest):
             action = "Conservatively reconcile ambiguous lexical identities"
         else:
@@ -600,6 +606,13 @@ def _run_staged_pipeline(
                         log_path=log_path,
                         logs=logs,
                         stored_terms=_running_task_term_definitions(workspace, task.id),
+                    ),
+                    policy=LexicalExecutionPolicy(
+                        batch_size=_positive_int_env(
+                            "ARC_LANG_LEXICAL_BATCH_SIZE",
+                            DEFAULT_LEXICAL_EXECUTION_POLICY.batch_size,
+                            maximum=MAX_LEXICAL_BATCH_UNITS,
+                        )
                     ),
                 )
                 _validate_lexical_result(

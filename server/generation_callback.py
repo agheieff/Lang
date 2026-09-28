@@ -16,6 +16,8 @@ from server.schemas import (
     GenerationCallbackResult,
     GenerationGrammarRequest,
     GenerationGrammarResult,
+    GenerationLexicalBatchRequest,
+    GenerationLexicalBatchResult,
     GenerationLexicalConflictRequest,
     GenerationLexicalConflictResult,
     GenerationLexicalRequest,
@@ -34,6 +36,7 @@ MAX_CALLBACK_BYTES = 5_000_000
 GenerationStageRequest = (
     GenerationCallbackRequest
     | GenerationLexicalUnitRequest
+    | GenerationLexicalBatchRequest
     | GenerationLexicalConflictRequest
     | GenerationLexicalRequest
     | GenerationTranslationRequest
@@ -106,6 +109,8 @@ def make_stage_invocation(
     response_path = artifact_dir / f"{prefix}response.json"
     if isinstance(request, GenerationLexicalUnitRequest):
         result_type: type[Any] = GenerationLexicalUnitResult
+    elif isinstance(request, GenerationLexicalBatchRequest):
+        result_type = GenerationLexicalBatchResult
     elif isinstance(request, GenerationLexicalConflictRequest):
         result_type = GenerationLexicalConflictResult
     else:
@@ -200,6 +205,15 @@ def record_stage_result(
                 "sentence_index": invocation.request.sentence_index,
                 "is_title": invocation.request.is_title,
                 "source_characters": len(invocation.request.frozen_sentence.text),
+            }
+        )
+    elif isinstance(invocation.request, GenerationLexicalBatchRequest):
+        event.update(
+            {
+                "batch_units": len(invocation.request.units),
+                "source_characters": sum(
+                    len(unit.frozen_sentence.text) for unit in invocation.request.units
+                ),
             }
         )
     elif isinstance(invocation.request, GenerationLexicalConflictRequest):
