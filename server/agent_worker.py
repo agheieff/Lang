@@ -89,6 +89,7 @@ from server.lexical_generation import (
     validate_lexical_unit_result,
 )
 from server.models import GenerationTask, Lesson
+from server.preference_agent import maybe_update_preferences
 from server.profile_activation import profile_is_active
 from server.schemas import (
     MAX_LEXICAL_BATCH_UNITS,
@@ -265,6 +266,7 @@ class CodexCallback:
                 "lexical": "Tokenize and define the supplied frozen lesson prose",
                 "translation": "Translate the supplied frozen lesson prose",
                 "grammar": "Annotate grammar in the supplied tokenized lesson prose",
+                "preferences": "Maintain the learner's reading-preference notes",
             }[invocation.request.stage]
         context_instruction = (
             "Honor the profile, learning evidence, content plan, and instructions"
@@ -1349,6 +1351,8 @@ def _freeze_callback_lessons(
                     "text": "".join(run.text for run in lesson.title_sentence.runs),
                 },
                 "topic": lesson.topic,
+                "content_angle": lesson.content_angle,
+                "hypothesis": lesson.hypothesis,
                 "level": lesson.level,
                 "difficulty": lesson.difficulty,
                 "blocks": [
@@ -1525,6 +1529,8 @@ def _lexical_callback_response(
                     grammar=[],
                 ),
                 topic=prose_lesson.topic,
+                content_angle=prose_lesson.content_angle,
+                hypothesis=prose_lesson.hypothesis,
                 level=prose_lesson.level,
                 difficulty=prose_lesson.difficulty,
                 blocks=blocks,
@@ -1676,6 +1682,8 @@ def _merge_stage_results(
                     grammar=title_grammar,
                 ),
                 topic=prose_lesson.topic,
+                content_angle=prose_lesson.content_angle,
+                hypothesis=prose_lesson.hypothesis,
                 level=prose_lesson.level,
                 difficulty=prose_lesson.difficulty,
                 blocks=blocks,
@@ -2095,6 +2103,10 @@ def _import_callback_lessons(
                 )
             if request.content_plan is not None:
                 metadata["content_plan"] = request.content_plan.model_dump(mode="json")
+                if draft.content_angle:
+                    metadata["content_angle"] = draft.content_angle
+                if draft.hypothesis and request.content_plan.move in {"variation", "new"}:
+                    metadata["content_hypothesis"] = draft.hypothesis
             task_topic = requested_topic(stored)
             if task_topic is not None:
                 metadata.update(
@@ -2630,11 +2642,15 @@ def _refresh_worker_workspaces(profile_id: str | None, known_profiles: set[str])
     return workspaces
 
 
-def _maintain_worker_workspaces(workspaces: list[Workspace]) -> None:
+def _maintain_worker_workspaces(
+    workspaces: list[Workspace], callback: GenerationCallback | None = None
+) -> None:
     for workspace in workspaces:
         with session_scope(workspace) as db:
             maintain_generation_task(db)
             maintain_topic_generation_tasks(db)
+        if callback is not None:
+            maybe_update_preferences(workspace, callback)
 
 
 def _round_robin_workspaces(
@@ -2677,7 +2693,7 @@ def run_worker(*, once: bool = False, profile_id: str | None = None) -> None:
             workspaces = _refresh_worker_workspaces(profile_id, known_profiles)
             now = time.monotonic()
             if now >= next_maintenance:
-                _maintain_worker_workspaces(workspaces)
+                _maintain_worker_workspaces(workspaces, callback)
                 next_maintenance = now + maintenance_seconds
             claimed: tuple[Workspace, GenerationTask] | None = None
             preferred_profile_id = profile_id or registry.selected_id()

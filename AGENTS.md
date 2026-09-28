@@ -213,6 +213,13 @@ references one catalog key and anchors it to a precise half-open sentence run ra
   (frequency-ordered word lists in `server/word_lists/`, restricted to unencountered words near the
   learner's level frontier) and a few words the agent chooses itself. The agent's own picks are a
   deliberate random element and the only source once a list is exhausted or a language has none.
+- Subjects come from `brief.reading_preferences`, a free-text notes document the learner edits in
+  Settings and the agent maintains (append-only revisions). Learner messages about preferences are
+  folded in by the agent, never applied verbatim; an agent update computed from a superseded
+  revision is discarded. The host picks each text's content move (favourite 60%, variation 25%,
+  new subject 15%, deterministic per task); the agent picks the subject, avoids everything in the
+  20-text `brief.content_history`, and reports `content_angle` plus, for variation/new, a
+  `hypothesis` the learner sees when rating the text.
 - Every import records `known_share_at_import`, the predicted share of running words the learner
   knows. The next plan compares recent values with the target (95% by default,
   `target_known_share` preference) and scales new-word counts; texts show their current share.

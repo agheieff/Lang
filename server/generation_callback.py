@@ -28,6 +28,8 @@ from server.schemas import (
     GenerationTranslationRequest,
     GenerationTranslationResult,
     GrammarLessonDraft,
+    PreferenceUpdateRequest,
+    PreferenceUpdateResult,
     TranslationLessonDraft,
 )
 
@@ -38,6 +40,7 @@ GenerationStageRequest = (
     | GenerationLexicalUnitRequest
     | GenerationLexicalBatchRequest
     | GenerationLexicalConflictRequest
+    | PreferenceUpdateRequest
     | GenerationLexicalRequest
     | GenerationTranslationRequest
     | GenerationGrammarRequest
@@ -111,6 +114,8 @@ def make_stage_invocation(
         result_type: type[Any] = GenerationLexicalUnitResult
     elif isinstance(request, GenerationLexicalBatchRequest):
         result_type = GenerationLexicalBatchResult
+    elif isinstance(request, PreferenceUpdateRequest):
+        result_type = PreferenceUpdateResult
     elif isinstance(request, GenerationLexicalConflictRequest):
         result_type = GenerationLexicalConflictResult
     else:

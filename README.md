@@ -177,6 +177,14 @@ so new words keep arriving after a list is exhausted. Each import records its pr
 running words; new-word counts steer toward a 95% target and text cards show each text's share.
 Terms offered but not naturally used are cooled for the next offer instead of being forced into the
 text.
+
+Subjects follow **reading preferences**: free-text notes in Settings that start from your listed
+interests, which you can edit and which the agent maintains. Messages sent from Settings, ratings,
+skips, and abandoned texts are the signals; after a message or every few reactions the worker asks
+the agent for an updated revision (history is kept). Each new text is a favourite (60%), a variation
+of an interest (25%), or a new subject (15%); variation and new-subject texts state the question they
+test, shown when you rate the text. The agent sees the last 20 texts with their reactions, so it
+avoids repeats and leans toward what worked.
 For Chinese, inferred character retrievability can move an otherwise-unseen word's candidate order
 by at most 15%, making a word built from readable characters slightly easier to introduce. This
 hint fades to zero after three direct word-level signals and never changes that word's mastery,

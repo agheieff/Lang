@@ -389,3 +389,29 @@ class DerivedState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     watermark: Mapped[str] = mapped_column(String(64))
     rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ReadingPreferenceRevision(Base):
+    """Append-only reading-preference notes; the latest revision is current."""
+
+    __tablename__ = "reading_preference_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(10))  # "user" or "agent"
+    reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PreferenceMessage(Base):
+    """A message from the learner that the agent folds into the preference notes."""
+
+    __tablename__ = "preference_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    message_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    handled_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("reading_preference_revisions.id"), nullable=True
+    )

@@ -310,6 +310,10 @@
             <p class="eyebrow">Finish this lesson</p>
             <h2>Was this a good lesson?</h2>
             <p>Optional — your answer helps shape the next text.</p>
+            <p id="content-experiment" class="content-experiment" hidden>
+              <strong id="content-experiment-kind"></strong>
+              <span id="content-experiment-text" dir="auto"></span>
+            </p>
           </div>
           <fieldset class="rating-fieldset">
             <legend class="sr-only">Rate whether this was a good lesson</legend>
@@ -858,6 +862,41 @@
             </p>
           </div>
           <p id="tts-settings-status" class="settings-status" role="status"
+             aria-live="polite"></p>
+        </section>
+
+        <section id="reading-preferences" class="settings-card"
+                 aria-labelledby="preferences-heading">
+          <div>
+            <p class="eyebrow">Content</p>
+            <h2 id="preferences-heading">Reading preferences</h2>
+            <p>
+              What new texts are about. The agent keeps these notes current from your ratings,
+              skips and messages below; you can also edit them directly.
+            </p>
+          </div>
+          <label class="preferences-field" for="preferences-text">
+            <span>Preference notes</span>
+            <textarea id="preferences-text" rows="10" maxlength="4000" disabled></textarea>
+          </label>
+          <div class="preferences-actions">
+            <span id="preferences-meta" class="preferences-meta"></span>
+            <button id="preferences-save" class="button button-quiet" type="button" disabled>
+              Save notes
+            </button>
+          </div>
+          <label class="preferences-field" for="preferences-message">
+            <span>Tell the agent about your preferences</span>
+            <textarea id="preferences-message" rows="2" maxlength="1000"
+                      placeholder="e.g. more history of science, fewer cooking stories"></textarea>
+          </label>
+          <div class="preferences-actions">
+            <span id="preferences-pending" class="preferences-meta"></span>
+            <button id="preferences-send" class="button button-primary" type="button">
+              Send
+            </button>
+          </div>
+          <p id="preferences-status" class="settings-status" role="status"
              aria-live="polite"></p>
         </section>
       </section>

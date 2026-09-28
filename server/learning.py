@@ -74,6 +74,7 @@ from server.profile_activation import (
     profile_is_active,
     questionnaire_seed,
 )
+from server.reading_preferences import content_history, current_preferences
 from server.schemas import (
     AgentBrief,
     AgentGrammarBrief,
@@ -1718,10 +1719,14 @@ def build_agent_brief(
         mastered_term_keys=mastered,
         recent_lessons=recent,
         vocabulary=vocabulary,
+        reading_preferences=current_preferences(db),
+        content_history=content_history(db),
     )
 
 
 _AGENT_LESSON_METADATA_KEYS = {
+    "content_angle",
+    "content_hypothesis",
     "content_plan",
     "continuity",
     "episode",

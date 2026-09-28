@@ -1012,6 +1012,55 @@ class VocabularyPlan(StrictModel):
     recent_known_share: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+ContentMove = Literal["favourite", "variation", "new", "requested"]
+ContentReaction = Literal["liked", "disliked", "finished", "abandoned", "skipped", "unread"]
+
+
+class ContentHistoryItem(StrictModel):
+    """One recent text's subject and how the learner reacted to it."""
+
+    title: str
+    topic: str | None = None
+    move: ContentMove | None = None
+    angle: str | None = None
+    hypothesis: str | None = None
+    reaction: ContentReaction
+    feedback: list[FeedbackTag] = Field(default_factory=list)
+    rereads: int = Field(default=0, ge=0)
+
+
+class PendingPreferenceMessage(StrictModel):
+    text: str
+    created_at: datetime
+
+
+class ReadingPreferencesView(StrictModel):
+    text: str
+    revision_id: int | None = None
+    source: Literal["default", "user", "agent"]
+    updated_at: datetime | None = None
+    last_agent_reason: str | None = None
+    pending_messages: list[PendingPreferenceMessage] = Field(default_factory=list)
+
+
+class ReadingPreferencesUpdate(StrictModel):
+    text: str = Field(max_length=4_000)
+    expected_revision_id: int | None = None
+
+
+class PreferenceMessageIn(StrictModel):
+    message_id: UUID
+    text: str = Field(min_length=1, max_length=1_000)
+
+    @field_validator("text")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
 class AgentBrief(StrictModel):
     schema_version: Literal[1] = 1
     generated_at: datetime
@@ -1026,6 +1075,8 @@ class AgentBrief(StrictModel):
     mastered_term_keys: list[str]
     recent_lessons: list[AgentLessonBrief]
     vocabulary: VocabularyPlan | None = None
+    reading_preferences: str = ""
+    content_history: list[ContentHistoryItem] = Field(default_factory=list)
 
 
 class GeneratedLessonBlock(LessonBlock):
@@ -1040,6 +1091,19 @@ class GeneratedLessonDraft(StrictModel):
         )
     )
     topic: str | None = Field(max_length=200)
+    content_angle: str | None = Field(
+        default=None,
+        max_length=160,
+        description="A few words naming the specific subject and angle chosen for this text.",
+    )
+    hypothesis: str | None = Field(
+        default=None,
+        max_length=300,
+        description=(
+            "For a variation or new-subject text: the preference question it tests, phrased for "
+            "the learner, e.g. 'Do you enjoy maritime history?'. Otherwise null."
+        ),
+    )
     level: CefrLevel
     difficulty: float = Field(ge=0.0, le=1.0)
     blocks: list[GeneratedLessonBlock] = Field(
@@ -1172,6 +1236,8 @@ class CallbackLessonDraft(StrictModel):
         )
     )
     topic: str | None = Field(max_length=200)
+    content_angle: str | None = Field(default=None, max_length=160)
+    hypothesis: str | None = Field(default=None, max_length=300)
     level: CefrLevel
     difficulty: float = Field(ge=0.0, le=1.0)
     blocks: list[CallbackLessonBlock] = Field(min_length=1, max_length=12)
@@ -1250,6 +1316,8 @@ class CallbackLessonDraft(StrictModel):
             title=self.title,
             title_sentence=title_sentence,
             topic=self.topic,
+            content_angle=self.content_angle,
+            hypothesis=self.hypothesis,
             level=self.level,
             difficulty=self.difficulty,
             blocks=blocks,
@@ -1369,6 +1437,8 @@ class GenerationContentPlan(StrictModel):
     progression: str = Field(min_length=1, max_length=500)
     ending_shape: str = Field(min_length=1, max_length=300)
     avoid_patterns: list[str] = Field(default_factory=list, max_length=8)
+    move: ContentMove = "favourite"
+    move_instruction: str = Field(default="", max_length=1_000)
 
 
 class GenerationFailureContext(StrictModel):
@@ -1411,6 +1481,19 @@ class ProseLessonDraft(StrictModel):
     title: str = Field(min_length=1, max_length=300)
     title_sentence: ProseLessonSentence
     topic: str | None = Field(max_length=200)
+    content_angle: str | None = Field(
+        default=None,
+        max_length=160,
+        description="A few words naming the specific subject and angle chosen for this text.",
+    )
+    hypothesis: str | None = Field(
+        default=None,
+        max_length=300,
+        description=(
+            "For a variation or new-subject text: the preference question it tests, phrased for "
+            "the learner, e.g. 'Do you enjoy maritime history?'. Otherwise null."
+        ),
+    )
     level: CefrLevel
     difficulty: float = Field(ge=0.0, le=1.0)
     blocks: list[ProseLessonBlock] = Field(min_length=1, max_length=12)
@@ -1843,6 +1926,29 @@ class GenerationLexicalBatchResult(StrictModel):
     units: list[GenerationLexicalUnitResult] = Field(
         min_length=1, max_length=MAX_LEXICAL_BATCH_UNITS
     )
+
+
+class PreferenceUpdateRequest(StrictModel):
+    """Ask the agent to maintain the learner's reading-preference notes."""
+
+    schema_version: Literal[1] = 1
+    stage: Literal["preferences"] = "preferences"
+    task: Literal["prose"] = "prose"
+    job_id: str = Field(min_length=3, max_length=100)
+    task_id: int = Field(ge=0)
+    profile_key: str = Field(min_length=1, max_length=100)
+    workspace_path: str = Field(min_length=1, max_length=1000)
+    learning_language: LanguageTag
+    current_preferences: str = Field(max_length=4_000)
+    user_messages: list[str] = Field(default_factory=list, max_length=20)
+    content_history: list[ContentHistoryItem] = Field(default_factory=list, max_length=40)
+    instructions: str
+
+
+class PreferenceUpdateResult(StrictModel):
+    schema_version: Literal[1]
+    preferences: str = Field(min_length=1, max_length=4_000)
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class LexicalConflictContext(StrictModel):

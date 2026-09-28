@@ -20,7 +20,7 @@ from server.workspaces import Workspace, registry
 
 # PRAGMA user_version. Version 1 is the unversioned schema that existed before migrations.
 BASELINE_SCHEMA_VERSION = 1
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # Derived caches are replayed from append-only evidence, so a derived-table change only drops the
 # table; it is recreated below and rebuilt from the evidence on the next read.
 MIGRATIONS: dict[int, tuple[str | tuple[str, str, str], ...]] = {
@@ -28,6 +28,7 @@ MIGRATIONS: dict[int, tuple[str | tuple[str, str, str], ...]] = {
     3: ("DROP TABLE IF EXISTS lexeme_states", "DROP TABLE IF EXISTS character_states"),
     # (table, column, type): added only when missing, so reruns and fresh schemas are safe.
     4: (("lessons", "known_share_at_import", "FLOAT"),),
+    5: (),  # reading_preference_revisions and preference_messages: new tables only
 }
 
 _factories: dict[Path, sessionmaker[Session]] = {}

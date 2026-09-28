@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 
-from server.schemas import AgentBrief, FeedbackTag, GenerationContentPlan
+from server.schemas import AgentBrief, ContentMove, FeedbackTag, GenerationContentPlan
 
 
 @dataclass(frozen=True)
@@ -98,17 +100,32 @@ _ARCHETYPES = (
     ),
 )
 
-_GENERAL_SEEDS = (
-    "A delayed evening train, an unclear announcement, and one passenger deciding what to do.",
-    "A second-hand shop examining an unusual object whose age or purpose is uncertain.",
-    "Two versions of a family recipe that disagree on one important step.",
-    "A small weather station receives one measurement that does not fit the forecast.",
-    "A delivery contains the correct label but the wrong object inside.",
-    "An old photograph appears to show a detail that should not yet have existed.",
-    "A familiar walking route is unexpectedly closed, revealing a place usually overlooked.",
-    "A night-shift worker notices a machine behaving differently from the written instructions.",
-    "A market seller and a customer disagree about which sign shows that food is fresh.",
-    "A simple near-future device saves time but quietly creates a new inconvenience.",
+# Content moves: mostly what the learner likes, plus deliberate tests of variations and new
+# subjects so preferences can evolve. The agent picks the subject; the host only picks the move.
+MOVE_WEIGHTS = (("favourite", 0.60), ("variation", 0.25), ("new", 0.15))
+_MOVE_INSTRUCTIONS = {
+    "favourite": (
+        "Choose a subject the learner clearly enjoys according to brief.reading_preferences, "
+        "preferring one that brief.content_history shows was used least recently. Set hypothesis "
+        "to null."
+    ),
+    "variation": (
+        "Take one interest from brief.reading_preferences and explore a different sub-area, genre, "
+        "period, or angle of it than recent texts in brief.content_history did. Set hypothesis to "
+        "the preference question this text tests, addressed to the learner, e.g. 'Do you enjoy "
+        "the engineering side of space travel more than the exploration stories?'."
+    ),
+    "new": (
+        "Choose a subject that brief.reading_preferences does not list but that plausibly suits "
+        "the learner: an adjacent field, a surprising connection, or something untried. Never "
+        "pick anything the notes say they dislike. Set hypothesis to the preference question this "
+        "text tests, addressed to the learner, e.g. 'Would you like more texts about maritime "
+        "history?'."
+    ),
+}
+_CHOSEN_SEED = (
+    "The agent chooses the subject according to move_instruction, then narrows it to one "
+    "specific incident, object, question, or disagreement with a clear time and place."
 )
 
 _GENERIC_PATTERN_WARNING = (
@@ -129,22 +146,14 @@ def build_content_plan(
 
     recent_archetypes = _recent_plan_values(brief, "archetype", limit=4)
     archetype = _choose_unused(_ARCHETYPES, recent_archetypes, task_id)
-    concrete_seed = _content_seed(
-        brief,
-        task_id=task_id,
-        requested_topic=requested_topic,
-        feedback=feedback,
+    move, move_instruction, concrete_seed = _content_move(
+        brief, task_id=task_id, requested_topic=requested_topic, feedback=feedback
     )
-    recent_labels = [
-        " / ".join(value for value in (lesson.title, lesson.topic) if value)
-        for lesson in brief.recent_lessons[:5]
+    avoid_patterns = [
+        _GENERIC_PATTERN_WARNING,
+        "Do not repeat the subject, central situation, or setting of any text in "
+        "brief.content_history unless the learner explicitly asked for the same topic.",
     ]
-    avoid_patterns = [_GENERIC_PATTERN_WARNING]
-    if recent_labels:
-        avoid_patterns.append(
-            "Treat these recent central situations as negative examples for repetition unless the "
-            "user explicitly requested the same topic: " + "; ".join(recent_labels)
-        )
     return GenerationContentPlan(
         archetype=archetype.key,
         discourse_form=archetype.discourse_form,
@@ -153,6 +162,8 @@ def build_content_plan(
         progression=archetype.progression,
         ending_shape=archetype.ending_shape,
         avoid_patterns=avoid_patterns,
+        move=move,
+        move_instruction=move_instruction,
     )
 
 
@@ -168,36 +179,52 @@ def content_plan_instructions() -> str:
         "sentence merely to state that everyone felt happy or learned an important lesson. Choose "
         "the situation and structure before selecting SRS terms. Inspect beyond the first target "
         "candidate and use a lower candidate or none when the highest-ranked words would distort "
-        "the text."
+        "the text. Subject choice follows content_plan.move_instruction, guided by "
+        "brief.reading_preferences (the learner's interests and dislikes) and "
+        "brief.content_history (recent texts, what each tested, and how the learner reacted: lean "
+        "toward what was liked or finished and away from what was disliked, skipped, or "
+        "abandoned). Report the chosen subject in content_angle and, for variation or new moves, "
+        "the tested question in hypothesis."
     )
 
 
-def _content_seed(
+def _content_move(
     brief: AgentBrief,
     *,
     task_id: int,
     requested_topic: str | None,
     feedback: Sequence[FeedbackTag],
-) -> str:
+) -> tuple[ContentMove, str, str]:
     if requested_topic is not None:
         return (
+            "requested",
+            "Write about the learner's requested topic. Set hypothesis to null.",
             f"Narrow the requested topic {requested_topic!r} to one specific situation, question, "
-            "or disagreement with concrete objects and a clear time and place."
+            "or disagreement with concrete objects and a clear time and place.",
         )
     if "same_topic" in feedback and brief.recent_lessons:
         recent = brief.recent_lessons[0]
         label = recent.topic or recent.title
         return (
+            "favourite",
+            "The learner asked for more of the recent topic. Set hypothesis to null.",
             f"Take a genuinely different angle on the recent topic {label!r}; change the actors, "
-            "immediate goal, setting details, and outcome."
+            "immediate goal, setting details, and outcome.",
         )
-    if brief.profile.interests:
-        interest = brief.profile.interests[task_id % len(brief.profile.interests)]
-        return (
-            f"Use the profile interest {interest!r}, narrowed to one specific incident, object, "
-            "question, or disagreement rather than a broad survey."
-        )
-    return _GENERAL_SEEDS[task_id % len(_GENERAL_SEEDS)]
+    move = choose_move(task_id)
+    return move, _MOVE_INSTRUCTIONS[move], _CHOSEN_SEED
+
+
+def choose_move(task_id: int) -> ContentMove:
+    """Deterministic per task, so a retried task keeps its move."""
+
+    draw = random.Random(f"content-move:{task_id}").random()
+    cumulative = 0.0
+    for move, weight in MOVE_WEIGHTS:
+        cumulative += weight
+        if draw < cumulative:
+            return cast(ContentMove, move)
+    return "favourite"
 
 
 def _recent_plan_values(brief: AgentBrief, key: str, *, limit: int) -> set[str]:

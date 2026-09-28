@@ -40,6 +40,12 @@ from server.profile_activation import (
     activate_profile_settings,
     activation_view,
 )
+from server.reading_preferences import (
+    PreferencesConflictError,
+    add_preference_message,
+    preferences_view,
+    save_user_preferences,
+)
 from server.schemas import (
     CharactersState,
     EventRecordResult,
@@ -49,7 +55,10 @@ from server.schemas import (
     LessonQueueActionView,
     LessonQueueMoveIn,
     LessonQueueMoveView,
+    PreferenceMessageIn,
     ReaderState,
+    ReadingPreferencesUpdate,
+    ReadingPreferencesView,
     StatisticsSummary,
     TextDetail,
     TextRequestIn,
@@ -110,6 +119,7 @@ def _lookup_error(_request: Request, error: LookupError) -> JSONResponse:
 @app.exception_handler(ProfileInactiveError)
 @app.exception_handler(TextRequestConflictError)
 @app.exception_handler(LessonQueueConflictError)
+@app.exception_handler(PreferencesConflictError)
 def _conflict_error(_request: Request, error: ValueError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(error)})
 
@@ -342,6 +352,26 @@ def statistics(db: FreshDatabase) -> StatisticsSummary:
 @app.get("/api/profiles/{profile_id}/grammar", response_model=GrammarState)
 def grammar(db: FreshDatabase) -> GrammarState:
     return get_grammar_state(db)
+
+
+@app.get("/api/profiles/{profile_id}/reading-preferences", response_model=ReadingPreferencesView)
+def reading_preferences(db: Database) -> ReadingPreferencesView:
+    return preferences_view(db)
+
+
+@app.put("/api/profiles/{profile_id}/reading-preferences", response_model=ReadingPreferencesView)
+def update_reading_preferences(
+    update: ReadingPreferencesUpdate, db: Database
+) -> ReadingPreferencesView:
+    return save_user_preferences(db, update.text, expected_revision_id=update.expected_revision_id)
+
+
+@app.post(
+    "/api/profiles/{profile_id}/reading-preferences/messages",
+    response_model=ReadingPreferencesView,
+)
+def send_preference_message(message: PreferenceMessageIn, db: Database) -> ReadingPreferencesView:
+    return add_preference_message(db, str(message.message_id), message.text)
 
 
 @app.get("/api/profiles/{profile_id}/tts", response_model=TtsSettingsView)

@@ -83,6 +83,11 @@ import {
   textActionHref,
 } from "./reader-mode.js";
 import {
+  contentExperiment,
+  parseReadingPreferences,
+  type ReadingPreferences,
+} from "./reading-preferences.js";
+import {
   LONG_PRESS_MOVE_TOLERANCE_PX,
   SENTENCE_LONG_PRESS_MS,
   SentenceRevealState,
@@ -162,6 +167,12 @@ const charactersView = byId("characters-view");
 const grammarView = byId("grammar-view");
 const statisticsView = byId("statistics-view");
 const settingsView = byId("settings-view");
+const preferencesText = byId<HTMLTextAreaElement>("preferences-text");
+const preferencesMessage = byId<HTMLTextAreaElement>("preferences-message");
+const preferencesSave = byId<HTMLButtonElement>("preferences-save");
+const preferencesSend = byId<HTMLButtonElement>("preferences-send");
+const preferencesStatus = byId("preferences-status");
+let preferencesRevision: number | null = null;
 const lessonContent = byId<HTMLElement>("lesson-content");
 const fullPanel = byId("full-translation");
 const fullContent = byId("full-translation-content");
@@ -844,6 +855,10 @@ function renderLesson(
   configureToneColors(state.lesson.learning_language);
   clearLessonPoll();
   lesson = state.lesson;
+  const experiment = lesson ? contentExperiment(lesson.metadata) : null;
+  byId("content-experiment").hidden = experiment === null;
+  byId("content-experiment-kind").textContent = experiment?.kind ?? "";
+  byId("content-experiment-text").textContent = experiment?.question ?? "";
   lessonId = state.lesson_id;
   if (readerModeRecordsEvidence(mode)) {
     const preferredSession = mode === "reread" ? crypto.randomUUID() : state.progress.session_id;
@@ -1473,6 +1488,75 @@ function renderTtsSettings(settings: TtsSettings): void {
   ttsSettingsStatus.textContent = settings.provider_installed
     ? "Qwen3-TTS is installed. Missing audio is prepared one text at a time."
     : "The optional local Qwen runtime is not installed; Listen will use a system voice.";
+}
+
+function renderReadingPreferences(state: ReadingPreferences): void {
+  preferencesRevision = state.revision_id;
+  preferencesText.value = state.text;
+  preferencesText.disabled = false;
+  preferencesSave.disabled = false;
+  const updated = state.updated_at
+    ? `${state.source === "agent" ? "Updated by the agent" : "Saved by you"} ${formatLibraryDate(
+        state.updated_at,
+      )}`
+    : "Starting notes from your profile interests";
+  byId("preferences-meta").textContent = state.last_agent_reason
+    ? `${updated}. Last agent change: ${state.last_agent_reason}`
+    : updated;
+  const pending = state.pending_messages.length;
+  byId("preferences-pending").textContent = pending
+    ? `${pending} message${pending === 1 ? "" : "s"} waiting for the agent`
+    : "";
+}
+
+async function loadReadingPreferences(): Promise<void> {
+  renderReadingPreferences(
+    parseReadingPreferences(await getJson(`${profileApi}/reading-preferences`, "Preferences")),
+  );
+}
+
+async function saveReadingPreferences(): Promise<void> {
+  preferencesSave.disabled = true;
+  preferencesStatus.textContent = "Saving notes…";
+  try {
+    const response = await postJson(
+      `${profileApi}/reading-preferences`,
+      { text: preferencesText.value, expected_revision_id: preferencesRevision },
+      "PUT",
+    );
+    if (response.status === 409) {
+      throw new Error("The notes changed meanwhile (the agent may have updated them). Reload.");
+    }
+    if (!response.ok) throw new Error(`Saving notes returned ${response.status}`);
+    renderReadingPreferences(parseReadingPreferences(await response.json()));
+    preferencesStatus.textContent = "Notes saved. New texts will follow them.";
+  } catch (error) {
+    preferencesSave.disabled = false;
+    preferencesStatus.textContent =
+      error instanceof Error ? error.message : "The notes could not be saved.";
+  }
+}
+
+async function sendPreferenceMessage(): Promise<void> {
+  const message = preferencesMessage.value.trim();
+  if (!message) return;
+  preferencesSend.disabled = true;
+  preferencesStatus.textContent = "Sending…";
+  try {
+    const response = await postJson(`${profileApi}/reading-preferences/messages`, {
+      message_id: crypto.randomUUID(),
+      text: message,
+    });
+    if (!response.ok) throw new Error(`Sending returned ${response.status}`);
+    renderReadingPreferences(parseReadingPreferences(await response.json()));
+    preferencesMessage.value = "";
+    preferencesStatus.textContent = "Sent. The agent folds it into the notes within a few minutes.";
+  } catch (error) {
+    preferencesStatus.textContent =
+      error instanceof Error ? error.message : "The message could not be sent.";
+  } finally {
+    preferencesSend.disabled = false;
+  }
 }
 
 async function loadTtsSettings(): Promise<void> {
@@ -2863,6 +2947,12 @@ async function bootstrap(): Promise<void> {
       ttsSettingsStatus.textContent =
         error instanceof Error ? error.message : "Voice settings could not be loaded.";
     }
+    try {
+      await loadReadingPreferences();
+    } catch (error) {
+      preferencesStatus.textContent =
+        error instanceof Error ? error.message : "Reading preferences could not be loaded.";
+    }
     setView("settings");
     void events.flush().catch(showSyncWarning);
     return;
@@ -3012,6 +3102,8 @@ byId("topic-request-input").addEventListener("input", (event) => {
   if (event.currentTarget instanceof HTMLInputElement) event.currentTarget.setCustomValidity("");
 });
 byId("reset-active-time").addEventListener("click", () => activeTimer.reset());
+preferencesSave.addEventListener("click", () => void saveReadingPreferences());
+preferencesSend.addEventListener("click", () => void sendPreferenceMessage());
 byId("words-search").addEventListener("input", renderWordTable);
 byId("characters-search").addEventListener("input", renderCharacterTable);
 byId("grammar-search").addEventListener("input", renderGrammarCards);

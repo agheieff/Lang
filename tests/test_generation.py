@@ -2770,7 +2770,9 @@ def test_content_plan_avoids_recent_structure_and_names_recent_situations(
         task_id=4,
         requested_topic=None,
     )
-    assert any("Lesson lesson-one" in warning for warning in next_plan.avoid_patterns)
+    # Recent subjects reach the agent through the brief's 20-text content history.
+    assert [item.title for item in build_agent_brief(db).content_history] == ["Lesson lesson-one"]
+    assert any("content_history" in warning for warning in next_plan.avoid_patterns)
     assert any("group gathers" in warning for warning in next_plan.avoid_patterns)
 
 
