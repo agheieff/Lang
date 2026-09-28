@@ -82,7 +82,13 @@ import {
   readerModeRecordsEvidence,
   textActionHref,
 } from "./reader-mode.js";
-import { SentenceRevealState, shouldHandleSentenceClick } from "./reveal-state.js";
+import {
+  LONG_PRESS_MOVE_TOLERANCE_PX,
+  SENTENCE_LONG_PRESS_MS,
+  SentenceRevealState,
+  shouldHandleSentenceClick,
+  TOUCH_SENTENCE_HELP_GRACE_MS,
+} from "./reveal-state.js";
 import { pronunciationForRun } from "./run-pronunciation.js";
 import { parseStatistics, type StatisticsPayload } from "./statistics.js";
 import { renderStatisticsView } from "./statistics-view.js";
@@ -282,6 +288,7 @@ let rating: -1 | 1 | null = null;
 let glossAnchor: HTMLButtonElement | null = null;
 let sentenceHelpAnchor: HTMLButtonElement | null = null;
 let sentenceHelpUnit: HTMLElement | null = null;
+let pendingSentenceEvidence: number | null = null;
 let grammarHelpAnchor: HTMLButtonElement | null = null;
 let sentenceReveals = new SentenceRevealState();
 let revealedGrammarOccurrences = new Set<string>();
@@ -2142,6 +2149,16 @@ function renderSentence(
   reveal.setAttribute("aria-expanded", "false");
   setSentenceButtonState(reveal, previouslyRevealed, false);
 
+  const recordReveal = (): void => {
+    if (sentenceReveals.reveal(sentence.key) && lesson) {
+      recordLearningEvent("translation.revealed", {
+        sentence_key: sentence.key,
+        scope: "sentence",
+      });
+    }
+    setSentenceButtonState(reveal, true, sentenceHelpAnchor === reveal);
+  };
+
   const toggle = (): void => {
     setSentenceSelectionMode(false);
     positionSentenceControl(reveal, unit);
@@ -2155,14 +2172,63 @@ function renderSentence(
       sentence.runs.map((run) => run.text).join(""),
       sentence.translation ?? "",
     );
-    if (sentenceReveals.reveal(sentence.key) && lesson) {
-      recordLearningEvent("translation.revealed", {
-        sentence_key: sentence.key,
-        scope: "sentence",
-      });
+    if (!coarsePointer.matches) {
+      recordReveal();
+      return;
     }
-    setSentenceButtonState(reveal, true, true);
+    // Only count touch help that stays open: a quick open-and-close was a mistap.
+    setSentenceButtonState(reveal, sentenceReveals.has(sentence.key), true);
+    pendingSentenceEvidence = window.setTimeout(() => {
+      pendingSentenceEvidence = null;
+      if (sentenceHelpAnchor === reveal && !sentencePopover.hidden) recordReveal();
+    }, TOUCH_SENTENCE_HELP_GRACE_MS);
   };
+
+  let pressTimer: number | null = null;
+  let pressOrigin: { x: number; y: number } | null = null;
+  let suppressNextClick = false;
+  const cancelPress = (): void => {
+    if (pressTimer !== null) window.clearTimeout(pressTimer);
+    pressTimer = null;
+    pressOrigin = null;
+  };
+  unit.addEventListener(
+    "pointerdown",
+    (event) => {
+      suppressNextClick = false;
+      if (event.pointerType !== "touch" || sentenceSelectionMode) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest(".sentence-reveal, .grammar-reveal")) return;
+      cancelPress();
+      pressOrigin = { x: event.clientX, y: event.clientY };
+      pressTimer = window.setTimeout(() => {
+        pressTimer = null;
+        pressOrigin = null;
+        suppressNextClick = true;
+        window.getSelection()?.removeAllRanges();
+        toggle();
+      }, SENTENCE_LONG_PRESS_MS);
+    },
+    { passive: true },
+  );
+  unit.addEventListener(
+    "pointermove",
+    (event) => {
+      if (
+        pressOrigin &&
+        Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) >
+          LONG_PRESS_MOVE_TOLERANCE_PX
+      ) {
+        cancelPress();
+      }
+    },
+    { passive: true },
+  );
+  unit.addEventListener("pointerup", cancelPress, { passive: true });
+  unit.addEventListener("pointercancel", cancelPress, { passive: true });
+  unit.addEventListener("contextmenu", (event) => {
+    if (suppressNextClick || pressTimer !== null) event.preventDefault();
+  });
 
   reveal.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -2175,11 +2241,25 @@ function renderSentence(
   unit.addEventListener(
     "click",
     (event) => {
+      if (suppressNextClick) {
+        // The finger lifted after a long press; that release must not also reveal a word.
+        suppressNextClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const target = event.target;
       const targetIsTerm = target instanceof Element && Boolean(target.closest(".term"));
       const targetIsControl =
         target instanceof Element && Boolean(target.closest(".sentence-reveal, .grammar-reveal"));
-      if (!shouldHandleSentenceClick(sentenceSelectionMode, targetIsTerm, targetIsControl)) {
+      if (
+        !shouldHandleSentenceClick(
+          sentenceSelectionMode,
+          targetIsTerm,
+          targetIsControl,
+          coarsePointer.matches,
+        )
+      ) {
         return;
       }
       const selection = window.getSelection();
@@ -2301,6 +2381,10 @@ function positionSentenceHelp(): void {
 }
 
 function closeSentenceHelp(returnFocus = false): void {
+  if (pendingSentenceEvidence !== null) {
+    window.clearTimeout(pendingSentenceEvidence);
+    pendingSentenceEvidence = null;
+  }
   const anchor = sentenceHelpAnchor;
   if (anchor) {
     setSentenceButtonState(anchor, anchor.dataset.revealed === "true", false);

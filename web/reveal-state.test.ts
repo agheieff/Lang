@@ -32,4 +32,10 @@ describe("sentence click intent", () => {
     expect(shouldHandleSentenceClick(true, false, false)).toBe(true);
     expect(shouldHandleSentenceClick(true, false, true)).toBe(false);
   });
+
+  it("never opens sentence help from a plain tap on touch", () => {
+    expect(shouldHandleSentenceClick(false, false, false, true)).toBe(false);
+    expect(shouldHandleSentenceClick(false, true, false, true)).toBe(false);
+    expect(shouldHandleSentenceClick(true, false, false, true)).toBe(true);
+  });
 });

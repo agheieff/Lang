@@ -137,7 +137,10 @@ so older readings cannot immediately undo the correction.
    known productive components, one bounded signal is divided between them, with more assigned to
    the component whose current mastery is lower.
 3. Sentence, grammar, or full-text help is available in layers. Opening a grammar marker is neutral;
-   revealing its explanation records one direct-help signal for that occurrence and session.
+   revealing its explanation records one direct-help signal for that occurrence and session. With a
+   mouse, clicking between words opens a sentence's translation. On touch, a stray tap does not:
+   long-press the sentence or use the floating Sentence button, and a translation closed within
+   1.5 seconds is treated as a mistap and not recorded.
 4. Completing a meaningfully read lesson gives weak recognition evidence only to terms that were not
    revealed in a translated scope.
 5. The app rebuilds deterministic per-term, per-character, and per-construction learning state from

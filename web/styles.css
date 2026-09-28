@@ -3405,6 +3405,13 @@ body[data-hanzi-tone-colors="true"] .hanzi-tone[data-tone="5"] {
 }
 
 @media (hover: none), (pointer: coarse) {
+  /* Long press opens sentence help, so it must not also start native selection or a callout. */
+  .sentence-unit {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   .sentence-help-mode {
     position: fixed;
     z-index: 40;
