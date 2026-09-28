@@ -151,26 +151,29 @@ so older readings cannot immediately undo the correction.
 This keeps the distinctive part of the original prototype—implicit testing through reading—without
 making every unclicked render count as knowledge.
 
-Vocabulary state is replayed chronologically from append-only interactions. Mastery is a
-confidence-weighted success/failure estimate, while stability and due dates depend on how much time
-has elapsed since the previous exposure. A reveal lowers stability more strongly as repeated
-cross-session failures accumulate; a clean, qualified read raises it according to current
-retrievability. Multiple raw reveals remain inspectable, but only the first reveal of a term in one
-lesson session affects the rebuilt SRS state.
+Vocabulary state is replayed chronologically from append-only interactions through the FSRS-4.5
+memory model (`server/memory_model.py`). A reveal is a lapse ("again"); a clean, qualified reading is
+a partial success ("good", weighted by `passive_confidence` because not clicking is weaker evidence
+than a correct answer). Rereading a text is discounted further and is not a new exposure. FSRS barely
+raises stability while predicted recall is still high, so massed exposure adds almost nothing, and
+lapses shorten stability according to how surprising they were. Multiple raw reveals remain
+inspectable, but only the first reveal of a term in one lesson session affects the rebuilt state.
 
-The vocabulary calibration is independently configurable from characters. One clean qualified
-session currently contributes 1.5 positive evidence mass and half a stability day per unit of that
-mass, with an extra stability reward when successful recall follows a meaningful delay. Reveal
-penalties remain graded: the first session-deduplicated check is deliberately weak because it may
-only confirm pronunciation or meaning, while repeated checks become progressively stronger.
+Mastery is the time-aware probability of still recalling a word 30 days from now; it decays without
+evidence. A word without evidence uses a frequency prior around the learner's frontier rank, and that
+prior also seeds the first review, so common words a learner already knows are not treated as new.
+`uv run lang memory evaluate --fit` scores the model one step ahead against real reveal history (for
+the zh-hans history: log-loss 0.43 and AUC 0.84, against 0.54 and 0.73 for the earlier Beta model).
 
-Generation priority is adaptive rather than a fixed word list. Urgency combines mastery need,
-uncertainty, overdue time, corpus frequency, repeated failures across lessons, and whether a term
-was deliberately targeted before. A rare one-off context lookup is deliberately down-weighted. Both
-candidate breadth and target capacity scale with text length and placement confidence. The
-known-word ratio controls review/exploration balance and also adjusts capacity. Lesson difficulty
-also adjusts capacity, while recent feedback changes the requested text itself. Terms offered but
-not naturally used are cooled for the next offer instead of being forced into the text.
+Review priority ranks reviewed words by 1 - predicted recall now, with a bonus once recall falls below
+90%, and never-reviewed words by how likely they are still unknown, plus corpus frequency,
+uncertainty, and repeated failures across lessons. A rare one-off context lookup is down-weighted.
+New vocabulary comes from frequency word lists (`server/word_lists/`, currently HSK for Chinese)
+restricted to unencountered words near the learner's level, plus a few words the agent chooses itself
+so new words keep arriving after a list is exhausted. Each import records its predicted share of known
+running words; new-word counts steer toward a 95% target and text cards show each text's share.
+Terms offered but not naturally used are cooled for the next offer instead of being forced into the
+text.
 For Chinese, inferred character retrievability can move an otherwise-unseen word's candidate order
 by at most 15%, making a word built from readable characters slightly easier to introduce. This
 hint fades to zero after three direct word-level signals and never changes that word's mastery,
@@ -204,15 +207,13 @@ evidence; a multi-character reveal shares a smaller total across its characters,
 the currently weaker or less certain character. Repeats are deduplicated and each character is
 capped per lesson session. Sentence and full-text help suppress passive credit in their scopes.
 
-Character mastery is a Beta posterior, uncertainty is its posterior standard deviation, and
-retrievability combines mastery with time decay through the same stability model used elsewhere.
-The initial prior is deliberately neutral, and a character with no qualifying evidence is displayed
-as unestimated rather than known. Word evidence therefore helps estimate its component characters;
+Characters use the same FSRS model with their own policy: inferred reveals are partial lapses sized by
+the failure mass, and clean sessions are partial successes with a new-context bonus. Retrievability is
+current predicted recall and mastery is recall 30 days ahead. The initial prior is deliberately
+neutral, and a character with no qualifying evidence is displayed as unestimated rather than known. Word evidence therefore helps estimate its component characters;
 character knowledge only provides the small, fading generation-order hint described above. It does
 not leak back into word SRS. Direct character-test counters are reserved for a future dedicated
-exercise and remain zero for ordinary reading. Character stability has its own configurable
-days-per-positive-evidence coefficient: many clean sessions produce a multi-day interval instead
-of inheriting the more cautious word-evidence timescale.
+exercise and remain zero for ordinary reading.
 
 The Statistics rail is another read-only projection. **Words met** uses the same canonical,
 opened-text vocabulary boundary as Words and groups the 0-1 mastery estimate into low-confidence,
@@ -431,8 +432,10 @@ unexpected exit with bounded backoff. Relevant Python or language/grammar TOML c
 interrupt an active callback; the next worker starts with the updated source after that task ends.
 The built-in callback is an ephemeral local `codex exec`; it never receives write access. Each
 ordinary task first writes frozen learning-language prose. One batched translation call then
-overlaps bounded sentence-local lexical jobs; at most three callbacks run at once, of which at most
-two are lexical. Grammar follows the fully assembled and validated lexical runs so its ranges have
+overlaps lexical jobs that tokenize batches of sentences (8 by default,
+`ARC_LANG_LEXICAL_BATCH_SIZE`; each result stays sentence-local and is validated on its own); at
+most three callbacks run at once, of which at most two are lexical. Per-sentence calls repeated a
+large fixed prompt for every sentence and cost most of a lesson's tokens. Grammar follows the fully assembled and validated lexical runs so its ranges have
 stable anchors. The host scopes model-authored term keys to one sentence, restores established
 identities, merges exact cross-sentence identities, and invokes a small lexical reconciliation only
 for same-lemma definitions that code cannot safely identify as one sense. It then merges the
@@ -440,8 +443,9 @@ four compact stage results and rejects changed source text, missing or reordered
 ranges, and cross-stage drift. Calibration remains a single complete callback. After each lesson
 the worker takes a fresh learning snapshot for the next slot. A provider-neutral maintenance sweep
 repairs missed queue updates every 30 seconds.
-Each failed lexical sentence gets one immediate local repair with the exact host diagnostic; valid
-siblings are checkpointed and reused if the durable task itself must retry. Identity reconciliation
+Each invalid sentence from a batch gets one immediate sentence-local repair with the exact host
+diagnostic, and a sentence missing from a batch (or a failed batch) gets a fresh single-sentence
+attempt; valid siblings are checkpointed and reused if the durable task itself must retry. Identity reconciliation
 is split into independently validated bounded chunks when a lesson has more ambiguity groups than
 one callback can accept; chunks may overlap within the same two lexical lanes and are globally
 validated again before assembly. Every other failed DAG stage likewise gets at most one repair
