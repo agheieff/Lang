@@ -225,6 +225,8 @@ references one catalog key and anchors it to a precise half-open sentence run ra
   Total tracked time comes only from completed-session active timers. Representative WPM uses the
   token/time-weighted latest ten completions meeting the existing 30-second/80-percent evidence
   threshold; unfinished browser-local time is unavailable to the server.
-- The browser's current active-time policy is one configurable five-second lease after pointer
-  movement. Start, resume, reset, and visibility changes stay disarmed until fresh movement; do not
-  silently broaden those into activity signals.
+- The browser's active-time policy is a lease after reading activity: five seconds after mouse or
+  pen movement, and fifteen seconds after a touch tap, touch movement, or a scroll on a
+  coarse-pointer device (touch reading has no continuous movement). A shorter lease never truncates
+  a longer open one. Start, resume, reset, and visibility changes stay disarmed until fresh
+  activity; do not silently broaden those into activity signals.

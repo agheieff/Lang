@@ -8,7 +8,7 @@ import {
   STARTING_POINTS,
   type StartingPoint,
 } from "./activation.js";
-import { ActiveTimer } from "./active-time.js";
+import { ActiveTimer, TOUCH_READING_ACTIVITY_WINDOW_MS } from "./active-time.js";
 import { appPath } from "./base-path.js";
 import {
   type CharactersPayload,
@@ -394,7 +394,30 @@ const activeTimer = new ActiveTimer(activeTimeStore, {
       `Active reading · ${minutes}:${String(seconds % 60).padStart(2, "0")}`;
   },
 });
-window.addEventListener("pointermove", () => activeTimer.noteMovement(), { passive: true });
+const coarsePointer = window.matchMedia("(pointer: coarse)");
+window.addEventListener(
+  "pointermove",
+  (event) =>
+    activeTimer.noteMovement(
+      event.pointerType === "touch" ? TOUCH_READING_ACTIVITY_WINDOW_MS : undefined,
+    ),
+  { passive: true },
+);
+window.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (event.pointerType === "touch") activeTimer.noteMovement(TOUCH_READING_ACTIVITY_WINDOW_MS);
+  },
+  { passive: true },
+);
+window.addEventListener(
+  "scroll",
+  () => {
+    // Touch scrolling cancels pointer events, so scroll itself is the reading signal there.
+    if (coarsePointer.matches) activeTimer.noteMovement(TOUCH_READING_ACTIVITY_WINDOW_MS);
+  },
+  { passive: true },
+);
 document.addEventListener("visibilitychange", () => activeTimer.visibilityChanged());
 window.setInterval(() => activeTimer.tick(), 1_000);
 

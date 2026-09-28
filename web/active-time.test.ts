@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ActiveTimer } from "./active-time.js";
+import { ActiveTimer, TOUCH_READING_ACTIVITY_WINDOW_MS } from "./active-time.js";
 import {
   ActiveTimeStore,
   activeTimeStorageKey,
@@ -216,6 +216,25 @@ describe("active reading time persistence", () => {
     now = 27_000;
     timer.tick();
     expect(new ActiveTimeStore(storage, key).resume(7, "session-1")).toBe(10_000);
+  });
+
+  it("keeps touch reading active longer and never shortens it with a mouse window", () => {
+    const storage = new MemoryStorage();
+    const key = activeTimeStorageKey("es-es");
+    let now = 0;
+    const timer = new ActiveTimer(new ActiveTimeStore(storage, key), {
+      clock: () => now,
+      isHidden: () => false,
+      render: () => undefined,
+    });
+
+    timer.start(7, "session-1");
+    timer.noteMovement(TOUCH_READING_ACTIVITY_WINDOW_MS);
+    now = 2_000;
+    timer.noteMovement();
+    now = 30_000;
+    timer.tick();
+    expect(new ActiveTimeStore(storage, key).resume(7, "session-1")).toBe(15_000);
   });
 
   it("extends a still-active window without counting an idle gap", () => {

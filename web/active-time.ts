@@ -1,6 +1,9 @@
 import type { ActiveTimeStore } from "./contracts.persistence.js";
 
 const DEFAULT_READING_ACTIVITY_WINDOW_MS = 5_000;
+// Touch reading has no continuous pointer movement: taps and scrolls are sparse, so each one keeps
+// the session active for longer than a mouse movement does.
+export const TOUCH_READING_ACTIVITY_WINDOW_MS = 15_000;
 
 export interface ActiveTimerOptions {
   clock: () => number;
@@ -50,11 +53,12 @@ export class ActiveTimer {
     this.options.render(this.activeMs);
   }
 
-  noteMovement(): void {
+  noteMovement(windowMs: number = this.activityWindowMs): void {
     const now = this.options.clock();
     this.capture(now);
     if (this.lessonId !== null && !this.paused && !this.hidden) {
-      this.activeUntil = now + this.activityWindowMs;
+      // A short mouse window never truncates a longer touch window that is still open.
+      this.activeUntil = Math.max(this.activeUntil, now + windowMs);
     }
   }
 

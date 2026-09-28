@@ -192,9 +192,10 @@ tone-insensitive, spacing-insensitive pinyin. The list separates raw popup click
 lesson/session-deduplicated reveals that affect SRS, and also shows occurrences, clean passive
 reads, mastery, and due state. Opening the list is read-only. The small reset control beside active
 reading time only resets the local clock for the current lesson session and does not record learning
-evidence. The current motion policy is deliberately small and configurable: pointer movement opens
-a five-second countable window, which then pauses until another movement. Starting, resuming,
-resetting, or returning to the tab does not open a window by itself.
+evidence. The motion policy is deliberately small: mouse movement opens a five-second countable
+window, and on touch devices a tap, touch movement, or scroll opens a fifteen-second window, since
+phone reading has no continuous pointer movement. Counting then pauses until the next activity.
+Starting, resuming, resetting, or returning to the tab does not open a window by itself.
 
 Chinese profiles also expose a **Characters** rail. Every literal Han character in the title and
 body of an opened text is counted, including characters in display-only or older plain runs;
