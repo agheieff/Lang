@@ -23,6 +23,7 @@ from server.agent_worker import (
     CallbackResult,
     CodexCallback,
     CommandCallback,
+    LlmCallback,
     PipelineState,
     _canonical_request,
     _canonicalize_known_term_definitions,
@@ -1001,6 +1002,54 @@ def test_codex_callback_routes_all_task_models_and_efforts_from_one_snapshot(
         assert call["env"]["ARC_LANG_CALLBACK_STAGE"] == stage
         payload = json.loads(_canonical_request(requests[stage]))
         assert {"provider", "model", "reasoning_effort"}.isdisjoint(_nested_object_keys(payload))
+
+
+def test_llm_callback_routes_through_the_shared_adapter_read_only(
+    db: Session,
+    lesson_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base_request = _routing_test_request(db, lesson_factory)
+    request = _stage_request(base_request, "prose")
+    observed: list[dict[str, Any]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        observed.append({"argv": argv, "input": kwargs["input"], "cwd": kwargs["cwd"]})
+        (tmp_path / "prose-response.json").write_text("{}", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    invocation = CallbackInvocation(
+        request=request,
+        job_dir=tmp_path,
+        request_path=tmp_path / "prose-request.json",
+        response_schema_path=tmp_path / "prose-schema.json",
+        response_path=tmp_path / "prose-response.json",
+        base_request=base_request,
+    )
+    result = LlmCallback(30, role="lang-generate", binary="/opt/llm").run(invocation)
+
+    assert result.exit_code == 0 and result.payload == "{}"
+    argv = observed[0]["argv"]
+    assert argv[argv.index("/opt/llm") :] == [
+        "/opt/llm",
+        "ask",
+        "lang-generate",
+        "-",
+        "--readonly",
+        "--schema",
+        str(tmp_path / "prose-schema.json"),
+        "--output",
+        str(tmp_path / "prose-response.json"),
+        "--cwd",
+        str(tmp_path),
+    ]
+    # The same task prompt as the Codex path; the routing role chooses the model.
+    assert observed[0]["input"].startswith(
+        "Write the frozen lesson prose for the local Arcadia Lang reader."
+    )
+    assert "--model" not in argv
 
 
 def test_codex_emergency_override_precedence_and_legacy_prose_mapping(
@@ -4365,11 +4414,50 @@ def test_priority_terms_keep_revealed_terms_ahead_of_many_unseen(
 def test_host_defer_command_holds_agent_work(monkeypatch: pytest.MonkeyPatch) -> None:
     from server.agent_worker import _deferred_by_host
 
-    monkeypatch.delenv("ARC_LANG_DEFER_COMMAND", raising=False)
+    monkeypatch.delenv("ARC_LANG_ADMISSION_COMMAND", raising=False)
     assert _deferred_by_host() is False
-    monkeypatch.setenv("ARC_LANG_DEFER_COMMAND", "true")
+    monkeypatch.setenv("ARC_LANG_ADMISSION_COMMAND", "true")
+    assert _deferred_by_host() is False
+    monkeypatch.setenv("ARC_LANG_ADMISSION_COMMAND", "false")
     assert _deferred_by_host() is True
-    monkeypatch.setenv("ARC_LANG_DEFER_COMMAND", "false")
-    assert _deferred_by_host() is False
-    monkeypatch.setenv("ARC_LANG_DEFER_COMMAND", "/nonexistent/command")
-    assert _deferred_by_host() is False
+    monkeypatch.setenv("ARC_LANG_ADMISSION_COMMAND", "/nonexistent/command")
+    assert _deferred_by_host() is True
+
+
+@pytest.mark.parametrize("failure", [2, 127, -15, "timeout", "syntax"])
+def test_host_admission_errors_wait(monkeypatch: pytest.MonkeyPatch, failure: object) -> None:
+    import subprocess
+    from unittest.mock import Mock
+
+    from server import agent_worker
+
+    monkeypatch.setattr(agent_worker, "_host_admission_cache", None)
+    monkeypatch.setenv("ARC_LANG_ADMISSION_COMMAND", "host-admission")
+    run = Mock(return_value=subprocess.CompletedProcess([], failure))
+    if failure == "timeout":
+        run.side_effect = subprocess.TimeoutExpired("host-admission", 30)
+    elif failure == "syntax":
+        monkeypatch.setenv("ARC_LANG_ADMISSION_COMMAND", "'unterminated")
+    monkeypatch.setattr(agent_worker.subprocess, "run", run)
+    assert agent_worker._deferred_by_host() is True
+
+
+def test_host_admission_rechecks_after_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+    from unittest.mock import Mock
+
+    from server import agent_worker
+
+    monkeypatch.setattr(agent_worker, "_host_admission_cache", None)
+    monkeypatch.setenv("ARC_LANG_ADMISSION_COMMAND", "host-admission")
+    clock = Mock(return_value=100.0)
+    run = Mock(side_effect=[subprocess.CompletedProcess([], 3), subprocess.CompletedProcess([], 0)])
+    monkeypatch.setattr(agent_worker.time, "monotonic", clock)
+    monkeypatch.setattr(agent_worker.subprocess, "run", run)
+    assert agent_worker._deferred_by_host() is True
+    clock.return_value = 159.9
+    assert agent_worker._deferred_by_host() is True
+    assert run.call_count == 1
+    clock.return_value = 160.0
+    assert agent_worker._deferred_by_host() is False
+    assert run.call_count == 2

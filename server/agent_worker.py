@@ -195,6 +195,37 @@ class CommandCallback:
         )
 
 
+def _callback_prompt(invocation: CallbackInvocation) -> str:
+    """The complete task prompt shared by every agent harness."""
+    if isinstance(invocation.request, GenerationLexicalUnitRequest):
+        action = "Tokenize and define one supplied frozen sentence"
+    elif isinstance(invocation.request, GenerationLexicalBatchRequest):
+        action = "Tokenize and define each supplied frozen sentence independently"
+    elif isinstance(invocation.request, GenerationLexicalConflictRequest):
+        action = "Conservatively reconcile ambiguous lexical identities"
+    else:
+        action = {
+            "legacy": "Generate complete lesson drafts",
+            "prose": "Write the frozen lesson prose",
+            "lexical": "Tokenize and define the supplied frozen lesson prose",
+            "translation": "Translate the supplied frozen lesson prose",
+            "grammar": "Annotate grammar in the supplied tokenized lesson prose",
+            "preferences": "Maintain the learner's reading-preference notes",
+        }[invocation.request.stage]
+    context_instruction = (
+        "Honor the profile, learning evidence, content plan, and instructions"
+        if invocation.request.stage in {"legacy", "prose"}
+        else "Honor the frozen dependencies, task data, and instructions"
+    )
+    prompt = (
+        f"{action} for the local Arcadia Lang reader. Do not use tools, edit files, inspect "
+        "the repository, or access a database or network. Return only JSON matching the "
+        f"supplied output schema. {context_instruction} in this request:\n"
+        f"{_canonical_request(invocation.request)}"
+    )
+    return prompt
+
+
 class CodexCallback:
     def __init__(self, timeout_seconds: int, *, config_path: Path | None = None) -> None:
         self.timeout_seconds = timeout_seconds
@@ -253,35 +284,57 @@ class CodexCallback:
             "--config",
             f'model_reasoning_effort="{route.reasoning_effort}"',
         ]
-        if isinstance(invocation.request, GenerationLexicalUnitRequest):
-            action = "Tokenize and define one supplied frozen sentence"
-        elif isinstance(invocation.request, GenerationLexicalBatchRequest):
-            action = "Tokenize and define each supplied frozen sentence independently"
-        elif isinstance(invocation.request, GenerationLexicalConflictRequest):
-            action = "Conservatively reconcile ambiguous lexical identities"
-        else:
-            action = {
-                "legacy": "Generate complete lesson drafts",
-                "prose": "Write the frozen lesson prose",
-                "lexical": "Tokenize and define the supplied frozen lesson prose",
-                "translation": "Translate the supplied frozen lesson prose",
-                "grammar": "Annotate grammar in the supplied tokenized lesson prose",
-                "preferences": "Maintain the learner's reading-preference notes",
-            }[invocation.request.stage]
-        context_instruction = (
-            "Honor the profile, learning evidence, content plan, and instructions"
-            if invocation.request.stage in {"legacy", "prose"}
-            else "Honor the frozen dependencies, task data, and instructions"
-        )
-        prompt = (
-            f"{action} for the local Arcadia Lang reader. Do not use tools, edit files, inspect "
-            "the repository, or access a database or network. Return only JSON matching the "
-            f"supplied output schema. {context_instruction} in this request:\n"
-            f"{_canonical_request(invocation.request)}"
-        )
+        prompt = _callback_prompt(invocation)
         return _run_callback_process(
             command,
             stdin=prompt,
+            invocation=invocation,
+            timeout_seconds=self.timeout_seconds + 15,
+            response_path=invocation.response_path,
+            already_wrapped=True,
+        )
+
+
+LLM_BINARY = "/home/agheieff/data/llm/bin/llm"
+
+
+class LlmCallback:
+    """Harness-neutral generation through the personal system's model routing.
+
+    The routing role, not this app, chooses model, harness, account and effort;
+    the run is read-only and must answer with JSON matching the response schema.
+    """
+
+    def __init__(
+        self, timeout_seconds: int, *, role: str = "lang-generate", binary: str = LLM_BINARY
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.role = role
+        self.binary = binary
+
+    def command(self, invocation: CallbackInvocation) -> list[str]:
+        return [
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=10s",
+            f"{self.timeout_seconds}s",
+            self.binary,
+            "ask",
+            self.role,
+            "-",
+            "--readonly",
+            "--schema",
+            str(invocation.response_schema_path),
+            "--output",
+            str(invocation.response_path),
+            "--cwd",
+            str(invocation.job_dir),
+        ]
+
+    def run(self, invocation: CallbackInvocation) -> CallbackResult:
+        return _run_callback_process(
+            self.command(invocation),
+            stdin=_callback_prompt(invocation),
             invocation=invocation,
             timeout_seconds=self.timeout_seconds + 15,
             response_path=invocation.response_path,
@@ -394,6 +447,8 @@ def load_callback() -> GenerationCallback:
         maximum=3600,
     )
     adapter = os.getenv("ARC_LANG_AGENT_CALLBACK", "codex")
+    if adapter == "llm":
+        return LlmCallback(timeout, role=os.getenv("ARC_LANG_AGENT_ROLE", "lang-generate"))
     if adapter == "codex":
         return CodexCallback(timeout)
     if adapter == "command":
@@ -401,7 +456,7 @@ def load_callback() -> GenerationCallback:
         if not command:
             raise ValueError("ARC_LANG_AGENT_COMMAND is required for the command callback")
         return CommandCallback(shlex.split(command), timeout)
-    raise ValueError("ARC_LANG_AGENT_CALLBACK must be codex or command")
+    raise ValueError("ARC_LANG_AGENT_CALLBACK must be llm, codex or command")
 
 
 def process_generation_task(
@@ -2642,19 +2697,34 @@ def _refresh_worker_workspaces(profile_id: str | None, known_profiles: set[str])
     return workspaces
 
 
+_host_admission_cache: tuple[str, float, bool] | None = None
+
+
 def _deferred_by_host() -> bool:
-    """Let the host keep agent work apart, e.g. while its own maintenance run is accounted.
+    """A configured admission command must exit zero to allow app-owned model work.
 
-    ARC_LANG_DEFER_COMMAND exits 0 to mean "wait now"; any other outcome lets work proceed.
+    Errors and unavailable allowance defer before claiming a task. A short observation
+    cache bounds account inspection while the worker continues its ordinary polling.
+    Local deployments without a host policy command retain their existing behavior.
     """
-
-    command = os.getenv("ARC_LANG_DEFER_COMMAND")
+    global _host_admission_cache
+    command = os.getenv("ARC_LANG_ADMISSION_COMMAND")
     if not command:
+        _host_admission_cache = None
         return False
+    now = time.monotonic()
+    if _host_admission_cache is not None:
+        cached_command, checked, deferred = _host_admission_cache
+        if cached_command == command and 0 <= now - checked < 60:
+            return deferred
     try:
-        return subprocess.run(shlex.split(command), capture_output=True, timeout=30).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+        deferred = (
+            subprocess.run(shlex.split(command), capture_output=True, timeout=30).returncode != 0
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        deferred = True
+    _host_admission_cache = (command, time.monotonic(), deferred)
+    return deferred
 
 
 def _maintain_worker_workspaces(
