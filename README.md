@@ -363,8 +363,15 @@ Set `ARC_LANG_TTS_REMOTE=1` for the host's web service so audio status reports "
 "unavailable". On the machine with the Qwen runtime (`scripts/install_qwen_tts.sh`), run
 `uv run python -m server.remote_tts_worker --host HOST` or install `scripts/lang-tts-remote.service`.
 It claims one task at a time with `lang tts claim` over SSH, synthesizes locally, and uploads the WAV
-with `lang tts complete`; a claim left unfinished for 45 minutes returns to the queue without using
-an attempt. Nothing is exposed beyond SSH.
+with `lang tts complete`. Each claim returns a `claim_token`; complete, fail and release require
+`--claim TOKEN`. Reassigned claims reject an old worker's results. Remote queue operations are
+serialized on the owner, and an exact repeated upload returns the existing completion. A claim left
+unfinished for 45 minutes returns to the queue without using an attempt; synthesis times out after
+40 minutes so reporting fits inside that lease. Network loss leaves uncertain work for owner
+readback/reclaim, while reported synthesis failures retain the two-attempt cap. WAV validation checks
+all declared frames before publication. Nothing is exposed beyond SSH. Run either the local worker
+or the remote queue on a host, never both. Upgrade the owner and PC worker together: stop the idle PC
+worker, deploy the owner, then restart the PC worker.
 
 ## Commands
 
@@ -501,6 +508,19 @@ Codex environment variables are emergency overrides only. For either setting, th
 `ARC_LANG_CODEX_COMPLETE_*` remains its most-specific compatibility override, followed by
 `ARC_LANG_CODEX_PROSE_*`, the global override, and the tracked prose route.
 
+For a host with the shared LLM adapter, set `ARC_LANG_AGENT_CALLBACK=llm` and
+`ARC_LANG_AGENT_ROLE=lang-generate`. The role selects its model, harness and account; Lang sends the
+same schema-bound read-only stage request. `ARC_LANG_ADMISSION_COMMAND` may name a host admission
+command: only exit 0 permits a claim or preference callback, and errors/timeouts defer. Observations
+are cached for at most 60 seconds. This replaces the obsolete `ARC_LANG_DEFER_COMMAND` integration.
+
+If the LLM adapter returns its documented unavailable exit (3) after admission, the same task stays
+pending with a 60-second retry delay. Already validated stage artifacts survive. Dispatch numbers
+(`attempts`) keep increasing to preserve separate artifact directories, while `admission_deferrals`
+in the task payload discounts confirmed waits from the draft-attempt cap. Ordinary errors and
+timeouts still consume that cap; availability never authorizes retrying an uncertain tool effect.
+Preference updates also retain their pending input when the role is unavailable.
+
 For another local agent, set `ARC_LANG_AGENT_CALLBACK=command` and
 `ARC_LANG_AGENT_COMMAND='agent-command --flags'`. The command is executed as an argv list without a
 shell. It receives canonical requests with `schema_version`, provider-neutral `stage`, and `task`
@@ -562,7 +582,7 @@ contract without a content plan.
 
 Relevant runtime settings are `ARC_LANG_QUEUE_TARGET` (1-10, default 3),
 `ARC_LANG_AGENT_MAINTENANCE_SECONDS` (1-3600, default 30),
-`ARC_LANG_AGENT_TIMEOUT_SECONDS` (default 600), and `ARC_LANG_AGENT_CALLBACK` (`codex` or
+`ARC_LANG_AGENT_TIMEOUT_SECONDS` (default 600), and `ARC_LANG_AGENT_CALLBACK` (`codex`, `llm` or
 `command`). Codex model and effort defaults come from the tracked task routes above; the
 `ARC_LANG_CODEX_*` forms are optional emergency overrides, not defaults.
 

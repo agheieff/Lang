@@ -35,6 +35,11 @@ from server.schemas import (
 
 MAX_CALLBACK_BYTES = 5_000_000
 
+
+class CallbackDeferred(RuntimeError):
+    """The provider confirmed no qualified capacity; this is not a failed draft."""
+
+
 GenerationStageRequest = (
     GenerationCallbackRequest
     | GenerationLexicalUnitRequest
@@ -86,6 +91,7 @@ class CallbackResult:
     finished_at: str | None = None
     duration_seconds: float | None = None
     queue_wait_seconds: float | None = None
+    deferred: bool = False
 
 
 class GenerationCallback(Protocol):
@@ -193,7 +199,9 @@ def record_stage_result(
         "finished_at": result.finished_at,
         "duration_seconds": rounded_seconds(result.duration_seconds),
         "queue_wait_seconds": rounded_seconds(result.queue_wait_seconds),
-        "status": "ok" if callback_result_error(result) is None else "error",
+        "status": "deferred"
+        if result.deferred
+        else ("ok" if callback_result_error(result) is None else "error"),
         "exit_code": result.exit_code,
         "request_bytes": invocation.request_path.stat().st_size,
         "response_bytes": len(result.payload.encode()),
@@ -332,6 +340,8 @@ def rounded_seconds(value: float | None) -> float | None:
 
 
 def callback_result_error(result: CallbackResult) -> str | None:
+    if result.deferred:
+        raise CallbackDeferred("LLM role is unavailable; waiting for qualified capacity")
     if result.exit_code != 0:
         return f"callback exited with status {result.exit_code}"
     if len(result.payload.encode()) > MAX_CALLBACK_BYTES:

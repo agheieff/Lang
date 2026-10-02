@@ -36,6 +36,8 @@ ENVIRONMENT_ERROR_MARKERS = (
     "Qwen provider stopped unexpectedly",
 )
 SSH_TIMEOUT_SECONDS = 120.0
+# Finish or report failure before the owner's 45-minute lease can be reassigned.
+SYNTHESIS_TIMEOUT_SECONDS = 40 * 60.0
 
 
 class RemoteUnavailable(RuntimeError):
@@ -89,6 +91,7 @@ class Worker:
             return False
         profile, task_id = claim["profile_id"], int(claim["task_id"])
         task = ["--profile", profile, "tts"]
+        ownership = ["--task", str(task_id), "--claim", claim["claim_token"]]
         with tempfile.TemporaryDirectory(prefix="lang-tts-") as directory:
             output = Path(directory) / "audio.tmp.wav"  # the provider requires this suffix
             try:
@@ -98,12 +101,12 @@ class Worker:
             except Exception as error:
                 message = f"{type(error).__name__}: {error}"
                 if any(marker in message for marker in ENVIRONMENT_ERROR_MARKERS):
-                    self.remote.run([*task, "release", "--task", str(task_id), "--reason", message])
+                    self.remote.run([*task, "release", *ownership, "--reason", message])
                     raise RuntimeBroken(message) from error
-                self.remote.run([*task, "fail", "--task", str(task_id), "--error", message])
+                self.remote.run([*task, "fail", *ownership, "--error", message])
                 print(f"audio {profile}/{task_id} failed: {message}", flush=True)
                 return True
-            self.remote.run([*task, "complete", "--task", str(task_id)], stdin=output.read_bytes())
+            self.remote.run([*task, "complete", *ownership], stdin=output.read_bytes())
         print(f"audio {profile}/{task_id} completed", flush=True)
         return True
 
@@ -137,7 +140,7 @@ def main() -> None:
     command = provider_command()
     if command is None:
         raise SystemExit("Local Qwen runtime is not installed (scripts/install_qwen_tts.sh).")
-    provider = ProviderProcess(command, timeout_seconds=3600.0)
+    provider = ProviderProcess(command, timeout_seconds=SYNTHESIS_TIMEOUT_SECONDS)
     worker = Worker(
         Remote(args.host, os.getenv("ARC_LANG_REMOTE_CLI", DEFAULT_REMOTE_CLI)), provider
     )

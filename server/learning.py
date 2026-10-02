@@ -9,7 +9,7 @@ import os
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal, cast, get_args
 
 from sqlalchemy import func, or_, select, update
@@ -846,7 +846,11 @@ def _generation_attempt_limit(task: GenerationTask) -> int:
 
 
 def _generation_retry_available(task: GenerationTask) -> bool:
-    if task.attempts >= _generation_attempt_limit(task):
+    # Dispatch numbers name immutable artifact directories. Capacity-only waits do not spend
+    # the draft failure budget, but must not cause the next dispatch to overwrite evidence.
+    if task.attempts - int(task.payload.get("admission_deferrals", 0)) >= _generation_attempt_limit(
+        task
+    ):
         return False
     if task.payload.get("generation_contract_revision") != GENERATION_CONTRACT_REVISION:
         return True
@@ -1244,6 +1248,9 @@ def claim_generation_task(db: Session) -> GenerationTask | None:
         )
         if task is None:
             return None
+        retry_at = task.payload.get("admission_retry_at")
+        if isinstance(retry_at, str) and utc_now() < as_utc(datetime.fromisoformat(retry_at)):
+            return None
         if _generation_retry_available(task):
             break
         now = utc_now()
@@ -1265,6 +1272,28 @@ def claim_generation_task(db: Session) -> GenerationTask | None:
     task.finished_at = None
     task.updated_at = now
     task.error = None
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def defer_generation_task(
+    db: Session, task_id: int, *, log_path: str, reason: str
+) -> GenerationTask:
+    """Retain a dispatch refused by admission, preserving identity and validated stage files."""
+    task = _running_generation_task(db, task_id)
+    now = utc_now()
+    task.payload = {
+        **task.payload,
+        "admission_deferrals": int(task.payload.get("admission_deferrals", 0)) + 1,
+        "admission_retry_at": (now + timedelta(seconds=60)).isoformat(),
+    }
+    task.state = "pending"
+    task.log_path = log_path
+    task.error = reason
+    task.started_at = None
+    task.finished_at = None
+    task.updated_at = now
     db.commit()
     db.refresh(task)
     return task

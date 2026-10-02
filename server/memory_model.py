@@ -60,12 +60,22 @@ class MemoryPolicy:
     prior_floor: float = 0.03
 
     def __post_init__(self) -> None:
-        if len(self.weights) != 17:
-            raise ValueError("FSRS-4.5 needs exactly 17 weights")
+        if len(self.weights) != 17 or any(not math.isfinite(w) for w in self.weights):
+            raise ValueError("FSRS-4.5 needs exactly 17 finite weights")
         for name in ("passive_confidence", "reread_weight"):
             value = getattr(self, name)
             if not 0.0 < value <= 1.0:
                 raise ValueError(f"{name} must be in (0, 1]")
+        if any(
+            not math.isfinite(value)
+            for value in (
+                self.horizon_days,
+                self.prior_slope,
+                self.minimum_stability_days,
+                self.maximum_stability_days,
+            )
+        ):
+            raise ValueError("memory policy values must be finite")
         if not 0 < self.minimum_stability_days < self.maximum_stability_days:
             raise ValueError("stability bounds must be positive and ordered")
         if self.horizon_days < 0 or self.prior_slope <= 0:
@@ -219,6 +229,10 @@ def review(
 def interval_days(stability_days: float, desired_retention: float = 0.9) -> float:
     """Days until predicted recall falls to ``desired_retention``."""
 
+    if not math.isfinite(stability_days) or stability_days <= 0:
+        raise ValueError("stability must be finite and positive")
+    if not 0 < desired_retention <= 1:
+        raise ValueError("desired retention must be in (0, 1]")
     return float(stability_days / FACTOR * (desired_retention ** (1 / DECAY) - 1))
 
 

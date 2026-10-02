@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from server.clock import utc_now
 from server.db import session_scope
 from server.generation_callback import (
+    CallbackDeferred,
     CallbackInvocation,
     GenerationCallback,
     callback_result_error,
@@ -94,7 +95,7 @@ def maybe_update_preferences(workspace: Workspace, callback: GenerationCallback)
         if error is not None:
             raise ValueError(error)
         update = PreferenceUpdateResult.model_validate_json(result.payload)
-    except (OSError, ValueError, ValidationError) as error:
+    except (OSError, ValueError, ValidationError, CallbackDeferred) as error:
         _last_failure[workspace.profile_id] = time.monotonic()
         print(f"preference update for {workspace.profile_id} failed: {error}", flush=True)
         return False

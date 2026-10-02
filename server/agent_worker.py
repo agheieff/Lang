@@ -14,9 +14,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -68,6 +69,7 @@ from server.learning import (
     calibration_generation_brief,
     claim_generation_task,
     complete_generation_task,
+    defer_generation_task,
     ensure_profile,
     fail_generation_task,
     generation_failure_context,
@@ -332,7 +334,7 @@ class LlmCallback:
         ]
 
     def run(self, invocation: CallbackInvocation) -> CallbackResult:
-        return _run_callback_process(
+        result = _run_callback_process(
             self.command(invocation),
             stdin=_callback_prompt(invocation),
             invocation=invocation,
@@ -340,6 +342,9 @@ class LlmCallback:
             response_path=invocation.response_path,
             already_wrapped=True,
         )
+        # LLM's public exit 3 means admission refused before any possible tool effects.
+        # Never infer this from arbitrary callback failure text or from a timeout.
+        return replace(result, deferred=result.exit_code == 3)
 
 
 def _codex_request_route(task: str, routes: ProviderTaskRoutes) -> GenerationTaskRoute:
@@ -536,6 +541,10 @@ def process_generation_task(
         with session_scope(workspace) as db:
             complete_generation_task(db, task.id, log_path=str(log_path))
         outcome = "completed"
+    except callback_runtime.CallbackDeferred as error:
+        with session_scope(workspace) as db:
+            defer_generation_task(db, task.id, log_path=str(log_path), reason=str(error))
+        outcome = "deferred"
     finally:
         callback_runtime.record_host_timing(
             log_path,
@@ -545,6 +554,17 @@ def process_generation_task(
             outcome=outcome,
         )
         shutil.rmtree(invocation.job_dir, ignore_errors=True)
+
+
+@contextmanager
+def _preserve_stage_failures(failures: list[str]) -> Iterator[None]:
+    try:
+        yield
+    except callback_runtime.CallbackDeferred:
+        # A parallel capacity wait cannot forgive an already validated stage failure.
+        # Let the normal failure path retain that error and charge its bounded retry.
+        if not failures:
+            raise
 
 
 def _run_staged_pipeline(
@@ -631,10 +651,13 @@ def _run_staged_pipeline(
         else None
     )
     failures: list[str] = []
-    with ThreadPoolExecutor(
-        max_workers=MAX_PARALLEL_GENERATION_CALLBACKS,
-        thread_name_prefix="lang-generation",
-    ) as executor:
+    with (
+        ThreadPoolExecutor(
+            max_workers=MAX_PARALLEL_GENERATION_CALLBACKS,
+            thread_name_prefix="lang-generation",
+        ) as executor,
+        _preserve_stage_failures(failures),
+    ):
         translation_future = (
             executor.submit(callback_runtime.run_timed_callback, callback, translation_invocation)
             if translation_invocation is not None

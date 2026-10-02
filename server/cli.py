@@ -371,22 +371,40 @@ def tts_claim(args: argparse.Namespace) -> None:
 
 
 def tts_complete(args: argparse.Namespace) -> None:
-    from server.remote_tts import complete_remote_audio
+    from server.remote_tts import MAX_AUDIO_BYTES, complete_remote_audio
 
-    audio = sys.stdin.buffer.read()
-    _print_json({"relative_path": complete_remote_audio(_workspace(args), args.task, audio)})
+    audio = sys.stdin.buffer.read(MAX_AUDIO_BYTES + 1)
+    _print_json(
+        {
+            "relative_path": complete_remote_audio(
+                _workspace(args), args.task, audio, claim_token=args.claim
+            )
+        }
+    )
 
 
 def tts_fail(args: argparse.Namespace) -> None:
     from server.remote_tts import fail_remote_audio
 
-    _print_json({"state": fail_remote_audio(_workspace(args), args.task, args.error)})
+    _print_json(
+        {
+            "state": fail_remote_audio(
+                _workspace(args), args.task, args.error, claim_token=args.claim
+            )
+        }
+    )
 
 
 def tts_release(args: argparse.Namespace) -> None:
     from server.remote_tts import release_remote_audio
 
-    _print_json({"state": release_remote_audio(_workspace(args), args.task, args.reason)})
+    _print_json(
+        {
+            "state": release_remote_audio(
+                _workspace(args), args.task, args.reason, claim_token=args.claim
+            )
+        }
+    )
 
 
 def tts_retry(args: argparse.Namespace) -> None:
@@ -532,13 +550,16 @@ def build_parser() -> argparse.ArgumentParser:
     claim_parser.set_defaults(handler=tts_claim)
     complete_parser = tts_commands.add_parser("complete", help="read WAV bytes from stdin")
     complete_parser.add_argument("--task", type=int, required=True)
+    complete_parser.add_argument("--claim", required=True)
     complete_parser.set_defaults(handler=tts_complete)
     fail_parser = tts_commands.add_parser("fail")
     fail_parser.add_argument("--task", type=int, required=True)
+    fail_parser.add_argument("--claim", required=True)
     fail_parser.add_argument("--error", required=True)
     fail_parser.set_defaults(handler=tts_fail)
     release_parser = tts_commands.add_parser("release", help="requeue without using an attempt")
     release_parser.add_argument("--task", type=int, required=True)
+    release_parser.add_argument("--claim", required=True)
     release_parser.add_argument("--reason", required=True)
     release_parser.set_defaults(handler=tts_release)
     retry_parser = tts_commands.add_parser("retry", help="give a failed task a fresh budget")

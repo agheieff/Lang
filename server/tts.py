@@ -742,7 +742,14 @@ def validate_wave(path: Path) -> None:
                 raise ValueError("Qwen provider created an empty or invalid WAV")
             if audio.getnchannels() not in {1, 2} or audio.getsampwidth() not in {2, 3, 4}:
                 raise ValueError("Qwen provider created an unsupported WAV format")
-    except wave.Error as error:
+            remaining = audio.getnframes()
+            frame_bytes = audio.getnchannels() * audio.getsampwidth()
+            while remaining:
+                count = min(remaining, 65_536)
+                if len(audio.readframes(count)) != count * frame_bytes:
+                    raise ValueError("Qwen provider created a truncated WAV")
+                remaining -= count
+    except (wave.Error, EOFError) as error:
         raise ValueError("Qwen provider created an invalid WAV") from error
 
 

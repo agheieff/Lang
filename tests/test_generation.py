@@ -6,6 +6,7 @@ import stat
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from datetime import timedelta
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any
@@ -44,6 +45,7 @@ from server.agent_worker import (
     _validate_generated_lesson_quality,
     process_generation_task,
 )
+from server.clock import utc_now
 from server.content_planning import build_content_plan
 from server.db import init_db, session_scope
 from server.generation_normalization import normalize_callback_lesson
@@ -4461,3 +4463,138 @@ def test_host_admission_rechecks_after_wait(monkeypatch: pytest.MonkeyPatch) -> 
     clock.return_value = 160.0
     assert agent_worker._deferred_by_host() is False
     assert run.call_count == 2
+
+
+@pytest.mark.parametrize("exit_code,deferred", [(0, False), (1, False), (3, True), (124, False)])
+def test_llm_only_defers_confirmed_unavailable_exit(
+    db: Session,
+    lesson_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    exit_code: int,
+    deferred: bool,
+) -> None:
+    request = _stage_request(_routing_test_request(db, lesson_factory), "prose")
+    invocation = CallbackInvocation(
+        request=request,
+        job_dir=tmp_path,
+        request_path=tmp_path / "request.json",
+        response_schema_path=tmp_path / "schema.json",
+        response_path=tmp_path / "result.json",
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            [], exit_code, stdout="", stderr="capacity unavailable"
+        ),
+    )
+    assert LlmCallback(30).run(invocation).deferred is deferred
+
+
+@pytest.mark.parametrize("stage", ["prose", "lexical", "translation", "grammar"])
+def test_role_unavailability_retains_task_and_reuses_validated_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    from server.learning import generation_failure_context
+
+    workspace, claimed, payloads = _claimed_staged_task(tmp_path)
+    first_stages: list[str] = []
+
+    class UnavailableStage:
+        def run(self, invocation: CallbackInvocation) -> CallbackResult:
+            first_stages.append(invocation.request.stage)
+            if invocation.request.stage == stage:
+                return CallbackResult(
+                    exit_code=3, payload="", log="no qualified capacity", deferred=True
+                )
+            return CallbackResult(
+                exit_code=0, payload=_staged_payload(invocation, payloads), log="ok"
+            )
+
+    process_generation_task(workspace, claimed, UnavailableStage())
+    with session_scope(workspace) as db:
+        task = db.get(GenerationTask, claimed.id)
+        assert task is not None and task.state == "pending"
+        assert task.payload["admission_deferrals"] == 1
+        assert not generation_failure_context(task)
+        assert claim_generation_task(db) is None  # bounded wait, no busy retry
+        monkeypatch.setattr("server.learning.utc_now", lambda: utc_now() + timedelta(minutes=2))
+        retry = claim_generation_task(db)
+        assert retry is not None and retry.id == claimed.id and retry.attempts == 2
+    retry_stages: list[str] = []
+
+    class Available:
+        def run(self, invocation: CallbackInvocation) -> CallbackResult:
+            retry_stages.append(invocation.request.stage)
+            return CallbackResult(
+                exit_code=0, payload=_staged_payload(invocation, payloads), log="ok"
+            )
+
+    process_generation_task(workspace, retry, Available())
+    with session_scope(workspace) as db:
+        task = db.get(GenerationTask, claimed.id)
+        assert task is not None and task.state == "completed", task.error if task else None
+    if stage != "prose":
+        assert "prose" not in retry_stages
+    if stage == "grammar":
+        assert "lexical" not in retry_stages
+    assert (workspace.directory / "agent/jobs" / f"task-{claimed.id}-attempt-1").is_dir()
+    assert (workspace.directory / "agent/jobs" / f"task-{claimed.id}-attempt-2").is_dir()
+
+
+def test_repeated_admission_deferrals_do_not_exhaust_draft_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from server.learning import defer_generation_task
+
+    workspace, claimed, _ = _claimed_staged_task(tmp_path)
+    now = utc_now()
+    for count in range(10):
+        with session_scope(workspace) as db:
+            defer_generation_task(
+                db, claimed.id, log_path="test.log", reason="capacity unavailable"
+            )
+            now += timedelta(minutes=2)
+            monkeypatch.setattr("server.learning.utc_now", lambda now=now: now)
+            claimed = claim_generation_task(db)
+            assert claimed is not None
+            assert claimed.payload["admission_deferrals"] == count + 1
+    with session_scope(workspace) as db:
+        fail_generation_task(db, claimed.id, log_path="test.log", error="[prose] invalid response")
+        retry_generation_task(db, claimed.id)
+        claimed = claim_generation_task(db)
+        assert claimed is not None
+        fail_generation_task(db, claimed.id, log_path="test.log", error="[prose] invalid response")
+        with pytest.raises(ValueError, match="maximum attempt count"):
+            retry_generation_task(db, claimed.id)
+
+
+@pytest.mark.parametrize("failed,waiting", [("lexical", "translation"), ("translation", "grammar")])
+def test_parallel_capacity_wait_does_not_forgive_validated_stage_failure(
+    tmp_path: Path,
+    failed: str,
+    waiting: str,
+) -> None:
+    workspace, claimed, payloads = _claimed_staged_task(tmp_path)
+
+    class MixedResult:
+        def run(self, invocation: CallbackInvocation) -> CallbackResult:
+            stage = invocation.request.stage
+            if stage == waiting:
+                return CallbackResult(exit_code=3, payload="", log="unavailable", deferred=True)
+            if stage == failed:
+                return CallbackResult(exit_code=1, payload="", log="real failure")
+            return CallbackResult(
+                exit_code=0, payload=_staged_payload(invocation, payloads), log="ok"
+            )
+
+    process_generation_task(workspace, claimed, MixedResult())
+    with session_scope(workspace) as db:
+        task = db.get(GenerationTask, claimed.id)
+        assert task is not None and task.state == "failed"
+        assert not task.payload.get("admission_deferrals")
+        assert failed in (task.error or "")

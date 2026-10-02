@@ -56,7 +56,9 @@ def test_remote_worker_claims_uploads_and_completes_audio(workspace: Workspace) 
     assert claim["request"]["chunks"] and "output_path" not in claim["request"]
     assert claim_remote_audio() is None  # one running task, nothing else pending
 
-    relative = complete_remote_audio(workspace, claim["task_id"], _wave_bytes())
+    relative = complete_remote_audio(
+        workspace, claim["task_id"], _wave_bytes(), claim_token=claim["claim_token"]
+    )
 
     task = _task(workspace)
     assert task.state == "completed" and task.relative_path == relative
@@ -69,10 +71,17 @@ def test_invalid_audio_is_rejected_and_reported_failures_use_attempts(
     claim = claim_remote_audio()
     assert claim is not None
     with pytest.raises(ValueError):
-        complete_remote_audio(workspace, claim["task_id"], b"not audio")
+        complete_remote_audio(
+            workspace, claim["task_id"], b"not audio", claim_token=claim["claim_token"]
+        )
     assert _task(workspace).state == "running"
 
-    assert fail_remote_audio(workspace, claim["task_id"], "synthesis crashed") == "pending"
+    assert (
+        fail_remote_audio(
+            workspace, claim["task_id"], "synthesis crashed", claim_token=claim["claim_token"]
+        )
+        == "pending"
+    )
     assert _task(workspace).attempts == 1
 
 
@@ -126,7 +135,16 @@ def test_pc_worker_sends_provider_valid_requests_and_uploads(workspace: Workspac
 
     assert Worker(FakeRemote(), FakeProvider()).step() is True  # type: ignore[arg-type]
     arguments, uploaded = calls[-1]
-    assert arguments == ["--profile", "es-es", "tts", "complete", "--task", str(claim["task_id"])]
+    assert arguments == [
+        "--profile",
+        "es-es",
+        "tts",
+        "complete",
+        "--task",
+        str(claim["task_id"]),
+        "--claim",
+        claim["claim_token"],
+    ]
     assert uploaded == _wave_bytes()
 
 
@@ -144,7 +162,11 @@ def test_runtime_failures_release_without_using_attempts(workspace: Workspace) -
             released.append(arguments)
             from server.remote_tts import release_remote_audio
 
-            return {"state": release_remote_audio(workspace, claim["task_id"], arguments[-1])}
+            return {
+                "state": release_remote_audio(
+                    workspace, claim["task_id"], arguments[-1], claim_token=claim["claim_token"]
+                )
+            }
 
     class BrokenProvider:
         def generate(self, request: Any) -> dict[str, Any]:
@@ -163,9 +185,126 @@ def test_failed_task_can_be_retried_with_a_fresh_budget(workspace: Workspace) ->
     for _ in range(2):
         claim = claim_remote_audio()
         assert claim is not None
-        fail_remote_audio(workspace, claim["task_id"], "synthesis crashed")
+        fail_remote_audio(
+            workspace, claim["task_id"], "synthesis crashed", claim_token=claim["claim_token"]
+        )
     task = _task(workspace)
     assert task.state == "failed"
 
     assert retry_failed_audio(workspace, task.id) == "pending"
     assert _task(workspace).attempts == 0
+
+
+@pytest.mark.parametrize("operation", ["complete", "fail", "release"])
+def test_reclaimed_task_rejects_the_old_workers_result(
+    workspace: Workspace, operation: str
+) -> None:
+    from server.remote_tts import release_remote_audio
+
+    old = claim_remote_audio()
+    assert old is not None
+    with session_scope(workspace) as db:
+        task = db.get(AudioTask, old["task_id"])
+        assert task is not None
+        task.started_at = utc_now() - timedelta(hours=2)
+    current = claim_remote_audio()
+    assert current is not None and current["task_id"] == old["task_id"]
+    assert current["claim_token"] != old["claim_token"]
+    with pytest.raises(ValueError, match="no longer current"):
+        if operation == "complete":
+            complete_remote_audio(
+                workspace, old["task_id"], _wave_bytes(), claim_token=old["claim_token"]
+            )
+        elif operation == "fail":
+            fail_remote_audio(
+                workspace, old["task_id"], "late failure", claim_token=old["claim_token"]
+            )
+        else:
+            release_remote_audio(
+                workspace, old["task_id"], "late release", claim_token=old["claim_token"]
+            )
+    task = _task(workspace)
+    assert task.state == "running" and task.attempts == 1 and task.error is None
+    assert not list((workspace.directory / "audio").glob("*.wav"))
+    complete_remote_audio(
+        workspace, current["task_id"], _wave_bytes(), claim_token=current["claim_token"]
+    )
+    assert _task(workspace).state == "completed"
+
+
+def test_completed_upload_retry_is_idempotent_but_different_bytes_are_rejected(
+    workspace: Workspace,
+) -> None:
+    claim = claim_remote_audio()
+    assert claim is not None
+    args = (workspace, claim["task_id"], _wave_bytes())
+    first = complete_remote_audio(*args, claim_token=claim["claim_token"])
+    assert complete_remote_audio(*args, claim_token=claim["claim_token"]) == first
+    with pytest.raises(LookupError):
+        complete_remote_audio(
+            workspace, claim["task_id"], b"changed", claim_token=claim["claim_token"]
+        )
+    assert (workspace.directory / first).read_bytes() == _wave_bytes()
+
+
+def test_parallel_remote_claims_do_not_claim_one_task_twice(workspace: Workspace) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(lambda _: claim_remote_audio(), range(2)))
+    assert sum(claim is not None for claim in claims) == 1
+    assert _task(workspace).attempts == 1
+
+
+@pytest.mark.parametrize("lease", [0.0, -1.0, float("nan"), float("inf")])
+def test_invalid_lease_does_not_claim_work(workspace: Workspace, lease: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        claim_remote_audio(lease)
+    assert _task(workspace).state == "pending"
+
+
+def test_truncated_wave_does_not_complete_or_publish(workspace: Workspace) -> None:
+    claim = claim_remote_audio()
+    assert claim is not None
+    with pytest.raises(ValueError, match="truncated WAV"):
+        complete_remote_audio(
+            workspace, claim["task_id"], _wave_bytes()[:-10], claim_token=claim["claim_token"]
+        )
+    assert _task(workspace).state == "running"
+    assert not list((workspace.directory / "audio").glob("*.wav"))
+
+
+def test_remote_synthesis_timeout_fits_inside_lease() -> None:
+    from server.remote_tts import DEFAULT_LEASE_MINUTES
+    from server.remote_tts_worker import SSH_TIMEOUT_SECONDS, SYNTHESIS_TIMEOUT_SECONDS
+
+    assert SYNTHESIS_TIMEOUT_SECONDS + 2 * SSH_TIMEOUT_SECONDS < DEFAULT_LEASE_MINUTES * 60
+
+
+def test_uncertain_upload_never_reports_a_synthesis_failure(workspace: Workspace) -> None:
+    from server.remote_tts_worker import RemoteUnavailable, Worker
+
+    claim = claim_remote_audio()
+    assert claim is not None
+    commands: list[list[str]] = []
+
+    class LostReceiptRemote:
+        def run(self, arguments: list[str], *, stdin: bytes | None = None) -> Any:
+            commands.append(arguments)
+            if arguments == ["tts", "claim"]:
+                return claim
+            assert "complete" in arguments and stdin is not None
+            complete_remote_audio(
+                workspace, claim["task_id"], stdin, claim_token=claim["claim_token"]
+            )
+            raise RemoteUnavailable("response lost after commit")
+
+    class FakeProvider:
+        def generate(self, request: Any) -> dict[str, Any]:
+            Path(request.output_path).write_bytes(_wave_bytes())
+            return {"ok": True}
+
+    with pytest.raises(RemoteUnavailable):
+        Worker(LostReceiptRemote(), FakeProvider()).step()  # type: ignore[arg-type]
+    assert len(commands) == 2 and _task(workspace).state == "completed"
+    assert claim_remote_audio() is None

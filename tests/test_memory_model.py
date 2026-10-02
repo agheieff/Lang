@@ -72,3 +72,55 @@ def test_frequency_prior_is_centered_on_the_frontier() -> None:
 def test_memory_policy_rejects_invalid_configuration(overrides: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         MemoryPolicy(**overrides)  # type: ignore[arg-type]
+
+
+# Independent vectors evaluated from the published FSRS-4.5 equations, not this module:
+# https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm#fsrs-45
+# Full reviews only; Lang's partial reading evidence and frequency priors are adaptations.
+def test_fsrs_45_reference_review_sequence() -> None:
+    state = review(None, GOOD, T0)
+    vectors = [
+        (4, GOOD, 5.1618, 14.808100506496405),
+        (14, GOOD, 5.1618, 38.71663295271267),
+        (34, AGAIN, 6.901155, 4.655352765433932),
+        (37, GOOD, 6.847234995, 10.573036466027194),
+    ]
+    for day, grade, difficulty, stability in vectors:
+        state = review(state, grade, T0 + timedelta(days=day))
+        assert state.difficulty == pytest.approx(difficulty, rel=1e-12)
+        assert state.stability_days == pytest.approx(stability, rel=1e-12)
+        assert state.last_review_at == T0 + timedelta(days=day)
+
+
+@pytest.mark.parametrize("stability", [0.05, 1.0, 37.0, 3650.0])
+@pytest.mark.parametrize("retention", [0.5, 0.8, 0.9, 0.99, 1.0])
+def test_scheduled_interval_reaches_requested_recall(stability: float, retention: float) -> None:
+    assert retrievability(stability, interval_days(stability, retention)) == pytest.approx(
+        retention
+    )
+
+
+@pytest.mark.parametrize("retention", [0.0, -0.1, 1.01, float("nan"), float("inf")])
+def test_invalid_retention_is_rejected(retention: float) -> None:
+    with pytest.raises(ValueError, match="retention"):
+        interval_days(1.0, retention)
+
+
+@pytest.mark.parametrize("stability", [0.0, -1.0, float("nan"), float("inf")])
+def test_invalid_scheduling_stability_is_rejected(stability: float) -> None:
+    with pytest.raises(ValueError, match="stability"):
+        interval_days(stability)
+
+
+@pytest.mark.parametrize(
+    "name", ["horizon_days", "prior_slope", "minimum_stability_days", "maximum_stability_days"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_memory_policy_rejects_nonfinite_values(name: str, value: float) -> None:
+    with pytest.raises(ValueError):
+        MemoryPolicy(**{name: value})  # type: ignore[arg-type]
+
+
+def test_memory_policy_rejects_nonfinite_weights() -> None:
+    with pytest.raises(ValueError, match="finite weights"):
+        MemoryPolicy(weights=(float("nan"), *FSRS_DEFAULT_WEIGHTS[1:]))
