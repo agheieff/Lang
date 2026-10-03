@@ -451,7 +451,7 @@ def load_callback() -> GenerationCallback:
         DEFAULT_CALLBACK_TIMEOUT_SECONDS,
         maximum=3600,
     )
-    adapter = os.getenv("ARC_LANG_AGENT_CALLBACK", "codex")
+    adapter = os.getenv("ARC_LANG_AGENT_CALLBACK", "llm")
     if adapter == "llm":
         return LlmCallback(timeout, role=os.getenv("ARC_LANG_AGENT_ROLE", "lang-generate"))
     if adapter == "codex":

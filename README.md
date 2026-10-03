@@ -508,8 +508,9 @@ Codex environment variables are emergency overrides only. For either setting, th
 `ARC_LANG_CODEX_COMPLETE_*` remains its most-specific compatibility override, followed by
 `ARC_LANG_CODEX_PROSE_*`, the global override, and the tracked prose route.
 
-For a host with the shared LLM adapter, set `ARC_LANG_AGENT_CALLBACK=llm` and
-`ARC_LANG_AGENT_ROLE=lang-generate`. The role selects its model, harness and account; Lang sends the
+Workers default to the shared LLM adapter (`ARC_LANG_AGENT_CALLBACK=llm`) and
+`ARC_LANG_AGENT_ROLE=lang-generate`, including manually started workers. The role selects its model,
+harness and account; Lang sends the
 same schema-bound read-only stage request. `ARC_LANG_ADMISSION_COMMAND` may name a host admission
 command: only exit 0 permits a claim or preference callback, and errors/timeouts defer. Observations
 are cached for at most 60 seconds. This replaces the obsolete `ARC_LANG_DEFER_COMMAND` integration.
@@ -520,6 +521,10 @@ pending with a 60-second retry delay. Already validated stage artifacts survive.
 in the task payload discounts confirmed waits from the draft-attempt cap. Ordinary errors and
 timeouts still consume that cap; availability never authorizes retrying an uncertain tool effect.
 Preference updates also retain their pending input when the role is unavailable.
+
+Hosts without the shared adapter can explicitly select `ARC_LANG_AGENT_CALLBACK=codex` to use
+the tracked Codex task routes above. An unavailable shared adapter never silently falls back to
+another account or model.
 
 For another local agent, set `ARC_LANG_AGENT_CALLBACK=command` and
 `ARC_LANG_AGENT_COMMAND='agent-command --flags'`. The command is executed as an argv list without a
@@ -582,7 +587,7 @@ contract without a content plan.
 
 Relevant runtime settings are `ARC_LANG_QUEUE_TARGET` (1-10, default 3),
 `ARC_LANG_AGENT_MAINTENANCE_SECONDS` (1-3600, default 30),
-`ARC_LANG_AGENT_TIMEOUT_SECONDS` (default 600), and `ARC_LANG_AGENT_CALLBACK` (`codex`, `llm` or
+`ARC_LANG_AGENT_TIMEOUT_SECONDS` (default 600), and `ARC_LANG_AGENT_CALLBACK` (`llm` by default, `codex` or
 `command`). Codex model and effort defaults come from the tracked task routes above; the
 `ARC_LANG_CODEX_*` forms are optional emergency overrides, not defaults.
 

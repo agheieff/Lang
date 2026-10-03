@@ -43,6 +43,7 @@ from server.agent_worker import (
     _stage_request,
     _strict_output_schema,
     _validate_generated_lesson_quality,
+    load_callback,
     process_generation_task,
 )
 from server.clock import utc_now
@@ -1004,6 +1005,36 @@ def test_codex_callback_routes_all_task_models_and_efforts_from_one_snapshot(
         assert call["env"]["ARC_LANG_CALLBACK_STAGE"] == stage
         payload = json.loads(_canonical_request(requests[stage]))
         assert {"provider", "model", "reasoning_effort"}.isdisjoint(_nested_object_keys(payload))
+
+
+@pytest.mark.parametrize("adapter", [None, "llm"])
+def test_worker_defaults_to_shared_role_callback(
+    monkeypatch: pytest.MonkeyPatch, adapter: str | None
+) -> None:
+    monkeypatch.delenv("ARC_LANG_AGENT_CALLBACK", raising=False)
+    monkeypatch.delenv("ARC_LANG_AGENT_ROLE", raising=False)
+    if adapter is not None:
+        monkeypatch.setenv("ARC_LANG_AGENT_CALLBACK", adapter)
+    callback = load_callback()
+    assert isinstance(callback, LlmCallback)
+    assert callback.role == "lang-generate"
+
+
+def test_worker_default_callback_honors_role_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ARC_LANG_AGENT_CALLBACK", raising=False)
+    monkeypatch.setenv("ARC_LANG_AGENT_ROLE", "test-role")
+    callback = load_callback()
+    assert isinstance(callback, LlmCallback)
+    assert callback.role == "test-role"
+
+
+def test_worker_preserves_explicit_codex_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ARC_LANG_AGENT_CALLBACK", "codex")
+    assert isinstance(load_callback(), CodexCallback)
 
 
 def test_llm_callback_routes_through_the_shared_adapter_read_only(
